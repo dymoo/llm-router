@@ -1,0 +1,866 @@
+import { Effect, Schema } from "effect";
+import {
+  CatalogueInvalid,
+  EmptyAllowlist,
+  ImpossibleLimits,
+  UnsupportedCapabilities,
+  type FeasibilityError,
+} from "./errors.ts";
+
+export const Probability = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }));
+export type Probability = typeof Probability.Type;
+
+export const TaskKind = Schema.Literals([
+  "chat",
+  "coding",
+  "math",
+  "analysis",
+  "writing",
+  "extraction",
+]);
+export type TaskKind = typeof TaskKind.Type;
+
+export const Difficulty = Schema.Literals(["easy", "moderate", "hard"]);
+export type Difficulty = typeof Difficulty.Type;
+
+export const AssessedEffort = Schema.Literals(["low", "medium", "high", "xhigh"]);
+export type AssessedEffort = typeof AssessedEffort.Type;
+
+export const RequestedEffort = Schema.Literals(["none", "low", "medium", "high", "xhigh"]);
+export type RequestedEffort = typeof RequestedEffort.Type;
+
+export const AppliedEffort = Schema.Literals(["none", "low", "medium", "high", "xhigh", "on"]);
+export type AppliedEffort = typeof AppliedEffort.Type;
+
+export const ExpectedLength = Schema.Literals(["short", "medium", "long"]);
+export type ExpectedLength = typeof ExpectedLength.Type;
+
+export const Priority = Schema.Literals(["high", "medium", "low"]);
+export type Priority = typeof Priority.Type;
+
+export const Location = Schema.Literals(["local", "cloud"]);
+export type Location = typeof Location.Type;
+
+export const Transport = Schema.Literals([
+  "llamacpp",
+  "openai-compatible",
+  "openrouter",
+  "halogen",
+]);
+export type Transport = typeof Transport.Type;
+
+export const SessionBoundary = Schema.Literals(["new-task", "continue", "checkpoint"]);
+export type SessionBoundary = typeof SessionBoundary.Type;
+
+export const ClassifierMode = Schema.Literals(["laya", "jev"]);
+export type ClassifierMode = typeof ClassifierMode.Type;
+
+export const ClassifierSource = Schema.Literals(["full-input", "caller-brief"]);
+export type ClassifierSource = typeof ClassifierSource.Type;
+
+export const ClassificationReuse = Schema.Literals(["classified", "exact-cache", "session"]);
+export type ClassificationReuse = typeof ClassificationReuse.Type;
+
+export const ReasoningKind = Schema.Literals(["none", "binary", "mandatory", "graded", "budget"]);
+export type ReasoningKind = typeof ReasoningKind.Type;
+
+export const RequestOutcome = Schema.Literals(["success", "error", "cancelled", "incomplete"]);
+export type RequestOutcome = typeof RequestOutcome.Type;
+
+export const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh"] as const;
+
+export const VISIBLE_OUTPUT_TOKENS = {
+  short: 256,
+  medium: 1024,
+  long: 3072,
+} as const;
+
+export const TOKEN_ESTIMATE_PER_MESSAGE_OVERHEAD = 32;
+export const TOKEN_ESTIMATE_RESERVE = 1024;
+export const CLASSIFIER_BRIEF_MAX_CHARS = 24_000;
+export const CLASSIFIER_ATTEMPT_TIMEOUT_MS = 1_200;
+export const CLASSIFIER_MAX_RETRIES = 1;
+export const CLASSIFIER_TOTAL_TIMEOUT_MS = 2_500;
+/** Documented Jev total budget for state + all questions. Not a tokenizer measurement. */
+export const JEV_TOTAL_TOKEN_LIMIT = 64_000;
+/** Documented Jev budget for state + the longest single question. Not a tokenizer measurement. */
+export const JEV_STATE_PLUS_LONGEST_QUESTION_LIMIT = 32_000;
+export const JEV_MODEL_ID = "jev-1.13.0";
+export const FRESH_FACTS_RETRIEVAL_THRESHOLD = 0.8;
+export const LOCAL_SUFFICIENCY_THRESHOLD = 0.8;
+export const MAX_CAPACITY_WAIT_MS = 30_000;
+export const ASSESSMENT_QUESTION_SCHEMA_VERSION = "dymoo-assessment-questions/v1";
+export const CLASSIFICATION_CACHE_TTL_MS = 120_000;
+export const CLASSIFICATION_CACHE_MAX_ENTRIES = 2_048;
+
+export const API_KEY_TOKEN_PREFIX = "jrv_";
+export const API_KEY_SELECTOR_HEX_LENGTH = 24;
+export const API_KEY_SECRET_LENGTH = 43;
+/** Fresh dymoo/llm-router HMAC domain. Not compatible with unpublished v0.3 peppers or databases. */
+export const API_KEY_HMAC_DOMAIN = "dymoo-llm-router/api-key/v1";
+export const CONTROL_PLANE_SCHEMA_IDENTITY = "dymoo-llm-router-control-plane";
+
+const nonEmptyRecord = Schema.makeFilter<Readonly<Record<string, unknown>>>(
+  (value) => Object.keys(value).length > 0 || "Expected at least one entry",
+);
+
+const positiveBias = Schema.makeFilter<{
+  readonly cost: number;
+  readonly quality: number;
+  readonly latency: number;
+}>(
+  (bias) =>
+    bias.cost > 0 || bias.quality > 0 || bias.latency > 0 || "At least one bias must be positive",
+);
+
+const Bias = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }));
+
+/** 0 = cloud-first. 1 = local until verified runtime saturation. */
+export const LOCALITY_CLOUD_FIRST_MAX = 0.05;
+export const LOCALITY_COMPLEXITY_CLOUD_MAX = 0.5;
+export const LOCALITY_SATURATION_MIN = 0.95;
+
+export const explainLocalityBias = (value: number): string => {
+  if (value <= LOCALITY_CLOUD_FIRST_MAX) {
+    return "Cloud-first. Local stays eligible when it satisfies hard limits; this is a preference, not a percentage guarantee.";
+  }
+  if (value >= LOCALITY_SATURATION_MIN) {
+    return "Stay local until verified runtime saturation. Gateway slot counts and unknown telemetry are not saturation.";
+  }
+  if (value < LOCALITY_COMPLEXITY_CLOUD_MAX) {
+    return "Lean cloud while keeping local eligible. Highly complex work may use cloud. Preference, not a chance guarantee.";
+  }
+  return "Prefer local. Highly complex tasks or verified saturation may use cloud. Preference, not a chance guarantee.";
+};
+
+export const KeyPolicy = Schema.Struct({
+  priority: Priority,
+  localityBias: Bias,
+  contextLimitTokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  maxCompletionTokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  allowedModels: Schema.NullOr(Schema.Array(Schema.String)),
+  requestsPerMinute: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  maxConcurrent: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  maxWaitMs: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_CAPACITY_WAIT_MS })),
+  maxEstimatedUsd: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  bias: Schema.Struct({
+    cost: Bias,
+    quality: Bias,
+    latency: Bias,
+  }).check(positiveBias),
+});
+export type KeyPolicy = typeof KeyPolicy.Type;
+
+export const POLICY_SUGGESTIONS = {
+  Balanced: {
+    priority: "medium",
+    localityBias: 0.65,
+    contextLimitTokens: 65_536,
+    maxCompletionTokens: 8_192,
+    allowedModels: null,
+    requestsPerMinute: 60,
+    maxConcurrent: 2,
+    maxWaitMs: 0,
+    maxEstimatedUsd: null,
+    bias: { cost: 0.7, quality: 0.5, latency: 0.3 },
+  },
+  Dylan: {
+    priority: "high",
+    localityBias: 0.15,
+    contextLimitTokens: 131_072,
+    maxCompletionTokens: 16_384,
+    allowedModels: null,
+    requestsPerMinute: 120,
+    maxConcurrent: 4,
+    maxWaitMs: 0,
+    maxEstimatedUsd: null,
+    bias: { cost: 0.2, quality: 0.9, latency: 0.3 },
+  },
+  "Free Vibecode": {
+    priority: "low",
+    localityBias: 0.95,
+    contextLimitTokens: 32_768,
+    maxCompletionTokens: 4_096,
+    allowedModels: null,
+    requestsPerMinute: 30,
+    maxConcurrent: 1,
+    maxWaitMs: 5_000,
+    maxEstimatedUsd: null,
+    bias: { cost: 1, quality: 0.3, latency: 0.05 },
+  },
+} as const satisfies Record<string, KeyPolicy>;
+export type PolicySuggestionName = keyof typeof POLICY_SUGGESTIONS;
+
+export const KEY_POLICY_EDITABLE_FIELDS = [
+  "priority",
+  "localityBias",
+  "contextLimitTokens",
+  "maxCompletionTokens",
+  "allowedModels",
+  "requestsPerMinute",
+  "maxConcurrent",
+  "maxWaitMs",
+  "maxEstimatedUsd",
+  "bias",
+] as const;
+export type KeyPolicyEditableField = (typeof KEY_POLICY_EDITABLE_FIELDS)[number];
+
+export const EstimateProvenance = Schema.Struct({
+  unit: Schema.NonEmptyString,
+  source: Schema.NonEmptyString,
+  asOf: Schema.NullOr(Schema.String),
+});
+export type EstimateProvenance = typeof EstimateProvenance.Type;
+
+export const Capabilities = Schema.Struct({
+  tools: Schema.Boolean,
+  json: Schema.Boolean,
+  vision: Schema.Boolean,
+});
+export type Capabilities = typeof Capabilities.Type;
+
+export const Capacity = Schema.Struct({
+  maxParallel: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  reservedInteractiveSlots: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type Capacity = typeof Capacity.Type;
+
+export const Quality = Schema.Struct({
+  chat: Probability,
+  coding: Probability,
+  math: Probability,
+  analysis: Probability,
+  writing: Probability,
+  extraction: Probability,
+  provenance: EstimateProvenance,
+});
+export type Quality = typeof Quality.Type;
+
+export const Prices = Schema.Struct({
+  inputUsdPerMillion: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  cachedInputUsdPerMillion: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  outputUsdPerMillion: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  provenance: EstimateProvenance,
+});
+export type Prices = typeof Prices.Type;
+
+export const Latency = Schema.Struct({
+  initialMs: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  tokensPerSecond: Schema.Finite.check(Schema.isGreaterThan(0)),
+  provenance: EstimateProvenance,
+});
+export type Latency = typeof Latency.Type;
+
+const reasoningShape = Schema.makeFilter<{
+  readonly kind: ReasoningKind;
+  readonly levels?: ReadonlyArray<RequestedEffort>;
+  readonly maxThinkingTokens?: number;
+}>((reasoning) => {
+  if (
+    reasoning.kind === "graded" &&
+    (reasoning.levels === undefined || reasoning.levels.length === 0)
+  ) {
+    return "graded reasoning requires levels";
+  }
+  if (reasoning.kind === "budget" && reasoning.maxThinkingTokens === undefined) {
+    return "budget reasoning requires maxThinkingTokens";
+  }
+  return true;
+});
+
+export const Reasoning = Schema.Struct({
+  kind: ReasoningKind,
+  levels: Schema.optional(Schema.Array(RequestedEffort)),
+  maxThinkingTokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+}).check(reasoningShape);
+export type Reasoning = typeof Reasoning.Type;
+
+export const ReasoningTokenEstimates = Schema.Struct({
+  none: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  low: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  medium: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  high: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  xhigh: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type ReasoningTokenEstimates = typeof ReasoningTokenEstimates.Type;
+
+export const Deployment = Schema.Struct({
+  id: Schema.NonEmptyString,
+  modelId: Schema.NonEmptyString,
+  endpoint: Schema.NonEmptyString,
+  location: Location,
+  transport: Transport,
+  credentialEnvVar: Schema.NullOr(Schema.NonEmptyString),
+  providerRestriction: Schema.NullOr(Schema.NonEmptyString),
+  contextLimitTokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  maxOutputTokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  capabilities: Capabilities,
+  capacity: Capacity,
+  quality: Quality,
+  prices: Prices,
+  latency: Latency,
+  reasoning: Reasoning,
+  reasoningTokenEstimates: ReasoningTokenEstimates,
+});
+export type Deployment = typeof Deployment.Type;
+
+export const Catalogue = Schema.Array(Deployment).check(
+  Schema.makeFilter<ReadonlyArray<Deployment>>(
+    (deployments) => deployments.length > 0 || "Catalogue must contain at least one deployment",
+  ),
+);
+export type Catalogue = typeof Catalogue.Type;
+
+/** Confidence is output-distribution concentration, not calibrated task-success probability. */
+export const Assessment = Schema.Struct({
+  task: TaskKind,
+  difficulty: Schema.Struct({
+    value: Difficulty,
+    confidence: Probability,
+  }),
+  effort: Schema.Struct({
+    value: AssessedEffort,
+    confidence: Probability,
+  }),
+  trivialChat: Probability,
+  localSufficiency: Probability,
+  freshFacts: Probability,
+  expectedLength: ExpectedLength,
+});
+export type Assessment = typeof Assessment.Type;
+
+export const SessionPin = Schema.Struct({
+  deploymentId: Schema.NonEmptyString,
+  requestedEffort: RequestedEffort,
+  appliedEffort: AppliedEffort,
+  continuityKey: Schema.NonEmptyString,
+  assessment: Assessment,
+  createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type SessionPin = typeof SessionPin.Type;
+
+export const Reservation = Schema.Struct({
+  requestId: Schema.NonEmptyString,
+  deploymentId: Schema.NonEmptyString,
+  sessionId: Schema.NonEmptyString,
+  requestedEffort: RequestedEffort,
+  appliedEffort: AppliedEffort,
+});
+export type Reservation = typeof Reservation.Type;
+
+export const ApiKeyPublic = Schema.Struct({
+  id: Schema.NonEmptyString,
+  prefix: Schema.NonEmptyString,
+  name: Schema.String,
+  policy: KeyPolicy,
+  createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  expiresAt: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  revokedAt: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  lastUsedAt: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  version: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+});
+export type ApiKeyPublic = typeof ApiKeyPublic.Type;
+
+export const Entry = Schema.Union([
+  Schema.String,
+  Schema.JsonObject,
+  Schema.Array(Schema.Json),
+  Schema.Null,
+]);
+export type Entry = typeof Entry.Type;
+
+export const ChoiceQuestion = Schema.Struct({
+  type: Schema.Literal("choice"),
+  instructions: Schema.optional(Entry),
+  criteria: Schema.Record(Schema.String, Entry).check(nonEmptyRecord),
+});
+export type ChoiceQuestion = typeof ChoiceQuestion.Type;
+
+export const NoulQuestion = Schema.Struct({
+  type: Schema.Literal("noul"),
+  instructions: Schema.optional(Entry),
+  criteria: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        true: Schema.optional(Entry),
+        false: Schema.optional(Entry),
+      }),
+    ),
+  ),
+});
+export type NoulQuestion = typeof NoulQuestion.Type;
+
+export const ScoreQuestion = Schema.Struct({
+  type: Schema.Literal("score"),
+  instructions: Schema.optional(Entry),
+  criteria: Schema.TupleWithRest(Schema.Tuple([Entry, Entry]), [Entry]),
+});
+export type ScoreQuestion = typeof ScoreQuestion.Type;
+
+export const Question = Schema.Union([ChoiceQuestion, NoulQuestion, ScoreQuestion]);
+export type Question = typeof Question.Type;
+
+export const ClassifierState = Schema.Union([
+  Schema.String,
+  Schema.JsonObject,
+  Schema.Array(Schema.Json),
+]);
+export type ClassifierState = typeof ClassifierState.Type;
+
+export const ClassifierRequest = Schema.Struct({
+  state: ClassifierState,
+  questions: Schema.Record(Schema.String, Question).check(nonEmptyRecord),
+});
+export type ClassifierRequest = typeof ClassifierRequest.Type;
+
+export const NoulAnswer = Schema.Struct({
+  type: Schema.Literal("noul"),
+  noul: Probability,
+});
+export type NoulAnswer = typeof NoulAnswer.Type;
+
+export const ChoiceAnswer = Schema.Struct({
+  type: Schema.Literal("choice"),
+  choice: Schema.String,
+  confidence: Probability,
+  probabilities: Schema.Record(Schema.String, Probability),
+});
+export type ChoiceAnswer = typeof ChoiceAnswer.Type;
+
+export const ScoreAnswer = Schema.Struct({
+  type: Schema.Literal("score"),
+  score: Schema.Finite,
+  confidence: Probability,
+  legend: Schema.Record(Schema.String, Entry),
+  probabilities: Schema.Record(Schema.String, Probability),
+});
+export type ScoreAnswer = typeof ScoreAnswer.Type;
+
+export const ClassifierAnswer = Schema.Union([NoulAnswer, ChoiceAnswer, ScoreAnswer]);
+export type ClassifierAnswer = typeof ClassifierAnswer.Type;
+
+export const UnknownCount = Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)));
+export type UnknownCount = typeof UnknownCount.Type;
+
+export const UnknownUsd = Schema.NullOr(Schema.Finite);
+export type UnknownUsd = typeof UnknownUsd.Type;
+
+export const ClassifierUsage = Schema.Struct({
+  input_tokens: UnknownCount,
+  output_tokens: UnknownCount,
+});
+export type ClassifierUsage = typeof ClassifierUsage.Type;
+
+export const LayaResponse = Schema.Struct({
+  answers: Schema.Record(Schema.String, ClassifierAnswer).check(nonEmptyRecord),
+  usage: Schema.Struct({
+    input_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+    output_tokens: Schema.Literal(0),
+  }),
+  backend: Schema.String,
+});
+export type LayaResponse = typeof LayaResponse.Type;
+
+export const LayaHealth = Schema.Struct({
+  ok: Schema.Boolean,
+  ready: Schema.Boolean,
+  backend: Schema.optional(Schema.String),
+  model_id: Schema.optional(Schema.String),
+  model_revision: Schema.NonEmptyString,
+  max_len: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  head_budget: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  head_max_len: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  rss_mb: Schema.optional(Schema.Finite),
+  oom: Schema.optional(Schema.Boolean),
+  one_model: Schema.optional(Schema.Boolean),
+});
+export type LayaHealth = typeof LayaHealth.Type;
+
+export const LayaBudget = Schema.Struct({
+  input_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  max_len: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  head_budget: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  fits: Schema.Boolean,
+  worst_state_budget: Schema.optional(Schema.Int),
+});
+export type LayaBudget = typeof LayaBudget.Type;
+
+export const LocalDeploymentBrief = Schema.Struct({
+  id: Schema.NonEmptyString,
+  modelId: Schema.NonEmptyString,
+  contextLimitTokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  quality: Schema.Struct({
+    chat: Probability,
+    coding: Probability,
+    math: Probability,
+    analysis: Probability,
+    writing: Probability,
+    extraction: Probability,
+  }),
+});
+export type LocalDeploymentBrief = typeof LocalDeploymentBrief.Type;
+
+export const ClassifierInputMeta = Schema.Struct({
+  fullPromptTokenEstimate: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  toolCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  turnCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  pendingToolCalls: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type ClassifierInputMeta = typeof ClassifierInputMeta.Type;
+
+export const ClassifyInput = Schema.Struct({
+  state: ClassifierState,
+  localDeployments: Schema.Array(LocalDeploymentBrief),
+  keyId: Schema.NonEmptyString,
+  catalogueVersion: Schema.NonEmptyString,
+  source: ClassifierSource,
+  meta: Schema.optional(ClassifierInputMeta),
+});
+export type ClassifyInput = typeof ClassifyInput.Type;
+
+export const ClassifiedAssessment = Schema.Struct({
+  assessment: Assessment,
+  backend: ClassifierMode,
+  modelRevision: Schema.NullOr(Schema.String),
+  usage: ClassifierUsage,
+  elapsedMs: UnknownCount,
+  cacheHit: Schema.Boolean,
+  reuse: Schema.Literals(["classified", "exact-cache"]),
+  source: ClassifierSource,
+});
+export type ClassifiedAssessment = typeof ClassifiedAssessment.Type;
+
+export const RequestAccounting = Schema.Struct({
+  classifierBackend: Schema.NullOr(ClassifierMode),
+  modelRevision: Schema.NullOr(Schema.String),
+  source: Schema.NullOr(ClassifierSource),
+  classifierInputTokens: UnknownCount,
+  classifierElapsedMs: UnknownCount,
+  reuse: ClassificationReuse,
+  promptTokens: UnknownCount,
+  completionTokens: UnknownCount,
+  reasoningTokens: UnknownCount,
+  cachedInputTokens: UnknownCount,
+  ttftMs: UnknownCount,
+  generationElapsedMs: UnknownCount,
+  decodeTokensPerSecond: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  providerReportedUsd: UnknownUsd,
+  estimatedCostUsd: UnknownUsd,
+  estimatedCacheSavingsUsd: UnknownUsd,
+  localComputeEstimatedUsd: UnknownUsd,
+  costSource: Schema.optional(
+    Schema.NullOr(Schema.Literals(["provider-reported", "local-rate-card", "estimated"])),
+  ),
+  priceVersion: Schema.NullOr(Schema.String),
+  trajectoryHash: Schema.NullOr(Schema.String),
+  errorCode: Schema.NullOr(Schema.String),
+});
+export type RequestAccounting = typeof RequestAccounting.Type;
+
+export const CostSource = Schema.Literals(["provider-reported", "local-rate-card", "estimated"]);
+export type CostSource = typeof CostSource.Type;
+
+/** Internal normalized accounting; the adapter shapes the OpenRouter-compatible wire usage. */
+export const GenerationUsage = Schema.Struct({
+  prompt_tokens: UnknownCount,
+  completion_tokens: UnknownCount,
+  total_tokens: UnknownCount,
+  cached_tokens: UnknownCount,
+  reasoning_tokens: UnknownCount,
+  cost: UnknownUsd,
+  cost_source: Schema.NullOr(CostSource),
+});
+export type GenerationUsage = typeof GenerationUsage.Type;
+
+export const SelectionCode = Schema.Literals([
+  "pinned",
+  "local-preference",
+  "cloud-quality",
+  "complexity-escalation",
+  "local-saturation",
+  "queue-admitted",
+  "highest-quality",
+  "no-eligible",
+  "failed-precheck",
+]);
+export type SelectionCode = typeof SelectionCode.Type;
+
+export const SelectionReason = Schema.Struct({
+  code: SelectionCode,
+  detail: Schema.String,
+});
+export type SelectionReason = typeof SelectionReason.Type;
+
+export const ExclusionCode = Schema.Literals([
+  "allowlist",
+  "capability",
+  "context",
+  "cost",
+  "health",
+  "placeholder",
+  "saturation",
+  "quality",
+  "affinity",
+]);
+export type ExclusionCode = typeof ExclusionCode.Type;
+
+export const CandidateExclusion = Schema.Struct({
+  deploymentId: Schema.NonEmptyString,
+  code: ExclusionCode,
+  detail: Schema.String,
+});
+export type CandidateExclusion = typeof CandidateExclusion.Type;
+
+/** Metadata-only request drilldown. Never includes prompts, completions, reasoning text, or raw keys. */
+export const AnalyticsRequestRow = Schema.Struct({
+  requestId: Schema.NonEmptyString,
+  keyId: Schema.NonEmptyString,
+  createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  priority: Priority,
+  localityBias: Probability,
+  keyPolicyVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
+  deploymentId: Schema.NullOr(Schema.String),
+  location: Schema.NullOr(Location),
+  transport: Schema.NullOr(Transport),
+  boundary: Schema.NullOr(SessionBoundary),
+  assessmentTask: Schema.NullOr(TaskKind),
+  assessmentDifficulty: Schema.NullOr(Difficulty),
+  assessmentEffort: Schema.NullOr(AssessedEffort),
+  selectionReason: Schema.NullOr(SelectionReason),
+  exclusions: Schema.Array(CandidateExclusion),
+  queueWaitMs: UnknownCount,
+  decodeTokensPerSecond: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  saturation: Schema.Boolean,
+  httpOutcome: RequestOutcome,
+  /** Always null until an explicit future opt-in evaluator. HTTP success is not task success. */
+  taskSuccess: Schema.Null,
+  accounting: RequestAccounting,
+});
+export type AnalyticsRequestRow = typeof AnalyticsRequestRow.Type;
+
+export const AnalyticsBucket = Schema.Struct({
+  startMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  endMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  requests: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  httpSuccess: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  errors: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  cancelled: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  saturation: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  localRequests: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  cloudRequests: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  classifierExactCacheHits: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  sessionReuse: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  classifiedFresh: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  classifierInputTokens: UnknownCount,
+  classifierEstimatedUsd: UnknownUsd,
+  promptTokens: UnknownCount,
+  completionTokens: UnknownCount,
+  reasoningTokens: UnknownCount,
+  cacheObservedRequests: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  cacheHitRequests: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  cachedInputTokens: UnknownCount,
+  providerReportedUsd: UnknownUsd,
+  estimatedCostUsd: UnknownUsd,
+  localComputeEstimatedUsd: UnknownUsd,
+  estimatedCacheSavingsUsd: UnknownUsd,
+  unknownCostCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  unknownUsageCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  p50QueueWaitMs: UnknownCount,
+  p50TtftMs: UnknownCount,
+  p50GenerationElapsedMs: UnknownCount,
+  p50DecodeTokensPerSecond: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  p95QueueWaitMs: UnknownCount,
+  p95TtftMs: UnknownCount,
+  p95GenerationElapsedMs: UnknownCount,
+  p95DecodeTokensPerSecond: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+});
+export type AnalyticsBucket = typeof AnalyticsBucket.Type;
+
+export const AnalyticsSnapshot = Schema.Struct({
+  window: AnalyticsBucket,
+  series: Schema.Array(AnalyticsBucket),
+  bucketMs: Schema.Int.check(Schema.isGreaterThan(0)),
+  byKeyId: Schema.Record(Schema.String, AnalyticsBucket),
+  byPriority: Schema.Struct({
+    high: AnalyticsBucket,
+    medium: AnalyticsBucket,
+    low: AnalyticsBucket,
+  }),
+  byDeploymentId: Schema.Record(Schema.String, AnalyticsBucket),
+  byTask: Schema.Record(Schema.String, AnalyticsBucket),
+  byDifficulty: Schema.Record(Schema.String, AnalyticsBucket),
+  byEffort: Schema.Record(Schema.String, AnalyticsBucket),
+  bySelectionCode: Schema.Record(Schema.String, AnalyticsBucket),
+  exclusions: Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  errors: Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+});
+export type AnalyticsSnapshot = typeof AnalyticsSnapshot.Type;
+
+export const decodeKeyPolicy = Schema.decodeUnknownEffect(KeyPolicy);
+export const decodeDeployment = Schema.decodeUnknownEffect(Deployment);
+export const decodeCatalogue = Schema.decodeUnknownEffect(Catalogue);
+export const decodeAssessment = Schema.decodeUnknownEffect(Assessment);
+export const decodeClassifierRequest = Schema.decodeUnknownEffect(ClassifierRequest);
+export const decodeLayaResponse = Schema.decodeUnknownEffect(LayaResponse);
+export const decodeLayaHealth = Schema.decodeUnknownEffect(LayaHealth);
+export const decodeLayaBudget = Schema.decodeUnknownEffect(LayaBudget);
+export const decodeRequestAccounting = Schema.decodeUnknownEffect(RequestAccounting);
+export const decodeGenerationUsage = Schema.decodeUnknownEffect(GenerationUsage);
+export const decodeAnalyticsRequestRow = Schema.decodeUnknownEffect(AnalyticsRequestRow);
+export const decodeAnalyticsSnapshot = Schema.decodeUnknownEffect(AnalyticsSnapshot);
+
+export const isPlaceholderValue = (value: string): boolean => value.includes("REPLACE_");
+
+export const deploymentIsPlaceholder = (deployment: Deployment): boolean =>
+  isPlaceholderValue(deployment.modelId) ||
+  isPlaceholderValue(deployment.endpoint) ||
+  (deployment.providerRestriction !== null && isPlaceholderValue(deployment.providerRestriction));
+
+export const catalogueCredentialEnvVars = (catalogue: readonly Deployment[]): readonly string[] => {
+  const names: string[] = [];
+  for (const deployment of catalogue) {
+    if (deployment.credentialEnvVar !== null && !names.includes(deployment.credentialEnvVar)) {
+      names.push(deployment.credentialEnvVar);
+    }
+  }
+  return names;
+};
+
+/** Apply catalogue rate card to observed tokens. Null if any count is unknown. Configured zero rates yield 0. */
+export const applyConfiguredRateCardUsd = (
+  prices: Prices,
+  tokens: {
+    readonly prompt: number | null;
+    readonly cached: number | null;
+    readonly completion: number | null;
+  },
+): number | null => {
+  if (
+    prices.provenance.source === "unknown" ||
+    tokens.prompt === null ||
+    tokens.completion === null
+  ) {
+    return null;
+  }
+  if (tokens.cached === null && prices.inputUsdPerMillion !== prices.cachedInputUsdPerMillion)
+    return null;
+  const cached = tokens.cached ?? 0; // Equal rates make cache status irrelevant to price, not to hit statistics.
+  if (cached > tokens.prompt) return null;
+  const uncachedPrompt = tokens.prompt - cached;
+  return (
+    (uncachedPrompt * prices.inputUsdPerMillion +
+      cached * prices.cachedInputUsdPerMillion +
+      tokens.completion * prices.outputUsdPerMillion) /
+    1_000_000
+  );
+};
+
+export const estimateInputTokens = (serializedUtf8Bytes: number, messageCount: number): number =>
+  serializedUtf8Bytes + TOKEN_ESTIMATE_PER_MESSAGE_OVERHEAD * messageCount + TOKEN_ESTIMATE_RESERVE;
+
+export interface CapabilityNeeds {
+  readonly tools: boolean;
+  readonly json: boolean;
+  readonly vision: boolean;
+}
+
+export interface FeasibilityInput {
+  readonly policy: KeyPolicy;
+  readonly catalogue: readonly Deployment[];
+  readonly estimatedInputTokens: number;
+  readonly requestedCompletionTokens: number;
+  readonly capabilities: CapabilityNeeds;
+}
+
+export const permittedByAllowlist = (
+  policy: KeyPolicy,
+  catalogue: readonly Deployment[],
+): readonly Deployment[] => {
+  if (policy.allowedModels === null) return catalogue;
+  const allowed = new Set(policy.allowedModels);
+  return catalogue.filter((deployment) => allowed.has(deployment.id));
+};
+
+export const checkCatalogueForInference = (
+  catalogue: readonly Deployment[],
+): Effect.Effect<Catalogue, CatalogueInvalid> => {
+  if (catalogue.length === 0) {
+    return Effect.fail(
+      new CatalogueInvalid({ message: "Catalogue must contain at least one deployment" }),
+    );
+  }
+  if (catalogue.some(deploymentIsPlaceholder)) {
+    return Effect.fail(
+      new CatalogueInvalid({
+        message:
+          "Catalogue contains unverified REPLACE_ placeholders and cannot be used for inference",
+      }),
+    );
+  }
+  return Schema.decodeUnknownEffect(Catalogue)(catalogue).pipe(
+    Effect.mapError(() => new CatalogueInvalid({ message: "Catalogue failed runtime validation" })),
+  );
+};
+
+export const checkFeasibility = (
+  input: FeasibilityInput,
+): Effect.Effect<readonly Deployment[], FeasibilityError> => {
+  if (input.policy.allowedModels !== null && input.policy.allowedModels.length === 0) {
+    return Effect.fail(new EmptyAllowlist({ message: "Explicit allowlist is empty" }));
+  }
+
+  const keyContext = input.policy.contextLimitTokens;
+  const keyCompletion = input.policy.maxCompletionTokens;
+  if (
+    input.estimatedInputTokens > keyContext ||
+    input.requestedCompletionTokens > keyCompletion ||
+    input.estimatedInputTokens + input.requestedCompletionTokens > keyContext
+  ) {
+    return Effect.fail(
+      new ImpossibleLimits({
+        message: "Requested context or completion tokens exceed the key policy",
+      }),
+    );
+  }
+
+  const allowed = permittedByAllowlist(input.policy, input.catalogue);
+  const capable = allowed.filter(
+    (deployment) =>
+      (!input.capabilities.tools || deployment.capabilities.tools) &&
+      (!input.capabilities.json || deployment.capabilities.json) &&
+      (!input.capabilities.vision || deployment.capabilities.vision),
+  );
+  if (capable.length === 0) {
+    return Effect.fail(
+      new UnsupportedCapabilities({
+        message:
+          "No permitted deployment supports the requested tools, JSON, or vision capabilities",
+      }),
+    );
+  }
+
+  const fitting = capable.filter(
+    (deployment) =>
+      input.estimatedInputTokens <= deployment.contextLimitTokens &&
+      input.requestedCompletionTokens <= deployment.maxOutputTokens &&
+      input.estimatedInputTokens + input.requestedCompletionTokens <= deployment.contextLimitTokens,
+  );
+  if (fitting.length === 0) {
+    return Effect.fail(
+      new ImpossibleLimits({
+        message: "Requested context or completion tokens exceed every permitted deployment",
+      }),
+    );
+  }
+
+  if (fitting.some(deploymentIsPlaceholder)) {
+    return Effect.fail(
+      new CatalogueInvalid({
+        message:
+          "Catalogue contains unverified REPLACE_ placeholders and cannot be used for inference",
+      }),
+    );
+  }
+
+  return Effect.succeed(fitting);
+};

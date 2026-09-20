@@ -1,0 +1,11 @@
+# CPU serving. NPU inference uses the ONNX Runtime build shipped with
+# AMD Ryzen AI Software 1.8 (VitisAIExecutionProvider). Do not pip-install
+# stock onnxruntime next to that AMD build.
+laya==0.3.4
+numpy>=1.26
+huggingface_hub>=0.24
+safetensors>=0.4
+transformers>=4.44
+torch>=2.4
+onnx>=1.16
+onnxscript>=0.1

@@ -1,0 +1,320 @@
+# Strix Halo Qwen3.8-Flash-Next: concurrency comparison evidence
+
+**Date:** 2026-09-20
+**Scope:** Published comparative evidence only. Companions to `strix-halo-runtimes.md` (identities, pins, installer mechanics) and `docs/research/engram-halo.md` (Engram source of record). No application/deployment edits, no paid inference, no host benchmarks here: this Mac has no gfx1151 device, so every number below is someone else's measurement or claim, quoted with its conditions.
+
+**Evidence tiers used in every table:**
+
+- **M** = measured by the source itself (tool output or served log, protocol stated)
+- **S** = source-claimed (asserted by the project without a stated measurement protocol)
+- **I** = inferred here from published data (always marked with its derivation)
+- **—** = unknown; no published cell exists. Not interpolated, not guessed.
+
+**Workload conditions are part of the number.** Quant, draft policy, temperature, power envelope, kernel cmdline, context depth, and prompt set differ between every pair of rows below; a cell is only comparable when its conditions column says so. No table in this file ranks rows across those differences.
+
+**User-set scope additions (2026-09-20):** (1) the n-gram / per-layer-embedding table residency is its own axis — SSD-offloaded (mmap/lazy), OS-page-cache-warm, or RAM-pinned — and MUST NOT be conflated with KV cache or weight residency; (2) kyuz0/amd-strix-halo-toolboxes is the options catalogue for a later discovery phase when hardware arrives; this file documents options, not winners, and does not claim the toolbox list is exhaustive; (3) no live measurements exist in this file; deliverable is documentation and protocol. Provider (OpenRouter GLM) stays as-is regardless of any credit issue.
+
+---
+
+## Answer (for Main, no decision made here)
+
+1. **Among the sources inspected, Halogen publishes the served multi-stream table** for this model/hardware (1/2/4/8 streams). Its aggregate throughput grows from about 41 to 88 t/s while per-stream speed declines. pwilkin and EngramHalo do not publish matching served n>1 measurements in those sources; EngramHalo's older batched-bench rows are not current-fork served results.
+2. **Fastest single-stream decode claims (this model, this silicon):** EngramHalo config A 39.3 t/s (M, code-heavy, 3.71 bpw IQ3), drluoto Vulkan stack 58 t/s short-code ceiling and 38-49 t/s band (M, Q5K AgenticRequant), Halogen 41.7-49.9 t/s served with MTP at 5.53 bpw (M), pwilkin pin 24-26 t/s tg128 / 6.9 t/s at 150k depth (M, llama-bench + planted-fact). These are **not one race**: different quants (3.71 vs 4.55 vs 4.55-5.53 bpw), different draft policies, different context depths.
+3. **MTP under concurrency is measured on exactly one runtime:** Halogen explicitly disables speculation per stream when >1 stream is generating (batched step instead). On llama.cpp forks the analogous question (`--parallel` × `--spec-type draft-mtp`) is **documented as unvalidated** on pwilkin's pin and explicitly unvalidated on EngramHalo config C, and drluoto's fork numbers are all `np` small/single-stream. So "MTP under concurrency" has no comparative evidence anywhere; it is an on-box measurement task, not a literature answer.
+4. **Warm-prefix / prompt-cache behavior is Halogen's strongest published claim** (~2 s follow-up turn at 100k context, measured over a 20-turn session) and llama.cpp's `-np 3 --ctx-checkpoints 8` LCP-slot affinity (drluoto, TTFT 21-251 s → 0.3-0.5 s). pwilkin's launcher sets neither `--cache-ram` nor multi-slot; that path is unmeasured on the pin.
+5. **On-box comparison arms:** retain the pwilkin pin as control, then test compatible kyuz0/EngramHalo/Halogen configurations under matched conditions. New quant/runtime pairings require explicit load, correctness, memory, and SSD-table compatibility checks. An untested pairing is not a supported production recommendation or a universal impossibility.
+
+---
+
+## Identities (reused, not re-derived)
+
+From `strix-halo-runtimes.md` and `docs/research/engram-halo.md`; repeated here only so the comparison tables are self-contained.
+
+| Runtime | Engine | Weights for Flash-Next | Draft | Native context | Slot model |
+| --- | --- | --- | --- | --- | --- |
+| pwilkin pin | `pwilkin/llama.cpp:strix-halo` @ `b0f31f5876ef3856b55f5bb88072cc96e5effafe` + `pwilkin/rocm-systems:ilintar-experiments` @ `7dda3ac…` | `ilintar/qwen3.8-flash-next-gguf-strix-halo` IQ4_NL PROJFIX, 93.16 GiB / 9 shards | `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` (2.6 GiB, `--mtp-shared-embd`) | 262,144 trained; launcher `-c 65536` | `--parallel 1` default; upstream slots via `-np`, unified KV, `--cache-ram` |
+| Halogen official+overlay | closed engine, `ghcr.io/peonist-ai/halogen-flash-server:0.12.1`; also opens llama.cpp GGUFs since 0.7.0 | `qwen38-flash-next-w4b.hgn` 115.55 GiB + `qwen38-flash-next-w4b.overlay.hgn` 2.31 GiB quality sidecar (5.53 bpw all-params / 4.55 bpw trunk+experts); GGUFs: unsloth UD-IQ4_XS / UD-Q4_K_XL / bartowski IQ4_XS / mradermacher i1-IQ4_XS / ROCmFP4-FAST | own MTP head (`qwen38-flash-next-mtp.hgn`, 1.4 GiB for GGUF trunks) + prompt-lookup (PLD 3,3) | 262,144 native; 524,288/1,048,576 with YaRN | `HALOGEN_KV_SLOTS` 1-64 (default 4), shared `HALOGEN_KV_POOL_POSITIONS` pool, 20 cache entries |
+| halo-box Strix fork | `halo-box/strix-llama.cpp:master` (superset of `halo-box/llama.cpp`) | any llama.cpp GGUF; kyuz0's `rocm-10.0-strix-llama` image measures Qwen3.8-Flash-Next **Q4_K_XL** + Unsloth shared Q8 MTP | `--spec-type draft-mtp,ngram-mod` | model metadata | upstream `-np`; `--spec-draft-adaptive`; speculative checkpoints on device |
+| EngramHalo fork | `Aristo94/EngramHalo.cpp:strix-halo-qwen4exp` | IQ3 / IQ4_XS + RAM-or-SSD engram table (26.8 GiB) | `EasiiX/Qwen3.8-Flash-Next-MTP-Strix-Halo-GGUF` `mtp-…-hc-Q8_0.gguf` (old Q8_0 deprecated 2026-09-19) | 163,840 max with external MTP sidecar today | config A `-np 1` (MTP on), config C `-np 4` (MTP off) |
+| upstream `ggml-org/llama.cpp` | mainline; `qwen4exp` arch merged (PR #27742) | any GGUF (unsloth UD-IQ4_XS etc.) | `draft-mtp` merged (PR #27836); checkpoint mechanism PR #28118 | model metadata | upstream `-np`, `-kvu`, `-cram`, `--cache-idle-slots` |
+
+Quant/bpw cross-check (all claims from the owning project's card/QUANT doc):
+
+| File | bpw | Owner | Measured? |
+| --- | --- | --- | --- |
+| pwilkin IQ4_NL PROJFIX | not published as bpw; "93.16 GiB" | ilintar HF card | S |
+| Halogen own `.hgn` + quality overlay | 5.53 all / 4.55 trunk | `docs/QUANT.md` (tensor-table arithmetic, shown) | M |
+| Halogen GGUF arm: unsloth UD-IQ4_XS | not stated as bpw; 72 GiB held | Halogen README | M (held-RAM) |
+| bartowski / mradermacher IQ4_XS | 68 GiB held | Halogen README | M |
+| unsloth UD-Q4_K_XL | ~78-80 GiB held | Halogen README | M |
+| EngramHalo IQ3 | 3.71 bpw | Halogen README citing Engram card | S |
+| ROCmFP4 | 5.51 bpw | Halogen README | S |
+| CIRU-IU4 | 5.96 bpw | Halogen README | S |
+| drluoto AgenticRequant Q5K | Q5K recipe, 1.4 GiB smaller than stock | drluoto repo | S |
+
+---
+
+## N-gram / PLE table residency (separate axis from KV)
+
+User-set requirement: every compared configuration must state table residency and distinguish SSD-cold vs OS-page-cache-warm. This is the 27.5 GiB (pwilkin/ilintar) or 26.8 GiB (Engram naming) or 51B-parameter n-gram embedding table — a per-layer-embedding lookup table read during decode gathers and prefill gathers, **not** the KV cache and **not** the hot weights.
+
+| Runtime | Table | Modes published | Flags | Numbers per mode | Tier |
+| --- | --- | --- | --- | --- | --- |
+| pwilkin pin | ~27.5 GiB PLE table | on-direct pread (launcher default); mmap demand-fault; resident mode is outside this hub's requirement | `--load-mode none --lazy-mode on-direct` (launcher); `-lm mmap -lzm on` vs `-lm none -lzm on-direct` in the journey | 233.71 ± 5.14 vs 395.58 ± 1.97 pp at 16384 ubatch in the source's A/B; not a same-box result here | M (source A/B) |
+| Halogen | 47.7 GiB n-gram lookup table, FP8, "paged rather than held resident", never configurable to be held | always disk-backed via page cache; 64-row batched read since 0.6.3 (`HALOGEN_NGRAM_GATHER_THREADS`, default 64) | env only: `HALOGEN_NGRAM_GATHER_THREADS`; no residency switch | 32,768-tok prompt paid 46-52 s on top of usual ~25 s with table evicted pre-0.6.3, ~1.3 s extra since; 8,192-tok prompt under 0.5 s extra; decode reads 16 rows/token, unchanged | M |
+| EngramHalo | 26.8 GiB engram table | SSD (mmap+lazy) or RAM-pinned table | SSD: `-lm mmap --tensor-read-lazy on`; RAM: `-lm none`. `LLAMA_MMAP_DROP_BEHIND=1` retains copied-weight page cache during load, while default `2` invalidates it; lazy tensors are not dropped. | SSD/RAM measurements use different serving/bench conditions; see [EngramHalo research](engram-halo.md) | M (per-mode) + S (resident estimates) |
+| halo-box | carries upstream/other-fork PLE handling; no Flash-Next-specific residency row published | — | — | Nathanw1014 fork has separate mmap-PLE notes; halo-box itself not measured | — |
+| upstream llama.cpp | `-lm` / `--lazy-mode` generic | on (demand-fault mmap), auto (>4 GiB tensors), off (resident) | `--lazy-mode` | none published for Flash-Next on gfx1151 | S (flags) |
+
+**Hot active weights + KV stay in RAM in all published configurations; only the table moves.** None of the three primary runtimes proposes offloading the trunk or expert weights to SSD under normal serving; Halogen refuses to leave the host under 16 GiB for that reason (its pin guard), and EngramHalo's RAM mode exists precisely because pinning the table is the fastest decode but costs 26.8 GiB.
+
+**PLE page-cache warmth and prompt/KV reuse are independent axes.** Measure cold and warm table reads separately from cold and reused prompts at every context size. `LLAMA_MMAP_DROP_BEHIND` is a loader memory/reload control, not evidence of a prompt-cache hit.
+
+---
+
+## Single-stream decode (per-stream TPS), same model, this hardware
+
+Not comparable across rows; each row carries its conditions.
+
+| Runtime | Figure | t/s | Conditions | Tier | Source |
+| --- | --- | ---: | --- | --- | --- |
+| pwilkin pin | tg128 @ d0 | 26.28 ± 0.29 | llama-bench, IQ4_NL PROJFIX, retained-PM4 HIP, -b/-ub 16384, temp n/a | M | landing page + journey |
+| pwilkin pin | tg128 @ d40k | 16.63 ± 0.14 | same, depth 40,000 | M | landing page |
+| pwilkin pin | tg128 @ d0 (HF-card run) | 24.13 ± 0.29 | same but -b/-ub 24576 | M | HF card |
+| pwilkin pin | 150k planted-fact | 6.9 | full server path, context filled, greedy | M | journey |
+| Halogen | decode serial @ ctx 1,500 | 37.6 | 0.2.0 serial rows, greedy, 85 W, `amd_iommu=off` | M | README Measured |
+| Halogen | decode serial @ ctx 32,768 | 34.1 | same | M | README |
+| Halogen | decode MTP @ ctx 1,500 prose / code | 44.8 / 49.9 | 0.6.0 sidecar | M | README |
+| Halogen | decode MTP @ ctx 32,768, served | 41.7 | mean over ten prompts, full HTTP stack | M | README |
+| Halogen | decode coding-agent turn, MTP alone / +PLD | 49.1-49.2 / 56.3 (thinking off), 55.7 (on) | six real SWE-agent prompts, ~1-1.8k ctx, 400 tok | M | README |
+| Halogen | decode function-calling turn, MTP + PLD | 53.1 | same instrument | M | README |
+| EngramHalo config A | code tg400 | 39.3 | UD-IQ3_XXS, q8_0 KV, MTP n-max 4 p-min 0.75, RAM-resident engram, temp 0, 96 GB machine | M | `docs/research/engram-halo.md` (BENCHMARKS.md protocol) |
+| EngramHalo | warm repeat, same request | 52.7 | `cache_prompt:true`, one slot — **not concurrent**, single-request cache hit | M | `docs/research/engram-halo.md` |
+| drluoto Vulkan | short code, empty ctx | 58 | temp 0, no prompt cache, Q5K AgenticRequant, pinned clock | M | flash-next-strix-halo README |
+| drluoto Vulkan | new code @8k / prose @8k / rewrite @8k | 42 / 30 / 55 | same | M | README |
+| drluoto Vulkan | new code @32k / rewrite @32k | 38 / 49 | same | M | README |
+| drluoto Vulkan (old ROCm rows, retired) | file rewrite @8k no-spec / full | 17 / 47 | ROCm 7.1, stock UD-IQ4_XS; **author retired ROCm: silent wrong logits, PPL 84.8 vs 13.8** | M | README (kept for provenance, not a live candidate) |
+| ggml-org discussion #27950 (drluoto thread, ROCm era) | file rewrite @8k / new code @8k full stack | 47.1 / 31.7 | UD-IQ4_XS, TOP_K hipCUB + MTP + ngram-mod | M | discussion |
+| KYmidnight (Vulkan ROCmFP4-FAST) | tg @ ~24k large ctx | 46.9 | llama-server bench through server, median of 2 reps | M | discussion #27950 comment |
+| kyuz0 `rocm-10.0-strix-llama` image | decode | 43.9 | halo-box engine, Q4_K_XL, shared Q8 MTP, pwilkin ROCr | M | kyuz0 toolbox README |
+| pwilkin 27B (different model — context only) | 31,497-tok repro decode | 26.26 | IQ4_XS + DFlash2 | M | pwilkin README |
+
+**Per-stream at depth, cross-runtime, matched-decode-instrument only:** Halogen 32k serial 34.1 vs pwilkin tg128@40k 16.63 — different instruments (server bench vs llama-bench), different depth, different quant; **no matched pair exists**. Halogen itself notes "the comparison at depth is muddied by their speculative numbers mostly not being published" — treat every cross-runtime decode ratio as indicative only.
+
+---
+
+## Aggregate throughput under concurrency (multi-stream)
+
+The core missing-cell table for this file. Only Halogen has served n>1 rows.
+
+| Runtime | n | aggregate t/s | per-stream t/s | conditions | tier | source |
+| --- | --- | ---: | --- | --- | --- | --- |
+| Halogen | 1 (spec) | 41.3 | 41.3 | 1,500-tok prose prompts, 600 tok out, greedy, published image defaults | M | README speed-by-concurrency |
+| Halogen | 1 (serial) | 36.5 | 36.5 | same | M | same |
+| Halogen | 2 | 55.2 | 27.5-27.6 | same, byte-identical 2/2 | M | same |
+| Halogen | 4 | 74.8 | 18.6-18.7 | same, byte-identical 4/4 | M | same |
+| Halogen | 8 | 87.8 | 10.9-11.0 | same, byte-identical 8/8 | M | same; "past eight total stops growing" |
+| Halogen (0.6.0 re-measure) | 2 / 4 | 56.5 / 77.1 | — | same session | M | README |
+| Halogen | 8 slots, 5-worker aider fleet | — | 14.9 | issue #51 report; four-slot run of same fleet 18.7/stream | M (third-party) | issue #51 via README |
+| Halogen | >4 slots on aider fleet | — | — | per-turn wall 42 s (4 slots) vs 46 s (3) vs 52 s (2) | M (third-party) | issue #51 |
+| EngramHalo | 1 / 2 / 4 / 5 | 22.6 / 36.9 / 54.7 / 56.0 agg | 22.6 / 18.4 / 13.7 / 11.2 | **stock pre-patch llama-batched-bench**, IQ3, q8_0 KV, -ub 512, -c 16384, npp 2048, ntg 64, 96 GB, no MTP; saturated at n5 | M (Engram peer, via BENCHMARKS.md) | `docs/research/engram-halo.md` |
+| EngramHalo config C | 4 | — | — | no MTP; author says multi-slot+spec unvalidated; numbers above are pre-patch stock llama.cpp, not the patched fork | I (from Engram peer summary) | `docs/research/engram-halo.md` |
+| pwilkin pin | 2 / 4 / 8 | — | — | launcher ships `--parallel 1`; no published multi-stream row for Flash-Next on this fork | — | launcher (`install.sh:550`) |
+| halo-box / kyuz0 image | 2 / 4 / 8 | — | — | no published Flash-Next multi-stream row | — | — |
+| pwilkin 27B (different model) | multi-slot | — | — | not in scope; do not rank against Flash-Next | — | — |
+
+**Maximum accepted vs useful concurrency, Halogen:** slots accept up to 64 (`HALOGEN_KV_SLOTS` cap), but published aggregate **saturates by n=4-8** and the author's own guidance is that slots past 4 are a latency policy, not throughput. "Maximum accepted" is therefore not the same number as "useful concurrency" anywhere in this file; the only runtime where both are published is Halogen (accept up to 64, useful ≈4-8 by its own aggregate curve).
+
+**No other runtime publishes a maximum-concurrency figure for Flash-Next on this hardware.** Any "concurrent llama.cpp is faster/slower than Halogen" claim would have to come from on-box measurement, not from this file.
+
+---
+
+## MTP / speculative decoding under concurrency
+
+| Runtime | MTP at n=1 | MTP at n>1 | Evidence | Tier |
+| --- | --- | --- | --- | --- |
+| Halogen | default on; byte-identical to serial greedy; acceptance telemetry in `/metrics` (`draft_tokens_total`, `draft_tokens_accepted_total`) | **explicitly off per stream**: "with two or more conversations generating, every stream takes a batched step; the drafter resumes when a stream is alone again"; speculating inside a batch measured to pay only for exactly two code-heavy streams and is not built | README "What this release is not" + speed-by-concurrency note | S (design) + M (2-code-heavy-stream claim stated as measured) |
+| pwilkin pin | `--spec-type draft-mtp` with shared Q8_0 sidecar, `-dev ROCm0 -ngl 99` | **unknown on this pin**; launcher sets `--parallel 1` and the runbook flags multi-slot+MTP as unstated; EngramHalo (a sibling fork) reports the same combination unvalidated | `install.sh:550` + `strix-halo-runtimes.md` "unknowns" | — |
+| EngramHalo | config A: MTP n-max 4, p-min 0.75, acceptance ~85% (code, temp 0) | config C is `--parallel 4` **without** `-md`; author: multi-slot+spec not validated | `docs/research/engram-halo.md` | S |
+| halo-box | `--spec-type draft-mtp,ngram-mod`, `--spec-draft-adaptive`; speculative checkpoints kept on device (avoids host copy) | Vulkan batched mat-vec at 3/5/6 columns was several× slower than 1/2/4 — **this hits speculative verify specifically**; fork splits such batches (`GGML_VK_MMV_NO_SPLIT=1` to disable) | halo-box README | S + M (split measured) |
+| drluoto | n-max 3, p-min 0.0; frspec-65k trimmed vocab; acceptance 67% code / prose floor (speculation buys nothing on prose) | `-np 2` used in the setup line; concurrency × MTP interaction not published | flash-next-strix-halo README | M (n1) / — (n2 interaction) |
+| upstream llama.cpp | `draft-mtp` merged; `--spec-draft-adaptive` upstream-side? (present in halo-box, not upstream) | `-np` slots + MTP combination not called out upstream; PR #28118 checkpoint mechanism required for MTP to be a net win at all (Windows datapoint: 21.4 → 5.1 t/s without it) | server README + olliehm comment in #27950 | S + M (third-party) |
+
+**Key on-box question this table motivates:** on the pwilkin pin, does `-np 2/4` with `draft-mtp` (a) crash, (b) silently disable MTP per stream like Halogen's scheduler does, or (c) keep speculating and either win or lose aggregate throughput? No published source answers it.
+
+---
+
+## Warm-prefix latency / prompt cache / context sharing
+
+| Runtime | Mechanism | Published warm numbers | Tier |
+| --- | --- | --- | --- |
+| Halogen | `HALOGEN_PROMPT_CACHE=2` (resume anywhere, in-place, position-free state ~110 MB), 20 entries, 5/conversation (system-prompt end, 3 history points, end-of-last-request), `HALOGEN_CACHE_SNAP3` start-of-last-user-message, `HALOGEN_CACHE_DIR` disk persistence | 100k conversation: first turn ~88 s → **~2 s** follow-up, flat across a 20-turn session growing to 108k; 10k conversation 9 s → 1.4 s; 1M-context follow-up TTFT 0.55 s vs 17.9 min cold | M |
+| Halogen (byte-identity mode) | `HALOGEN_PROMPT_CACHE=1` chunk-boundary resume | byte-identical repeat answers, but caches nothing below one chunk (32,768 default) | S + M (mode exists, trade documented) |
+| Halogen (composable context) | `HALOGEN_COMPOSABLE_CONTEXT=1` retains ≥2048-token messages, reuses on later request at any offset | ~8,700 tok of tool results restored in ~0.13 s vs ~14 s fresh; `composed 5 chunks`; **not byte-identical, opt-in preview** | M |
+| llama.cpp (drluoto datapoint) | `-np 3 --ctx-checkpoints 8`, server routes each request to most-similar slot by LCP | TTFT on real traces 21-251 s → **0.3-0.5 s**; **checkpoints mandatory on this arch** (36 recurrent GDN layers can't roll back without them); slot save/restore to disk does NOT work (logs `f_sim_best=1.000` then re-prefills from zero) | M |
+| llama.cpp (upstream flags, not Flash-Next-measured) | `-cram` / `--cache-idle-slots` / `-kvu` / `--kv-unified-per-slot` | feature documented, not measured for Flash-Next on gfx1151 by any source in this file | S |
+| pwilkin pin | launcher sets neither `--cache-ram` nor `--parallel >1`; upstream server supports both | prefix-cache hit rate on coding sessions explicitly listed as "unknown, must measure before gateway cutover" | — |
+| EngramHalo | `cache_prompt:true` single-slot repeats | identical request repeated inflates decode ~35% (52.7 vs 39.3 t/s); **not a concurrent-cache measurement** | M |
+
+**Memory cost of sharing context:** Halogen publishes the full arithmetic (28 KiB/position incl. scratch, 115 MB/slot, pool sizing table 27.8/35/42.2/~41 GiB, fan-out sizing rule `pool >= Σ(prompt+max_tokens)`). llama.cpp publishes no equivalent per-slot/pool memory table for Flash-Next on this hardware. EngramHalo's engram table is RAM-resident 26.8 GiB (config A) or SSD-backed; publish-side memory arithmetic is in `docs/research/engram-halo.md`.
+
+---
+
+## Reasoning / tool-calling quality and sampling differences
+
+| Dimension | pwilkin pin | Halogen | EngramHalo | halo-box |
+| --- | --- | --- | --- | --- |
+| Tool-call wire format | unknown for `qwen4exp`: upstream native handlers list Qwen 2.5, not this arch; falls back to Generic | engine's own tool format, `/health` authoritative; measured 53.1 t/s on a function-calling turn | `docs/research/engram-halo.md` (not duplicated here) | `--jinja` upstream path |
+| Reasoning controls | launcher passes neither `--reasoning` nor a budget; upstream `--reasoning-budget-*` hard budget exists in halo-box fork | `reasoning_effort` minimal/low/medium/high/xhigh (template folds to 3 levels), `max_thinking_tokens`, answer-room since 0.11.0, many client-alias shapes | `docs/research/engram-halo.md` | multi-point reasoning budget (`--reasoning-budget-*`) |
+| Sampling defaults | llama.cpp default sampler chain (temp 0.8 etc.) unless client sends fields; **different from the model card's recommended settings** | greedy by default; card-recommended temp 1.0/top_p 0.95/top_k 20 available as server defaults via env; card's instruct settings 0.7/0.80/20 apply when thinking is off | temp 0 in all published bench rows | upstream defaults |
+| Spec-decode identity guarantee | llama.cpp speculative decoding is standard verify-then-commit; no byte-identity claim published for Flash-Next on this pin | byte-identical to serial greedy at temp 0, on every drafter, verified on live traffic | MTP is verify-based (llama.cpp semantics), author reports no quality loss | upstream semantics |
+| Quant-quality | IQ4_NL PROJFIX: "quality checked by paired perplexity against a reference stack", no public score | 5.53 bpw + calibration; token-identity 182/192 vs transformers BF16; PPL battery; 98.7% needle retrieval at 10-32k | 3.71 bpw IQ3 | Q4_K_XL (kyuz0 image) / ROCmFP4-FAST 4.6785 PPL vs 4.0068 BF16 ref |
+| Known quality regressions in this family | sparse-attention path is break-even vs dense on throughput and dense is "numerically exact" — quality comparison reasoned, not perplexity-measured, on the pwilkin journey | sidecar-off costs 6-9% PPL for ~2% decode; `overlay-speed` sidecar trades calibration for 2% decode | `docs/research/engram-halo.md` | GGUF-arm decode 3% slower than own checkpoint with slightly higher PPL |
+| KV quant vs tool calling | f16 KV shipped; extreme KV quants documented to degrade tool calling (upstream docs) | no KV-quant knob exposed (NUMERIC flag list has none) | q8_0 KV in config A | f16 KV recommended; K-quant GGUF measured, decode 3% slower |
+
+**Cross-runtime quality comparison is not possible from published data.** Halogen says so explicitly: "their instruments differ from ours and neither of us has the BF16 baseline." Different quant/template/reasoning settings invalidate direct comparison — the per-row conditions columns above exist so nobody forgets.
+
+---
+
+## Comparability warnings (read before quoting any number from this file)
+
+1. **Power envelope.** Halogen measured at ~85 W sustained; an independent 70 W-limited handheld read 11-12% under both serial and drafted decode on the same engine. pwilkin does not publish a power figure for the Flash-Next rows (27B rows note GPU 37-54 °C across six generations). drluoto pins the clock (`rocm-smi --setperflevel high`) because `auto` floats 2340-2540 against a 2900 max and loses ~20%.
+2. **`amd_iommu=off` is worth 13-16% of Halogen prefill** and disables the NPU. pwilkin's installer does not set it. Any prefill comparison between Halogen and a llama.cpp runtime on a box that has IOMMU on is comparing two different host configurations.
+3. **Same-build noise is huge.** Same binary measured 25-36 t/s on identical med-context rows across two days (KYmidnight, #27950); pwilkin's own landing page notes a ~3% machine-speed drift between sessions and therefore compares only within-session. Single-run screenshots are not evidence.
+4. **llama-bench cannot see draft flags** (`-ub 2048` trap, no `-md`); llama-server bench through the server is the instrument that can. Halogen's prefill rows are its own engine's prefill bench, not the HTTP stack (HTTP adds 2-3% TTFT with the drafter on).
+5. **Quant swaps are model swaps for comparison purposes.** unsloth UD-IQ4_XS (8-bit trunk, ~3.4-bit experts) vs Halogen's own 4/4.5-bit split vs EngramHalo IQ3 vs Q4_K_XL vs ROCmFP4-FAST are different files with different PPL and different decode; the Halogen README itself measures them as distinct arms, never as one number.
+6. **Depth changes decode on this model.** pwilkin tg128 26.28@0 → 16.63@40k; Halogen serial 37.6@1.5k → 34.1@32k; drluoto 58@empty → 38@32k. Any "decode t/s" without a depth is meaningless.
+7. **EngramHalo's published n>1 rows are pre-patch stock llama.cpp**, not the EngramHalo fork — do not rank them against fork config A without re-measurement.
+
+---
+
+## kyuz0/amd-strix-halo-toolboxes: options catalogue (discovery phase, not a winner)
+
+User-set scope: document **all relevant toolbox options** for a later large discovery/benchmark phase when the 128 GB Strix Halo arrives. This is an options inventory, not a benchmark ranking, and does not claim the list below is exhaustive (kyuz0's own repo is the authority; new tags appear continuously).
+
+From `README.md` + `docs/building.md` (inspected 2026-09-20). Stable toolboxes auto-rebuild on upstream `master`; experimental ones are manual-build or poll-triggered.
+
+| Toolbox tag | Backend / stack | Engine source | Flash-Next readiness | Notes for the comparison matrix |
+| --- | --- | --- | --- | --- |
+| `vulkan-radv` | Vulkan (Mesa RADV) | upstream `ggml-org/llama.cpp` master | arch present (qwen4exp merged); MTP now in mainline per deprecation notice | most-compatible baseline; `GGML_VK_PERF_LOGGER=1` per-op timings |
+| `rocm-10.0` | ROCm 10.0 (Fedora 44) | upstream `ggml-org/llama.cpp` master | same arch; 25992 host-buffer patch applied; gfx1151 CI job | small-ubatch reference arm; LDS assert at large ubatch per journey |
+| `rocm-10.0-qwen-3.8-flash-next` | ROCm 10.0 experimental | `drluoto/llama.cpp:strix-halo-flash-next` | yes; native MTP, ngram-mod, GPU TOP_K | `GGML_HIP_NO_VMM=ON` required; no rocWMMA; drluoto retired ROCm in favor of Vulkan in his own stack but this toolbox still tracks the ROCm branch |
+| `rocm-10.0-engramhalo` | ROCm 10.0 experimental | `Aristo94/EngramHalo.cpp:strix-halo-qwen4exp` | yes; sparse QSA gather, SSD engram, standalone MTP sidecar | fork published on ROCm 7.14; this 10.0 image is experimental manual-build; **requires `-lm mmap --lazy-mode on` (SSD profile); `--no-mmap` breaks it**; with external MTP sidecar: one slot, `-c ≤163840` |
+| `rocm-10.0-strix-llama` | ROCm 10.0 experimental | `halo-box/strix-llama.cpp:master` + `pwilkin/rocm-systems:ilintar-experiments` retained-PM4 ROCr | yes; measured Q4_K_XL + shared Q8 MTP at 1207 pp2048/1055@32k/43.9 tg | no wrapper, no baked flags; `GGML_CUDA_ENABLE_UNIFIED_MEMORY` must stay off (corrupts under retained PM4); `--load-mode none --lazy-mode on-direct` |
+| `vulkan-radv-performance` | Vulkan RADV Fedora 44 | `Nathanw1014/llama.cpp:strix-halo-vulkan` | yes; Strix-focused FA/KV/indexer/MoE | manual build; different quant family (AgenticRequant Q5K) than pwilkin pin |
+| `rocm-10.0-rocmfpx` | ROCm 10.0 custom | `ROCmFPX/ROCmFPX` | yes; ROCmI4/W4A4 + FP3/4/6/8 formats, MTP, agent-aware presets | auto-built on upstream change |
+| `vulkan-rocmfpx` | Vulkan custom | `ROCmFPX/ROCmFPX` | yes; same quant formats, no ROCm dep | auto-built |
+| `rocm-7.2.4-rdma-fix` | ROCm 7.2.4 custom | `kyuz0/llama.cpp:fix/rpc-rdma-inline-fallback` | not Flash-Next-specific | RPC/RDMA test build |
+| `rocm-7.2.4-turboquant` | ROCm 7.2.4 custom | TurboQuant build | not Flash-Next-specific | manual build |
+| `therock-nightly` | TheRock gfx1151 nightly | AMD nightly tarball | model coverage evolving | poller auto-builds on new AMD tarball |
+| `hrx-staging` | HRX (AMD staging) | `ROCm/ggml-staging-automation` pinned submodules | model coverage evolving; bundled runtime, no separate ROCm | manual build; Qwen3-30B initial validation, not Flash-Next |
+
+AI Toolbox Cockpit (`kyuz0/ai-toolbox-cockpit`) is the recommended install path; the gpu-workload-watcher detects llama.cpp, DS4, hipfire, vLLM, and Halogen Flash API server including containerized processes. The `refresh-toolboxes.sh` manual path remains.
+
+**Toolboxes relevant to the pwilkin pin specifically:** none — pwilkin's own installer (`install-flash-next.sh`) builds native prefixes, not containers; kyuz0's `rocm-10.0-strix-llama` is the **closest** toolbox but uses `halo-box/strix-llama.cpp:master` (not pwilkin's llama.cpp branch) with pwilkin's ROCr runtime, i.e. it is the retained-PM4-stack-with-different-engine arm. Read the toolbox-vs-pwilkin distinction carefully before quoting either as the other.
+
+**Residency-mode mapping per toolbox** (the n-gram axis above, per toolbox):
+
+| Toolbox | Table residency mode(s) supported | Engram SSD profile note |
+| --- | --- | --- |
+| `rocm-10.0-engramhalo` | SSD (`-lm mmap --lazy-mode on`) required; RAM mode exists in the fork but is not the tested profile here | yes; `--no-mmap` breaks it |
+| `rocm-10.0-strix-llama` | on-direct pread (`--lazy-mode on-direct`), matching pwilkin's launcher behavior | — |
+| `rocm-10.0-qwen-3.8-flash-next` | drluoto's own flags (`-lm mmap` on the Vulkan stack he ships; this ROCm branch's own notes) | — |
+| `vulkan-radv` / `rocm-10.0` (upstream) | generic `--lazy-mode on/auto/off` | none specific |
+
+---
+
+## Reproducible on-box evaluation protocol (no paid calls)
+
+Purpose: turn the unknowns above into cells on the operator's own 128 GB Strix Halo. All local, all HTTP to the runtime's own OpenAI-compatible endpoint, no cloud, no model-API calls. One script, one JSONL ledger, one session per comparison (per the noise warning above, never compare across sessions).
+
+### Fixed conditions (pin before any run)
+
+- Host: `amd_iommu` state recorded (`cat /proc/cmdline`), not changed between arms; GPU clock pinned (or its float recorded); GTT counters recorded before and after (`/sys/class/drm/card*/device/mem_info_gtt_used`).
+- Power: sample package power and clock during every run (sysfs), report median alongside every number.
+- Same quant per comparison unless quant itself is the arm. Never compare across quants.
+- Temperature 0 for throughput rows (identity-checkable); a second sampled pass only if the operator wants the card-recommended sampling — recorded as a separate arm, never mixed.
+- Every arm re-run in one session, palindrome order, ≥3 reps per cell.
+- **N-gram/PLE table residency recorded per arm**: mode (SSD mmap/lazy, page-cache-warm, RAM-pinned), RSS attributable to the table where the runtime reports it, NVMe throughput during cold gathers (pidstat or `/proc/PID/io`), and whether the first prompt after load was SSD-cold or page-cache-warm. Separate from KV cache and from hot weight residency; never collapsed into one memory number.
+
+### Context grid (cold and warm)
+
+| Prompt size | Warm variant |
+| --- | ---: |
+| 4k | repeat same prompt |
+| 32k | conversation: turn 1 cold, turns 2-4 append-only |
+| 64k | repeat same prompt |
+
+Cold = fresh server or evicted cache. Warm = the runtime's own cache mechanism at its default setting (Halogen `PROMPT_CACHE=2`, llama.cpp `-cram` + `--cache-idle-slots` on, Engram per its config). Record which mechanism answered each turn. Table-cold vs table-warm is recorded separately from prompt-cache cold/warm: on Halogen and Engram the lookup table can be evicted by KV pool growth even while the prompt cache is warm, so the two must not be collapsed.
+
+### Concurrency grid
+
+- n ∈ {1, 2, 4, 8} plus "feasible higher counts": for Halogen add n=16 and n=32 (slots accept up to 64; the published curve flattens by 8, so 16/32 measure the plateau and queue behavior); for llama.cpp forks add n=3 and n=16 **only if** `-np 16` loads at all on 128 GB with this model; for EngramHalo stop at config C's 4 (its own validated ceiling) plus one n=8 attempt recorded as a failure if it fails.
+- Each n: all n workers start within one second of each other, identical 1,500-token prompt, 600 generated tokens, streaming.
+- Also one **mixed** arm: 4 workers with distinct 32k prompts (cache-hostile) + 1 worker with the 1,500-token prompt, to measure interference, not just homogeneous fan-out.
+
+### Reasoning-enabled tool continuations
+
+- A real tool loop: request with `tools`, capture `tool_calls`, append a tool result, continue, ×3 iterations. Run both a deterministic diagnostic arm and the model-card-recommended production sampling arm; greedy-only speed is not a production-quality evaluation.
+- Reasoning arm: same loop with thinking on at the runtime's default effort, and a `medium`-effort arm where supported.
+- Record: tokens-to-first-tool-call, full-loop wall time, whether the tool-call parse is the runtime's native format or Generic (log line / `/props`), and whether any step degraded to a non-tool answer.
+
+### Metrics per request (write all, compute later)
+
+- TTFT (p50/p95), per-stream decode tps (p50/p95), aggregate tps over the window when all n streams are generating, end-to-end wall.
+- Prompt-cache: cached vs uncached input tokens when the runtime reports them (Halogen `/metrics.prompt_tokens_cached_total`, llama.cpp usage fields when present).
+- Spec-decode: accepted/drafted token counts when exposed (Halogen `/metrics.draft_tokens_*`, llama.cpp `print_timing` / slot telemetry).
+- Memory: `mem_info_gtt_used`, RSS, and the runtime's own account (`/health` for Halogen, `/metrics`/`/slots` for llama.cpp).
+- Errors: 4xx/5xx/queue-timeout counts, disconnect-cancellation behavior (cancel mid-stream, confirm slot release via telemetry), and one OOM-adjacent probe (n above the fitted pool) recorded as an error row, never as a throughput row.
+- **Output validation gate:** every throughput row that also has a correctness expectation (the tool loop, the planted-fact check at 32k/64k) must have its text compared against expectation. "It printed tokens fast" is not a passing row on this model family — the community has already caught two correctness bugs (multilingual noise above ~1k tokens on an early MTP port; multi-segment `//////` degradation) that speed counters missed.
+
+### Launch configurations to try, and what would rule each out
+
+| # | Configuration | What it tests | Rule-out signal |
+| --- | --- | --- | --- |
+| A | pwilkin pin, launcher defaults, `PARALLEL=1` | establish this machine's control with IOMMU enabled | check repeated-run variance and correctness; explain differences in quant, power, clocks, memory, driver and instrument before comparing published numbers. Published ±2σ is not a cross-machine acceptance threshold. |
+| B | pwilkin pin + `-np 2` then `-np 4`, MTP on, `-c 65536`, `--cache-ram 8192`, `--cache-idle-slots` on | the unmeasured multi-slot × MTP cell; also slot-cache warmth on coding sessions | crash, load failure, or output-corruption rows → the combination is out for this pin; if MTP silently disables (compare `draft_tokens_accepted` vs n=1), record it and measure the serial-batched aggregate — that is still a valid Halogen-analog datapoint |
+| C | pwilkin pin + `-np 2/4`, `--spec-type none` | serial-batched ceiling without the MTP variable | if aggregate ≥ B's, MTP is a concurrency net loss on this pin regardless of single-stream numbers |
+| D | pwilkin pin, `-c 262144` single slot | depth 150k decode + planted-fact retrieval on this quant | 6.9 t/s published; if retrieval fails on the planted fact, the sparse path on this pin is out for long-context routing regardless of speed |
+| D2 | pwilkin pin, `-lm mmap -lzm on` vs launcher `on-direct` | reproduce the journey's 1.69× prefill A/B; check demand-fault table survives concurrent decode (journey measured prefill only, single request) | if on-direct is not reproducibly faster on this host, the launcher's choice is a revisit candidate, not a rule-out |
+| E | Halogen 0.12.1 defaults, slots 1/2/4/8/16 | reproduce the speed-by-concurrency table with this repo's own harness | per-stream byte-identity flag off → the runtime is misconfigured, stop |
+| F | Halogen 0.12.1 `HALOGEN_KV_SLOTS=8` + aider-style 5-worker mixed arm | the issue #51 third-party shape on our own harness | if per-turn wall exceeds the 4-slot run, Halogen's "slots are a latency policy" claim is confirmed on this workload and 4 slots is the product-relevant number |
+| G | Halogen 0.12.1 opening the **pwilkin IQ4_NL PROJFIX GGUF** and unsloth UD-IQ4_XS | same-quant cross-engine: removes the quant variable from the Halogen-vs-llama.cpp prefill/decode ratio | IQ4_NL PROJFIX refused by name → only unsloth/bartowski/mradermacher files are the GGUF arms (0.12.1 census) |
+| H | EngramHalo config A (n=1, MTP) and config C (`-np 4`, no MTP), `LLAMA_QSA_GATHER_MS` on/off | fork decode ceiling and multi-slot behavior on the patched branch (published n>1 rows are pre-patch) | config C + MTP attempted → out of scope unless the fork's own validation says otherwise; QSA gather off in multi-seq unless the env gate measurably holds on HIP |
+| H2 | EngramHalo SSD profile at 4k/32k/64k/131k/262k where supported | separate table residency from context and speculation | a lazy-read hang, unsupported flag or loss of file-backed table behavior rejects that configuration; do not silently replace required SSD offload with a resident table |
+| I | halo-box `rocm-10.0-strix-llama` image, Q4_K_XL + shared Q8 MTP | retained-PM4 ROCr + halo-box engine at a different quant; the kyuz0-published 43.9 t/s row | if `HIP_LAUNCH_BLOCKING=1` is needed for correctness on the box, the HIP arm is out (halo-box's own caveat); Vulkan arm then carries halo-box alone |
+| J | upstream `ggml-org/llama.cpp` (kyuz0 `rocm-10.0` image), unsloth UD-IQ4_XS + MTP | the compatibility baseline; also the 25992-patch check | if it cannot prefill at -ub ≥8192 on this model (LDS assert per journey start note) it is out as anything but a small-ubatch reference arm |
+
+Do not compare unmatched power envelopes or incompatible model/export/runtime combinations as if they differed only in speed. NGQ4/Q6_K or other new quant pairings enter only after compatibility and quality gates pass. Source-retired correctness-broken configurations are not production candidates.
+
+Provider decision: local runtime experiments do not change the selected OpenRouter `z-ai/glm-5.3-flash` cloud tier.
+
+### What a cell must contain to be usable
+
+runtime identity + engine commit + quant + draft policy + n + context depth + prompt shape + temperature + power/clock + IOMMU state + cache mode + instrument (llama-bench / server bench / served HTTP) + reps + byte-identity pass/fail. A cell missing any of those goes in the unknown column, not the comparison.
+
+---
+
+## Unknowns that remain unknown after this pass
+
+- pwilkin pin: any served n>1 aggregate; MTP×multi-slot behavior; `--reasoning` controls; prefix-cache hit rate on coding sessions; IQ4_NL PROJFIX bpw figure; power envelope for the Flash-Next rows.
+- EngramHalo: n>1 on the patched fork (published rows are pre-patch stock); MTP acceptance at 32k+ depth on code; QSA gather env gate on HIP.
+- halo-box: Flash-Next served multi-stream rows; reasoning-budget interaction with `qwen4exp`.
+- upstream: whether `draft-mtp` + `-np >1` works at all on this arch (PR #28118 checkpoints are a prerequisite datapoint, not a measurement).
+- Cross-runtime: matched-decode-instrument comparisons (same prompt set, same depth, same power, different engine) exist nowhere in published sources. Halogen's llama.cpp-arm (1.9× prefill at 8k, 2.7× at 32k, 1.1-1.3× serial decode, 1.9× coding turns with both drafters) is the closest, but it ran pwilkin's branch "at their settings on stock ROCm 7.14, so their numbers here are below their own published figures" — a handicap noted by Halogen itself, and its ratios should be read as engine-capability deltas under Halogen's conditions, not as predictions of what the pin achieves on its own tuned stack.
+- kyuz0 toolboxes: every experimental tag is a manual or on-demand build with no published Flash-Next multi-stream number except `rocm-10.0-strix-llama`'s single-stream row; the catalogue above is an options inventory, and whether any toolbox beats the pwilkin pin is unknown until the discovery phase runs.
+
+---
+
+## Sources inspected for this file
+
+- https://pwilkin.github.io/strix-halo/ and `journey.html` (single-stream protocol and numbers)
+- https://github.com/pwilkin/strix-halo `README.md`, `data/benchmarks.json`; `install.sh` (launcher flags, `PARALLEL` default) — vendored copy at `third_party/strix-halo/f73872fe20dfdef460653f18e2fe63e5366ae958/`
+- https://huggingface.co/ilintar/qwen3.8-flash-next-gguf-strix-halo (HF-card protocol, `-b/-ub 24576` rows)
+- https://github.com/peonist-ai/halogen-flash-server `README.md` (Measured, Against the alternatives, Speed by concurrency, Context and memory, Quality, Bring your own GGUF, What this release is not), `docs/QUANT.md`, `docs/FLAGS.md`
+- https://github.com/kyuz0/amd-strix-halo-toolboxes `README.md`, `docs/building.md` (retained-PM4 image, 43.9 t/s row, Engram/Halo-box packaging caveats)
+- https://github.com/ggml-org/llama.cpp `tools/server/README.md` (slot/cache/spec flags), `docs/function-calling.md` (native handler list, KV-quant tool degradation)
+- https://github.com/ggml-org/llama.cpp/discussions/27950 (drluoto stack + slot-affinity/LCP + checkpoint findings; KYmidnight Vulkan datapoint; olliehm Windows datapoint; MTP-without-checkpoints regression)
+- https://github.com/drluoto/flash-next-strix-halo `README.md` (Vulkan stack, retired ROCm rows, clock pinning, n-gram cost)
+- https://github.com/halo-box/strix-llama.cpp `README.md` (fork deltas, HIP_LAUNCH_BLOCKING caveat, speculative checkpoints, mat-vec chunking)
+- This repo: `strix-halo-runtimes.md`, `docs/research/engram-halo.md` (Engram peer's file; its n>1 rows and config A/C are summarized here with that file as source of record), `docs/halogen.md`, `docs/llamacpp.md`

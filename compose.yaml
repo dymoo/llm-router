@@ -1,0 +1,281 @@
+# Default: gateway + CPU Laya. Choose one GPU runtime: the `llamacpp` profile,
+# the `halogen` profile, or a native host llama-server. Do not enable both
+# full-size GPU runtimes on the same host. setup.mjs --runtime selects a
+# matching catalogue/profile; configure-runtime.mjs prepares non-destructive switches.
+# Cheap gateway rebuilds: docker compose up -d --no-deps --build gateway
+
+name: llm-router
+
+networks:
+  router:
+    driver: bridge
+
+volumes:
+  sqlite-data:
+  laya-cache:
+  fastflowlm-models:
+  webui-data:
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-router-gateway:local
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 12m
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      SQLITE_PATH: /var/lib/llm-router/control.sqlite
+      MODEL_CATALOG: /etc/llm-router/catalog.json
+      LAYA_URL: http://laya:8090
+    ports:
+      - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-3000}:3000"
+    volumes:
+      - sqlite-data:/var/lib/llm-router
+      - ${MODEL_CATALOG_FILE:-./catalog.json}:/etc/llm-router/catalog.json:ro
+      - ./${AUXILIARY_CATALOG_FILE:-catalog.auxiliary.example.json}:/etc/llm-router/auxiliary.json:ro
+    networks:
+      - router
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health/live').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  laya:
+    build:
+      context: .
+      dockerfile: Dockerfile.laya
+    image: llm-router-laya:local
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 1m
+    environment:
+      LAYA_HOST: 0.0.0.0
+      LAYA_PORT: "8090"
+      LAYA_BACKEND: cpu
+      LAYA_MODEL_ID: ${LAYA_MODEL_ID:-convaiinnovations/laya}
+      LAYA_MODEL_REVISION: ${LAYA_MODEL_REVISION:-1c5edc17a7acd8701df6fc341c0d179f1c62c982}
+      LAYA_MODEL_SUBFOLDER: ${LAYA_MODEL_SUBFOLDER:-}
+      LAYA_CACHE_DIR: /var/cache/laya
+      LAYA_ONNX_PATH: /var/cache/laya/onnx/laya.onnx
+      LAYA_EP_CONTEXT_DIR: /var/cache/laya/ep-context
+      LAYA_NPU_ASSIGNMENT_THRESHOLD: ${LAYA_NPU_ASSIGNMENT_THRESHOLD:-0.95}
+      LAYA_MAX_BODY_BYTES: ${LAYA_MAX_BODY_BYTES:-524288}
+      LAYA_MAX_CONCURRENCY: ${LAYA_MAX_CONCURRENCY:-1}
+      LAYA_MEMORY_BUDGET_MB: ${LAYA_MEMORY_BUDGET_MB:-4096}
+    expose:
+      - "8090"
+    volumes:
+      - laya-cache:/var/cache/laya
+    networks:
+      - router
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  llamacpp:
+    profiles: ["llamacpp"]
+    platform: linux/amd64
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp@sha256:ff539c7fa68cb8487f822fa428f9d2e50f73eac23baba0a1018206ae050aaae2}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 2m
+    entrypoint: ["/bin/sh", "/opt/router/start-llamacpp.sh"]
+    environment:
+      LLAMACPP_SERVER_BIN: ${LLAMACPP_SERVER_BIN:-/app/llama-server}
+      LLAMA_ARG_MODEL: /models/${LLAMACPP_MODEL_FILE:-}
+      LLAMA_ARG_ALIAS: ${LLAMACPP_MODEL_ID:-local-llamacpp}
+      LLAMA_ARG_HOST: 0.0.0.0
+      LLAMA_ARG_PORT: "8080"
+      LLAMA_ARG_CTX_SIZE: ${LLAMACPP_CONTEXT:-65536}
+      LLAMA_ARG_N_PARALLEL: ${LLAMACPP_SLOTS:-1}
+      LLAMA_ARG_N_GPU_LAYERS: all
+      LLAMA_ARG_FLASH_ATTN: "on"
+      LLAMA_ARG_CACHE_TYPE_K: q8_0
+      LLAMA_ARG_CACHE_TYPE_V: q8_0
+      LLAMA_ARG_LOAD_MODE: ${LLAMACPP_LOAD_MODE:-mmap}
+      LLAMA_ARG_LAZY_MODE: ${LLAMACPP_LAZY_MODE:-on}
+      LLAMA_ARG_JINJA: "1"
+      LLAMA_ARG_ENDPOINT_SLOTS: "1"
+      LLAMA_ARG_UI: "0"
+      LLAMA_ARG_OFFLINE: "1"
+      LLAMA_ARG_SPEC_TYPE: ${LLAMACPP_SPEC_TYPE:-none}
+      LLAMA_ARG_SPEC_DRAFT_MODEL: ${LLAMACPP_DRAFT_MODEL:-}
+    devices:
+      - /dev/dri
+      - /dev/kfd
+    group_add:
+      - "${GPU_VIDEO_GID:-44}"
+      - "${GPU_RENDER_GID:-109}"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ${LLAMACPP_MODELS_DIR:-./data/llamacpp-models}:/models:ro
+      - ./scripts/start-llamacpp.sh:/opt/router/start-llamacpp.sh:ro
+    expose:
+      - "8080"
+    networks:
+      - router
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20m
+
+  halogen:
+    profiles: ["halogen"]
+    platform: linux/amd64
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.12.1@sha256:85ff8c1b2c506c28965cccb5655c07fd111bcf35872f860fcac78bb191897004
+    pull_policy: missing
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 2m
+    ipc: host
+    group_add:
+      - "${GPU_VIDEO_GID:-44}"
+      - "${GPU_RENDER_GID:-109}"
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    environment:
+      HALOGEN_MODEL_ID: ${HALOGEN_MODEL_ID:-halogen-qwen3.8-flash-next}
+      HALOGEN_CHECKPOINT: /models/qwen38-flash-next-w4b.hgn
+      # Explicit path makes the unmodified entrypoint FAIL if QUALITY overlay is missing.
+      HALOGEN_CK_OVERLAY: /models/qwen38-flash-next-w4b.overlay.hgn
+      HALOGEN_TOKENIZER: /models/tokenizer
+      HALOGEN_CACHE_DIR: /var/cache/halogen
+      HALOGEN_DOWNLOAD: ${HALOGEN_DOWNLOAD-peonist-ai/halogen-qwen3.8-flash-next}
+      HALOGEN_CTX: ${HALOGEN_CTX:-262144}
+      HALOGEN_KV_SLOTS: ${HALOGEN_KV_SLOTS:-4}
+      HALOGEN_KV_POOL_POSITIONS: ${HALOGEN_KV_POOL_POSITIONS:-}
+      HALOGEN_MAX_TOK: ${HALOGEN_MAX_TOK:-32768}
+      HALOGEN_MAX_TOKENS_CAP: ${HALOGEN_MAX_TOKENS_CAP:-65536}
+      HALOGEN_ROPE_YARN: ${HALOGEN_ROPE_YARN:-}
+      HALOGEN_TEMPERATURE: ${HALOGEN_TEMPERATURE:-1.0}
+      HALOGEN_TOP_P: ${HALOGEN_TOP_P:-0.95}
+      HALOGEN_TOP_K: ${HALOGEN_TOP_K:-20}
+    expose:
+      - "8731"
+    volumes:
+      - ${HALOGEN_MODELS_DIR:-./data/halogen-models}:/models
+      - ${HALOGEN_CACHE_DIR_HOST:-./data/halogen-cache}:/var/cache/halogen
+    networks:
+      - router
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/halogen-healthcheck", "api"]
+      interval: 30s
+      timeout: 35s
+      retries: 3
+      start_period: 20m
+
+  fastflowlm:
+    profiles: ["npu"]
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.fastflowlm
+    image: llm-router-fastflowlm:1.0.6
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 11m
+    devices:
+      - /dev/accel/accel0:/dev/accel/accel0
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - fastflowlm-models:/var/lib/flm
+    expose:
+      - "52625"
+    networks:
+      - router
+    # Upstream v1.0.6 prints embedding inputs and transcripts to stdout.
+    # Do not persist those logs; the gateway retains metadata only.
+    logging:
+      driver: "none"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:52625/v1/models"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20m
+
+  open-webui:
+    profiles: ["webui"]
+    image: ghcr.io/open-webui/open-webui:v0.11.3
+    restart: unless-stopped
+    init: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'test -n "$$OPENAI_API_KEYS" && test -n "$$WEBUI_SECRET_KEY" || { echo "Configure WEBUI_GATEWAY_KEY and WEBUI_SECRET_KEY first" >&2; exit 1; }; exec bash start.sh'
+    environment:
+      WEBUI_AUTH: "False"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-}
+      WEBUI_URL: ${WEBUI_ORIGIN:-http://127.0.0.1:3001}
+      CORS_ALLOW_ORIGIN: ${WEBUI_ORIGIN:-http://127.0.0.1:3001}
+      ENABLE_PERSISTENT_CONFIG: "False"
+      ENABLE_OPENAI_API: "True"
+      ENABLE_OLLAMA_API: "False"
+      ENABLE_DIRECT_CONNECTIONS: "False"
+      ENABLE_VERSION_UPDATE_CHECK: "False"
+      OFFLINE_MODE: "True"
+      OPENAI_API_BASE_URLS: http://gateway:3000/v1
+      OPENAI_API_KEYS: ${WEBUI_GATEWAY_KEY:-}
+      OPENAI_API_CONFIGS: '{"0":{"enable":true,"model_ids":["auto"],"headers":{"X-OpenWebUI-Chat-Id":"{{CHAT_ID}}"}}}'
+      DEFAULT_MODELS: auto
+      ENABLE_TITLE_GENERATION: "False"
+      ENABLE_TAGS_GENERATION: "False"
+      ENABLE_FOLLOW_UP_GENERATION: "False"
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_OPENAI_API_BASE_URL: http://gateway:3000/v1
+      RAG_OPENAI_API_KEY: ${WEBUI_GATEWAY_KEY:-}
+      RAG_EMBEDDING_MODEL: npu-embedding-gemma
+      RAG_EMBEDDING_BATCH_SIZE: "1"
+      CHUNK_SIZE: "400"
+      AUDIO_STT_ENGINE: openai
+      AUDIO_STT_OPENAI_API_BASE_URL: http://gateway:3000/v1
+      AUDIO_STT_OPENAI_API_KEY: ${WEBUI_GATEWAY_KEY:-}
+      AUDIO_STT_MODEL: npu-whisper-turbo
+      AUDIO_STT_OPENAI_API_REQUEST_FORMAT: multipart
+    ports:
+      - "${WEBUI_BIND:-127.0.0.1}:${WEBUI_PORT:-3001}:8080"
+    volumes:
+      - webui-data:/app/backend/data
+    networks:
+      - router
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s

@@ -1,0 +1,18 @@
+# Optional AMD64/XDNA2 runtime. The host supplies amdxdna + firmware; this image
+# never installs a kernel driver, changes IOMMU, or exposes the GPU devices.
+FROM ubuntu:24.04
+ARG FLM_VERSION=1.0.6
+ARG FLM_SHA256=76ef9577488f91021a90e05ea38ea330c87f15ae5f20716189e60b732fa569fe
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl software-properties-common \
+    && add-apt-repository -y ppa:lemonade-team/stable \
+    && apt-get update \
+    && curl -fL --retry 3 "https://github.com/ROCm/FastFlowLM/releases/download/v${FLM_VERSION}/fastflowlm_${FLM_VERSION}_ubuntu24.04_amd64.deb" -o /tmp/flm.deb \
+    && echo "${FLM_SHA256}  /tmp/flm.deb" | sha256sum -c - \
+    && apt-get install -y --no-install-recommends /tmp/flm.deb libxrt-npu2 \
+    && rm -f /tmp/flm.deb && rm -rf /var/lib/apt/lists/*
+ENV FLM_MODEL_PATH=/var/lib/flm
+ENV FLM_DISABLE_UPDATE_CHECK=1
+EXPOSE 52625
+ENTRYPOINT ["flm"]
+CMD ["serve", "-e", "1", "-a", "1", "--host", "0.0.0.0", "--port", "52625", "--q-len", "1", "--cors", "0", "--quiet"]

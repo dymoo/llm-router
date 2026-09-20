@@ -1,0 +1,30 @@
+[
+  {
+    "id": "npu-embedding-gemma",
+    "modality": "embeddings",
+    "modelId": "embed-gemma:300m",
+    "endpoint": "http://fastflowlm:52625/v1",
+    "resourceId": "strix-halo-npu",
+    "capacity": { "maxParallel": 1, "reservedInteractiveSlots": 0 },
+    "maxInputTokens": 2048,
+    "maxBatchSize": 16,
+    "maxBodyBytes": 131072,
+    "inputUsdPerMillion": null,
+    "requestUsd": null,
+    "priceVersion": "unconfigured"
+  },
+  {
+    "id": "npu-whisper-turbo",
+    "modality": "transcription",
+    "modelId": "whisper-v3:turbo",
+    "endpoint": "http://fastflowlm:52625/v1",
+    "resourceId": "strix-halo-npu",
+    "capacity": { "maxParallel": 1, "reservedInteractiveSlots": 0 },
+    "maxInputTokens": 1,
+    "maxBatchSize": 1,
+    "maxBodyBytes": 26214400,
+    "inputUsdPerMillion": null,
+    "requestUsd": null,
+    "priceVersion": "unconfigured"
+  }
+]

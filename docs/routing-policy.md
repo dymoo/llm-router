@@ -1,0 +1,171 @@
+# Routing policy
+
+Normative product policy for dymoo/llm-router. The decisions below supersede conflicting controls in the original model-router handoff. Numeric defaults are editable suggestions, not measured optima, SLAs or calibrated success probabilities.
+
+Stack (given, not re-argued here): Effect 4 RC, Drizzle on SQLite, Next.js, T3 Env for typed configuration. Topology, env names, backup, and drain live in operator docs — do not copy them here.
+
+- Topology, accounting retention, timeouts: [operations.md](operations.md)
+- Env, bind, optional Basic: [setup.md](setup.md)
+- llama.cpp / Qwen3.8-Next-Flash host procedures (install lives there): [llamacpp.md](llamacpp.md)
+- Optional Halogen adapter (unmodified image): [halogen.md](halogen.md)
+- Laya NPU feasibility: [npu.md](npu.md); optional FastFlowLM and WebUI: [ai-hub.md](ai-hub.md)
+- Live catalogue facts: [catalogue.md](catalogue.md)
+- Session metadata for coding agents: [clients.md](clients.md)
+- Domain language: [../CONTEXT.md](../CONTEXT.md)
+- Shape decisions: [adr/0001-assessment-versus-deterministic-routing.md](adr/0001-assessment-versus-deterministic-routing.md), [adr/0002-separate-runtime-deployment-and-licensing.md](adr/0002-separate-runtime-deployment-and-licensing.md), [adr/0003-metadata-analytics-without-transcripts.md](adr/0003-metadata-analytics-without-transcripts.md)
+
+## Authority and superseded handoff controls
+
+| Status | Control |
+| --- | --- |
+| **In force** | Semantic assessment followed by deterministic chat routing; locality bias `[0,1]`; high/medium/low priority; hard limits; pinned task continuations; tenant-scoped exact classifier cache; explicit briefs without silent truncation; selected Laya or Jev with no fallback; internal admin with optional Basic; metadata-only accounting/analytics; first-class llama.cpp and Halogen choices with matching Compose/catalogue configuration; optimized native llama.cpp retained; SSD-backed PLE table; IOMMU enabled for optional FastFlowLM NPU embeddings/STT; Open WebUI routes through the gateway. |
+| **Superseded** | Mandatory admin login / `admin_sessions`; priority `interactive \| background`; privacy `local-only \| cloud-allowed`; `routingPreference`; binary `allowCloudOverflow`; silent cloud spill; silent Laya/Jev fallback; silent classifier truncation; NPU while IOMMU is off; sample catalogue numbers as measurements; automatic paid classifier fallback; counters-only admin; treating HTTP 200 as task success; collecting chat transcripts by default; Halogen as required/default local generator; llama.cpp as merely-under-evaluation or not-adopted; treating `.hgn` as portable to llama.cpp; IOMMU-off as a llama.cpp or Router-wide requirement; HumanEval+ thinking-off as thinking-enabled coding proof; generic Vulkan image pin as gfx1151 Qwen3.8-Next-Flash proof; omitting `usage.cost` on local; treating local API price 0 as COGS zero; inventing zero for unknown token counts or rates |
+
+The handoff remains useful for stack intent, reservation-through-execution, and “do not invent live model ids.” It is not authority for the superseded rows.
+
+## Hard constraints
+
+A candidate is ineligible unless it satisfies **all** of:
+
+- Key allowlist (empty list denies all; unset means every configured deployment, including ones added later)
+- Key and deployment context / completion limits (input plus generation allowance must fit **both**)
+- Required capabilities (tools, JSON, vision) and supported reasoning
+- Configured minimum quality / health — when those fields are present and verified
+- `maxEstimatedUsd` when set (cold-cache, max-generation **estimate**, not an invoice cap; excludes classifier and tool charges)
+
+Locality bias, cost/quality/latency weights, and priority **cannot** compensate a failed hard constraint. If nothing is eligible, fail explicitly. Do not downgrade quality, widen a budget, or change locality to invent a candidate.
+
+## Locality bias
+
+Per-key slider in `[0, 1]`. Preference, not a percentage of traffic, not a privacy mode, not a location lock.
+
+| Region | Intent |
+| --- | --- |
+| **0 (less local / cloud-first)** | Complexity may escalate to cloud. Local stays eligible when it meets hard limits. |
+| **Intermediate** | Prefer local. Highly complex work may still use cloud. Verified saturation may also use cloud. |
+| **1 (maximum local)** | Stay local until **verified saturation**. Complexity alone does not escalate. Gateway permit counts and unknown telemetry are not saturation. |
+
+Live UI copy must describe the current value (slider plus sentence), not a hidden enum. Escalation still waits for a **checkpoint** on an existing Session; `continue` does not silently migrate.
+
+## Priority and queues
+
+Admission and wait order is **high, then medium, then low**. Non-preemptive: in-flight work is not cancelled for a higher key. A deployment reserve for interactive capacity, if configured, is **not** key priority — see [operations.md](operations.md).
+
+Low-priority, high-locality work that is waiting for local capacity must surface a **visible queued notice** to the client. It must not silently spill to cloud.
+
+Do not claim a per-stream TPS floor or a measured host throughput. Those are unverified on this hardware.
+
+## Policy suggestions
+
+Every field is editable. Biases and locality use sliders with live descriptions. Names are starting points for Dylan’s keys, a balanced key, and a cheap background key — not locked profiles.
+
+| Suggestion | Priority | Ranking intent | Locality intent | Queue |
+| --- | --- | --- | --- | --- |
+| Dylan | high | Quality-biased; usually cloud | Low locality bias; complexity may escalate | Does not sit behind low work |
+| Balanced | medium | Cost-biased; usually local | Mid-high locality; complexity or verified saturation may use cloud | After high |
+| Free Vibecode | low | Strong cost | Near-maximum local; escalate only on verified saturation | Local wait with a visible notice |
+
+Context, completion, RPM, concurrency, wait, allowlist, and `maxEstimatedUsd` remain operator-chosen. Earlier handoff tables (65k/131k/32k caps, 0.6/0.7 cost weights, `interactive`/`background`) are **not** mandatory. Relative intent stands: Dylan may receive a larger allowance than Free Vibecode; no number here is a tokenizer proof that a deployment can accept that cap.
+
+## Classification
+
+- **Chat:** assess, then apply deterministic policy. This is not a fallback after a classifier-owned route. Explicit embedding/STT models do not need semantic classification. A bounded Choice over already-filtered chat deployments remains a documented alternative, not the implemented design — [jev-routing.md](research/jev-routing.md).
+- Assess a **Task** at `new-task` / `checkpoint`. Tool-result turns of the same Task use `continue` and reuse the Assessment.
+- Classifier caching is exact, tenant-scoped and completed-result only: key + backend/model revision + question schema + state/brief + catalogue version. No fuzzy matching or in-flight coalescing.
+- Reuse stored judgments across locality/cost/quality **slider** edits when the brief, evidence, and question meanings are unchanged. Do not put slider weights into question text.
+- Include a semantic quality rubric in questions **only** when it changes meaning. Do not send mutable wait, load, or price text into classifier state for arithmetic — policy does that math.
+- Short work may be classified from the real input. Long work needs an explicit compact **task brief** plus non-secret metadata (size, tools, turns). The generation prompt is never shortened to feed the Classifier.
+- **Loss-awareness:** if neither the input nor the brief fits the selected Classifier (tokens, including question overhead), return an explicit context/brief error. Never silently truncate, guess a Route, or call the other Classifier.
+- **Laya:** tokenize with the actual Laya tokenizer, including question overhead. The configured **root** checkpoint is max_len **512** / head **192**. A ~1k family checkpoint was discussed and is **not** this root — do not assume 1k state.
+- **Jev:** this product’s explicit selection bound for the brief is **32k** tokens. Official Jev documents a 64k total / 32k state+longest-question split, sourced in [jev-routing.md](research/jev-routing.md) and not re-measured here. Never silently shrink a larger brief. Cookbook cost/latency figures in that file are published examples, not this host.
+- `CLASSIFIER_MODE` is `laya` or `jev`. Laya failure does not fall back to paid Jev. Jev failure does not fall back to Laya. There is no automatic paid fallback.
+
+Assessment confidence is concentration of the classifier’s output distribution, not the probability that generation will succeed.
+
+## Affinity versus three reuse signals
+
+These are different facts. Analytics and COGS must not collapse them.
+
+| Signal | What it is |
+| --- | --- |
+| **Cache hit** | Observed cached **input tokens** on the generator, deployment-specific |
+| **Classifier exact cache** | Same Assessment reused for the same key/backend/schema/state/catalogue |
+| **Session reuse** | `continue` from a pin; affinity only |
+
+A pin, a repeated prompt, or a provider restriction is not a generation cache hit and must not apply a cached-input price. Deliberate migration at a checkpoint should expect a cold prefill.
+
+## COGS and completeness
+
+Track per key, priority, and deployment, without storing prompts. Responses expose OpenRouter-compatible `usage.cost` on **both** non-stream completions and the **final** streaming usage. Official nested field schema is owned/verified with the HTTP path — this file does not invent extra usage keys.
+
+| Kind | Meaning |
+| --- | --- |
+| Actual (cloud) | Provider-reported `usage.cost` and token fields, **passed through** |
+| Accounting (local) | Internal cost from configured per-deployment **input / cached-input / output** rates × observed tokens. Zero external API bill does **not** omit the field. This is **not** an invoice. |
+| Estimate | Catalogue prices × estimated tokens, with provenance, used for ranking/`maxEstimatedUsd` |
+| Unknown | Missing, cancelled, incomplete, or missing rates — **never coerce to zero** |
+
+Preserve prompt, completion, cached-input, and reasoning **counts**. Do **not** add reasoning tokens twice (once as reasoning and again as completion) when computing accounting cost.
+
+A pin is not a cache hit and must not apply the cached-input rate. Local catalogue API price 0 is not COGS unless the operator set explicit local rates. `maxEstimatedUsd` is not a monthly budget. Classifier charges, tools, and unmodelled fees are out of generation `usage.cost` unless separately recorded.
+
+## Analytics
+
+Analytics is a first-class console surface backed by bounded SQL aggregates and paginated metadata. Its date/key/priority/deployment filters apply to both totals and request drilldown.
+
+**Now (metadata only — no transcripts):**
+
+- Time trends and breakdowns by key, priority, and deployment
+- COGS reported vs estimated vs unknown
+- Local vs cloud share
+- Observed cached input tokens vs classifier exact cache vs session reuse
+- Policy decision reasons and candidate exclusions
+- Complexity and effort distributions
+- Queue wait, TTFT, decode TPS, and end-to-end latency when observed
+- Error, cancel, and saturation counts
+- Request **metadata** drilldown (ids, route, timings, usage fields — not prompt text)
+
+Missing timings stay unknown. Do not invent TPS from catalogue placeholders. HTTP success is not task success.
+
+**Not now:**
+
+- Full chat / transcript logging
+- A task-success classifier or paid evaluator
+
+**Later, explicitly opt-in roadmap** (do not build as defaults):
+
+- Full capture is sensitive. If added, it requires per-key opt-in, access control, retention, redaction, and a storage budget.
+- A later evaluator, if any, is async, sampled, and deduplicated, with **separate spend** from inference. No paid evaluator calls on the default path.
+- Distinguish **observed** test/tool outcomes from **model judgments**. Neither is HTTP 200.
+
+## Admin access
+
+The console is internal. There is **no login form and no admin session**. Reachability of the bound address is admin access unless optional HTTP Basic is set.
+
+- Optional `ADMIN_BASIC_AUTH=username:password` protects HTML and the admin API only. Absent = no gate. Malformed = refuse startup. See [setup.md](setup.md).
+- Inference keeps `jrv_` API keys. Keys never authorize administration.
+- Mutations still require the exact `APP_ORIGIN` and the existing same-origin admin header. That check is not a login.
+
+Default bind is loopback. LAN bind is a deliberate exposure of administration.
+
+## Runtime assumptions (unverified here)
+
+The exact selected llama.cpp/ROCm/guide revisions are recorded in [llamacpp.md](llamacpp.md). No local generator is claimed validated on the incoming AMD host. EngramHalo and kyuz0 alternatives remain source-researched benchmark candidates.
+
+- **Adapter-based.** llama.cpp and Halogen are first-class choices, not forced defaults or silent fallbacks. Both have matching Compose profiles and generated catalogues; the optimized native pwilkin/isolated ROCr-HIP path is retained. The generic Vulkan container is a compatibility lane, not optimized-fork performance evidence. See [runtime selection](runtime-selection.md) and [ADR 0002](adr/0002-separate-runtime-deployment-and-licensing.md).
+- Halogen `.hgn` weights are **not portable** to llama.cpp. The unmodified-image redistribution restriction applies only to Halogen. Its quality overlay is required explicitly; see [halogen.md](halogen.md).
+- User-supplied **HumanEval+** screenshot (thinking **off**, temperature **0**, max tokens **1024**). Does **not** isolate quant vs engine vs template. **Not** proof for thinking-enabled coding-agent work. Not this repository’s measurements:
+
+| Label | Pass | Time |
+| --- | --- | --- |
+| llama Q6_K_v7 | 82.9% | 11.26s |
+| llama Heretic2 IQ4_XS NGQ4 | 79.3% | 4.16s |
+| Halogen official overlay | 78% | 13.82s |
+| Halogen Heretic2 BYO | 61% | 4.32s |
+
+  The 61% BYO row is a different Halogen configuration from official+overlay (78%). Neither row makes Halogen the required default.
+- `amd_iommu=off` was a **prior Halogen-host** prefill approval. It is **not** a llama.cpp requirement. **No host boot changes have been performed** from this tree. It would disable the NPU; default Laya remains CPU until an IOMMU-on NPU path is verified — [npu.md](npu.md).
+- Cloud chat is explicitly OpenRouter `z-ai/glm-5.3-flash`, with the selected endpoint and dated prices in [catalogue.md](catalogue.md). Public metadata was checked; paid generation and backend-specific graded effort were not. Binary thinking reports applied `on` truthfully.
+- Co-tenancy of CPU Laya with a local GPU generator, measured TPS/TTFT, and container NPU passthrough are unverified.
+- Sample quality, latency, and `tokensPerSecond` values are not measurements.
+- Decode TPS and TTFT in analytics are observed request fields when present, not host benchmarks.

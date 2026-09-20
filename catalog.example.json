@@ -1,0 +1,126 @@
+[
+  {
+    "id": "local-llamacpp",
+    "modelId": "REPLACE_FROM_LLAMACPP_/v1/models",
+    "endpoint": "http://host.docker.internal:8080/v1",
+    "location": "local",
+    "transport": "llamacpp",
+    "credentialEnvVar": null,
+    "providerRestriction": null,
+    "contextLimitTokens": 1,
+    "maxOutputTokens": 1,
+    "capabilities": {
+      "tools": false,
+      "json": false,
+      "vision": false
+    },
+    "capacity": {
+      "maxParallel": 1,
+      "reservedInteractiveSlots": 0
+    },
+    "quality": {
+      "chat": 0,
+      "coding": 0,
+      "math": 0,
+      "analysis": 0,
+      "writing": 0,
+      "extraction": 0,
+      "provenance": {
+        "unit": "probability",
+        "source": "unverified-placeholder-not-a-measurement",
+        "asOf": null
+      }
+    },
+    "prices": {
+      "inputUsdPerMillion": 0,
+      "cachedInputUsdPerMillion": 0,
+      "outputUsdPerMillion": 0,
+      "provenance": {
+        "unit": "USD-per-million-tokens",
+        "source": "unknown",
+        "asOf": null
+      }
+    },
+    "latency": {
+      "initialMs": 0,
+      "tokensPerSecond": 1,
+      "provenance": {
+        "unit": "tokens-per-second",
+        "source": "unverified-placeholder-not-a-measurement",
+        "asOf": null
+      }
+    },
+    "reasoning": {
+      "kind": "none"
+    },
+    "reasoningTokenEstimates": {
+      "none": 0,
+      "low": 0,
+      "medium": 0,
+      "high": 0,
+      "xhigh": 0
+    }
+  },
+  {
+    "id": "cloud-glm",
+    "modelId": "z-ai/glm-5.3-flash",
+    "endpoint": "https://openrouter.ai/api/v1",
+    "location": "cloud",
+    "transport": "openrouter",
+    "credentialEnvVar": "OPENROUTER_API_KEY",
+    "providerRestriction": "sail-research/fp8",
+    "contextLimitTokens": 1048576,
+    "maxOutputTokens": 131072,
+    "capabilities": {
+      "tools": true,
+      "json": true,
+      "vision": false
+    },
+    "capacity": {
+      "maxParallel": 1,
+      "reservedInteractiveSlots": 0
+    },
+    "quality": {
+      "chat": 0.85,
+      "coding": 0.85,
+      "math": 0.8,
+      "analysis": 0.85,
+      "writing": 0.85,
+      "extraction": 0.85,
+      "provenance": {
+        "unit": "probability",
+        "source": "operator-bootstrap-ranking-prior-not-calibrated-success-probability",
+        "asOf": "2026-09-20"
+      }
+    },
+    "prices": {
+      "inputUsdPerMillion": 0.1425,
+      "cachedInputUsdPerMillion": 0.0285,
+      "outputUsdPerMillion": 0.475,
+      "provenance": {
+        "unit": "USD-per-million-tokens",
+        "source": "https://openrouter.ai/api/v1/models/z-ai/glm-5.3-flash/endpoints (sail-research/fp8; prices can change; cache savings require observed hits)",
+        "asOf": "2026-09-20"
+      }
+    },
+    "latency": {
+      "initialMs": 2000,
+      "tokensPerSecond": 30,
+      "provenance": {
+        "unit": "tokens-per-second",
+        "source": "operator-bootstrap-latency-prior-not-measured",
+        "asOf": "2026-09-20"
+      }
+    },
+    "reasoning": {
+      "kind": "binary"
+    },
+    "reasoningTokenEstimates": {
+      "none": 0,
+      "low": 1024,
+      "medium": 4096,
+      "high": 8192,
+      "xhigh": 16384
+    }
+  }
+]

@@ -1,0 +1,39 @@
+{
+  "name": "@dymoo/llm-router",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "node --import tsx --conditions=react-server --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "test:production": "node --test --test-reporter=spec integration/*.test.mjs",
+    "format": "oxfmt --write app components server src test integration scripts env.ts proxy.ts instrumentation.ts next.config.ts drizzle.config.ts tsconfig.json package.json catalog.example.json catalog.auxiliary.example.json compose.yaml .github/workflows",
+    "check-all": "npm run typecheck && npm test && npm run build && npm run test:production"
+  },
+  "dependencies": {
+    "@compootor/effective-jev": "0.0.4",
+    "@t3-oss/env-nextjs": "0.13.11",
+    "drizzle-orm": "1.0.0-rc.4",
+    "effect": "4.0.0-rc.112",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "server-only": "0.0.1",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.6",
+    "@types/react": "19.1.13",
+    "@types/react-dom": "19.1.9",
+    "drizzle-kit": "1.0.0-rc.4",
+    "oxfmt": "0.68.0",
+    "tsx": "4.20.5",
+    "typescript": "~5.8.3"
+  },
+  "engines": {
+    "node": ">=22.16.0"
+  }
+}
