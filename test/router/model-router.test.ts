@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Effect, Fiber } from "effect";
+import { Deferred, Effect, Fiber } from "effect";
+import { ClassifierUnqualified } from "../../src/errors.ts";
 import { modelRouterLayer, ModelRouter } from "../../src/router/model-router.ts";
 import type { Classification, RouterWork } from "../../src/router/model-router.ts";
 import {
   balancedPolicy,
   cloudGlm,
   easyLocalCoding,
+  frontier,
   greeting,
   hardCoding,
   localQwen,
@@ -96,6 +98,9 @@ function work(partial: Partial<RouterWork> & Pick<RouterWork, "routing">): Route
   };
 }
 
+function batchWork(partial: Partial<RouterWork> & Pick<RouterWork, "routing">): RouterWork {
+  return work(partial);
+}
 describe("ModelRouter", () => {
   it("pins continuations to the same deployment and effort", async () => {
     const layer = modelRouterLayer({
@@ -411,4 +416,214 @@ it("never sends prompts to a cloud deployment with missing required credentials"
     contacted.some((url) => url.includes("cloud-glm")),
     false,
   );
+});
+describe("ModelRouter batch seam", () => {
+  it("keeps batch completion local even when sync cloud is configured", async () => {
+    const contacted: string[] = [];
+    const layer = modelRouterLayer({
+      catalogue: [localQwen, cloudGlm],
+      catalogueVersion: "batch-local",
+      classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
+      fetch: async (url, init) => {
+        contacted.push(String(url));
+        return fakeFetch()(url, init);
+      },
+    });
+    const result = await Effect.runPromise(
+      ModelRouter.use((router) =>
+        router.completeBatch(
+          batchWork({ routing: { sessionId: "batch-local", boundary: "new-task" } }),
+          "auto",
+        ),
+      ).pipe(Effect.provide(layer)),
+    );
+    assert.equal(result.headers.deploymentId, localQwen.id);
+    assert.equal(
+      contacted.some((url) => url.includes(cloudGlm.id)),
+      false,
+    );
+  });
+
+  it("blocks batch permit acquisition while foreground work is still classifying", async () => {
+    let classifierGate: Deferred.Deferred<void> | undefined;
+    let classifierStarted: Deferred.Deferred<void> | undefined;
+    let classifyCalls = 0;
+    const layer = modelRouterLayer({
+      catalogue: [localQwen, cloudGlm],
+      catalogueVersion: "batch-race",
+      classify: () => {
+        classifyCalls += 1;
+        if (classifyCalls === 1) {
+          return Effect.gen(function* () {
+            yield* Deferred.succeed(classifierStarted!, undefined);
+            yield* Deferred.await(classifierGate!);
+            return classifyAs(easyLocalCoding);
+          });
+        }
+        return Effect.succeed(classifyAs(easyLocalCoding));
+      },
+      fetch: fakeFetch(),
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        classifierGate = yield* Deferred.make<void>();
+        classifierStarted = yield* Deferred.make<void>();
+        const router = yield* ModelRouter;
+        const blocker = yield* Effect.forkChild(
+          router.complete(work({ routing: { sessionId: "classifying", boundary: "new-task" } })),
+          { startImmediately: true },
+        );
+        yield* Deferred.await(classifierStarted!);
+        const blocked = yield* router
+          .completeBatch(
+            batchWork({
+              requestId: "batch-race",
+              routing: { sessionId: "batch", boundary: "new-task" },
+            }),
+            "auto",
+          )
+          .pipe(Effect.result);
+        assert.equal(blocked._tag, "Failure");
+        if (blocked._tag === "Failure") assert.equal(blocked.failure._tag, "CapacityBusy");
+        yield* Fiber.interrupt(blocker);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("does not let an interactive queue admit batch work", async () => {
+    const layer = modelRouterLayer({
+      catalogue: [{ ...localQwen, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } }],
+      catalogueVersion: "batch-queue",
+      classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
+      fetch: hangingFetch(),
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const router = yield* ModelRouter;
+        const blocker = yield* Effect.forkChild(
+          router.complete(
+            work({
+              policy: { ...balancedPolicy, priority: "high", maxWaitMs: 0 },
+              routing: { sessionId: "batch-blocker", boundary: "new-task" },
+            }),
+          ),
+          { startImmediately: true },
+        );
+        yield* Effect.sleep("20 millis");
+        const queued = yield* Effect.forkChild(
+          router.complete(
+            work({
+              requestId: "interactive-queued",
+              policy: { ...balancedPolicy, priority: "low", maxWaitMs: 5_000 },
+              routing: { sessionId: "interactive-queued", boundary: "new-task" },
+            }),
+          ),
+          { startImmediately: true },
+        );
+        yield* Effect.sleep("30 millis");
+        const blocked = yield* router
+          .completeBatch(
+            batchWork({
+              requestId: "batch-queued",
+              routing: { sessionId: "batch-queued", boundary: "new-task" },
+            }),
+            "auto",
+          )
+          .pipe(Effect.result);
+        assert.equal(blocked._tag, "Failure");
+        if (blocked._tag === "Failure") assert.equal(blocked.failure._tag, "CapacityBusy");
+        yield* Fiber.interrupt(blocker);
+        yield* Fiber.interrupt(queued);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("releases a cancelled batch permit for the next foreground request", async () => {
+    const layer = modelRouterLayer({
+      catalogue: [{ ...localQwen, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } }],
+      catalogueVersion: "batch-cancel",
+      classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
+      fetch: hangingFetch(),
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const router = yield* ModelRouter;
+        const batch = yield* Effect.forkChild(
+          router.completeBatch(
+            batchWork({ routing: { sessionId: "batch-cancel", boundary: "new-task" } }),
+            "auto",
+          ),
+          { startImmediately: true },
+        );
+        yield* Effect.sleep("30 millis");
+        yield* Fiber.interrupt(batch);
+        const next = yield* router.complete(
+          work({ routing: { sessionId: "foreground-after-batch", boundary: "new-task" } }),
+        );
+        assert.equal(next.headers.deploymentId, localQwen.id);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("refuses unqualified, forbidden, and over-budget spill plans before provider calls", async () => {
+    let requests = 0;
+    const fetchImpl = async (url: string | URL, init?: RequestInit) => {
+      requests += 1;
+      return fakeFetch()(url, init);
+    };
+    const unqualifiedLayer = modelRouterLayer({
+      catalogue: [localQwen],
+      catalogueVersion: "spill-unqualified",
+      classify: () =>
+        Effect.fail(
+          new ClassifierUnqualified({ message: "qualification required", reason: "missing" }),
+        ),
+      fetch: fetchImpl,
+    });
+    const unqualified = await Effect.runPromise(
+      ModelRouter.use((router) =>
+        router.planBatchSpill(
+          batchWork({ routing: { sessionId: "spill-u", boundary: "new-task" } }),
+          [frontier],
+          "auto",
+        ),
+      ).pipe(Effect.result, Effect.provide(unqualifiedLayer)),
+    );
+    assert.equal(unqualified._tag, "Failure");
+    assert.equal(requests, 0);
+
+    const layer = modelRouterLayer({
+      catalogue: [localQwen],
+      catalogueVersion: "spill-policy",
+      classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
+      fetch: fetchImpl,
+    });
+    const forbidden = await Effect.runPromise(
+      ModelRouter.use((router) =>
+        router.planBatchSpill(
+          batchWork({
+            policy: { ...balancedPolicy, allowedModels: [localQwen.id] },
+            routing: { sessionId: "spill-f", boundary: "new-task" },
+          }),
+          [frontier],
+          "auto",
+        ),
+      ).pipe(Effect.result, Effect.provide(layer)),
+    );
+    assert.equal(forbidden._tag, "Failure");
+    const overBudget = await Effect.runPromise(
+      ModelRouter.use((router) =>
+        router.planBatchSpill(
+          batchWork({
+            policy: { ...balancedPolicy, maxEstimatedUsd: 0 },
+            routing: { sessionId: "spill-b", boundary: "new-task" },
+          }),
+          [frontier],
+          "auto",
+        ),
+      ).pipe(Effect.result, Effect.provide(layer)),
+    );
+    assert.equal(overBudget._tag, "Failure");
+    assert.equal(requests, 0);
+  });
 });

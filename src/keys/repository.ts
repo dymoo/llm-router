@@ -25,7 +25,15 @@ import {
   RateLimited,
   StaleVersion,
 } from "../errors.ts";
-import { apiKeys, auditLog, rateLimits, requests, settings } from "../db/schema.ts";
+import {
+  apiKeys,
+  auditLog,
+  batchItems,
+  batchJobs,
+  rateLimits,
+  requests,
+  settings,
+} from "../db/schema.ts";
 import { SqliteDatabase, type ControlPlaneSession } from "../db/sqlite.ts";
 import {
   apiKeyDigest,
@@ -88,9 +96,24 @@ export class KeyRepository extends Context.Service<
     revokeKey(id: string): Effect.Effect<ApiKeyPublic, RepoError>;
     rotateKey(input: { id: string; expectedVersion: number }): Effect.Effect<CreatedKey, RepoError>;
     admit(rawKey: string): Effect.Effect<Admission, RepoError>;
+    admitByKeyId(keyId: string): Effect.Effect<Admission, RepoError>;
     authenticate(rawKey: string): Effect.Effect<ApiKeyPublic, RepoError>;
     recheck(admission: Admission): Effect.Effect<Admission, RepoError>;
     finalize(admission: Admission, outcome: FinalizeOutcome): Effect.Effect<void, RepoError>;
+    attach(admission: Admission, itemId: string): Effect.Effect<void, RepoError>;
+    defer(
+      admission: Admission,
+      itemId: string,
+      metadata: Omit<FinalizeOutcome, "status">,
+      deadlineAt: number,
+    ): Effect.Effect<void, RepoError>;
+    recheckDeferred(admission: Admission): Effect.Effect<void, RepoError>;
+    finalizeDeferred(
+      keyId: string,
+      requestId: string,
+      outcome: FinalizeOutcome,
+    ): Effect.Effect<void, RepoError>;
+    finalizeInterrupted(keyId: string, itemId: string): Effect.Effect<void, RepoError>;
     usageSummary(input: {
       since?: number;
       until?: number;
@@ -223,8 +246,86 @@ function assertActive(row: typeof apiKeys.$inferSelect, now: number): void {
 function recoverStale(tx: ControlPlaneSession, now: number): void {
   tx.update(requests)
     .set({ status: "abandoned", finishedAt: now })
-    .where(and(eq(requests.status, "running"), lte(requests.leaseExpiresAt, now)))
+    .where(
+      and(
+        eq(requests.status, "running"),
+        eq(requests.deferred, 0),
+        lte(requests.leaseExpiresAt, now),
+      ),
+    )
     .run();
+}
+
+/** The accounting columns shared by ordinary finalization and remote-deferred
+ * finalization. A missing field means "preserve the value already written by
+ * assessment/planning"; explicit nulls therefore remain unknown rather than
+ * becoming zero. */
+function requestOutcomeFields(
+  lease: typeof requests.$inferSelect,
+  outcome: Omit<FinalizeOutcome, "status">,
+) {
+  return {
+    deploymentId: outcome.deploymentId ?? lease.deploymentId,
+    promptTokens: outcome.promptTokens ?? lease.promptTokens,
+    completionTokens: outcome.completionTokens ?? lease.completionTokens,
+    reasoningTokens: outcome.reasoningTokens ?? lease.reasoningTokens,
+    cachedInputTokens: outcome.cachedInputTokens ?? lease.cachedInputTokens,
+    ttftMs: outcome.ttftMs ?? lease.ttftMs,
+    generationElapsedMs: outcome.generationElapsedMs ?? lease.generationElapsedMs,
+    providerReportedUsd: outcome.providerReportedUsd ?? lease.providerReportedUsd,
+    estimatedCostUsd: outcome.estimatedCostUsd ?? lease.estimatedCostUsd,
+    estimatedCacheSavingsUsd: outcome.estimatedCacheSavingsUsd ?? lease.estimatedCacheSavingsUsd,
+    localComputeEstimatedUsd: outcome.localComputeEstimatedUsd ?? lease.localComputeEstimatedUsd,
+    priceVersion: outcome.priceVersion ?? lease.priceVersion,
+    trajectoryHash: outcome.trajectoryHash ?? lease.trajectoryHash,
+    errorCode: outcome.errorCode ?? lease.errorCode,
+    classifierBackend: outcome.classifierBackend ?? lease.classifierBackend,
+    classifierModelRevision: outcome.modelRevision ?? lease.classifierModelRevision,
+    classifierSource: outcome.source ?? lease.classifierSource,
+    classifierInputTokens: outcome.classifierInputTokens ?? lease.classifierInputTokens,
+    classifierElapsedMs: outcome.classifierElapsedMs ?? lease.classifierElapsedMs,
+    classifierReuse: outcome.reuse ?? lease.classifierReuse,
+    location: outcome.location ?? lease.location,
+    transport: outcome.transport ?? lease.transport,
+    boundary: outcome.boundary ?? lease.boundary,
+    saturation: outcome.saturation === undefined ? lease.saturation : outcome.saturation ? 1 : 0,
+    queueWaitMs: outcome.queueWaitMs ?? lease.queueWaitMs,
+    decisionReason: outcome.decisionReason ?? lease.decisionReason,
+    selectionReasonCode: outcome.selectionReasonCode ?? lease.selectionReasonCode,
+    selectionReasonDetail: outcome.selectionReasonDetail ?? lease.selectionReasonDetail,
+    exclusionJson: outcome.exclusionJson ?? lease.exclusionJson,
+    taskKind: outcome.taskKind ?? lease.taskKind,
+    difficulty: outcome.difficulty ?? lease.difficulty,
+    requestedEffort: outcome.requestedEffort ?? lease.requestedEffort,
+    decodeTps: outcome.decodeTps ?? lease.decodeTps,
+    cacheObservation: outcome.cacheObservation ?? lease.cacheObservation,
+    costSource: outcome.costSource ?? lease.costSource,
+    decisionTraceJson: outcome.decisionTraceJson ?? lease.decisionTraceJson,
+  };
+}
+
+/** Remote generation has not happened at defer time. Keep planned deployment
+ * and all classifier/decision facts, but never turn unknown generation facts
+ * into a guessed zero or a local price. */
+function remoteDeferredFields(
+  metadata: Omit<FinalizeOutcome, "status">,
+): Omit<FinalizeOutcome, "status"> {
+  return {
+    ...metadata,
+    promptTokens: null,
+    completionTokens: null,
+    reasoningTokens: null,
+    cachedInputTokens: null,
+    ttftMs: null,
+    generationElapsedMs: null,
+    providerReportedUsd: null,
+    estimatedCostUsd: null,
+    estimatedCacheSavingsUsd: null,
+    localComputeEstimatedUsd: null,
+    priceVersion: null,
+    trajectoryHash: null,
+    costSource: null,
+  };
 }
 
 function maybeMaintain(tx: ControlPlaneSession, now: number): void {
@@ -599,64 +700,107 @@ export const keyRepositoryLayer = (options: {
                 maybeMaintain(tx, now);
                 recoverStale(tx, now);
                 const row = authenticatePrefix(tx, pepper, rawKey, now);
-                const policy = decodePolicyJson(row.policyJson);
-                if (policy.maxConcurrent <= 0) {
-                  throw new ConcurrentLimit({ message: "concurrent request limit reached" });
+                return admitRow(tx, row, now);
+              },
+              { behavior: "immediate" },
+            ),
+          catch: mapRepoError,
+        });
+      });
+
+      /** The admission transaction body shared by `admit` and `admitByKeyId`: policy decode,
+       * concurrency/rate checks, request-row insert, and lease stamping. */
+      function admitRow(
+        tx: ControlPlaneSession,
+        row: typeof apiKeys.$inferSelect,
+        now: number,
+      ): Admission {
+        {
+          const policy = decodePolicyJson(row.policyJson);
+          if (policy.maxConcurrent <= 0) {
+            throw new ConcurrentLimit({ message: "concurrent request limit reached" });
+          }
+          if (policy.requestsPerMinute <= 0) {
+            throw new RateLimited({ message: "request rate limit reached" });
+          }
+          const running = tx
+            .select({ n: sql<number>`count(*)` })
+            .from(requests)
+            .where(
+              and(
+                eq(requests.keyId, row.id),
+                eq(requests.status, "running"),
+                eq(requests.deferred, 0),
+              ),
+            )
+            .get();
+          if ((running?.n ?? 0) >= policy.maxConcurrent) {
+            throw new ConcurrentLimit({ message: "concurrent request limit reached" });
+          }
+          const minute = utcMinute(now);
+          const bucket = tx
+            .select()
+            .from(rateLimits)
+            .where(and(eq(rateLimits.keyId, row.id), eq(rateLimits.minute, minute)))
+            .get();
+          const count = bucket?.count ?? 0;
+          if (count >= policy.requestsPerMinute) {
+            throw new RateLimited({ message: "request rate limit reached" });
+          }
+          if (bucket === undefined) {
+            tx.insert(rateLimits).values({ keyId: row.id, minute, count: 1 }).run();
+          } else {
+            tx.update(rateLimits)
+              .set({ count: count + 1 })
+              .where(and(eq(rateLimits.keyId, row.id), eq(rateLimits.minute, minute)))
+              .run();
+          }
+          const requestId = randomUUID();
+          const leaseExpiresAt = now + REQUEST_LEASE_MS;
+          tx.insert(requests)
+            .values({
+              id: requestId,
+              keyId: row.id,
+              startedAt: now,
+              leaseExpiresAt,
+              finishedAt: null,
+              status: "running",
+              deferred: 0,
+              priority: policy.priority,
+              localityBias: policy.localityBias,
+            })
+            .run();
+          tx.update(apiKeys).set({ lastUsedAt: now }).where(eq(apiKeys.id, row.id)).run();
+          return {
+            requestId,
+            keyId: row.id,
+            prefix: row.prefix,
+            name: row.name,
+            policy,
+            version: row.version,
+            leaseExpiresAt,
+            admittedAt: now,
+          } satisfies Admission;
+        }
+      }
+
+      const admitByKeyId = Effect.fn("KeyRepository.admitByKeyId")(function* (keyId: string) {
+        // Batch-only admission path (deferred-lane scheduler): same transaction and the
+        // same revocation/expiry/rate/concurrency/policy validation as `admit`, addressed
+        // by key id because batch clients hand us no raw key. Never reachable from a route.
+        const now = yield* Clock.currentTimeMillis;
+        return yield* Effect.try({
+          try: () =>
+            db.transaction(
+              (tx) => {
+                maybeMaintain(tx, now);
+                recoverStale(tx, now);
+                const row = tx.select().from(apiKeys).where(eq(apiKeys.id, keyId)).get();
+                if (row === undefined) {
+                  throw new AuthFailed({ message: "invalid api key" });
                 }
-                if (policy.requestsPerMinute <= 0) {
-                  throw new RateLimited({ message: "request rate limit reached" });
-                }
-                const running = tx
-                  .select({ n: sql<number>`count(*)` })
-                  .from(requests)
-                  .where(and(eq(requests.keyId, row.id), eq(requests.status, "running")))
-                  .get();
-                if ((running?.n ?? 0) >= policy.maxConcurrent) {
-                  throw new ConcurrentLimit({ message: "concurrent request limit reached" });
-                }
-                const minute = utcMinute(now);
-                const bucket = tx
-                  .select()
-                  .from(rateLimits)
-                  .where(and(eq(rateLimits.keyId, row.id), eq(rateLimits.minute, minute)))
-                  .get();
-                const count = bucket?.count ?? 0;
-                if (count >= policy.requestsPerMinute) {
-                  throw new RateLimited({ message: "request rate limit reached" });
-                }
-                if (bucket === undefined) {
-                  tx.insert(rateLimits).values({ keyId: row.id, minute, count: 1 }).run();
-                } else {
-                  tx.update(rateLimits)
-                    .set({ count: count + 1 })
-                    .where(and(eq(rateLimits.keyId, row.id), eq(rateLimits.minute, minute)))
-                    .run();
-                }
-                const requestId = randomUUID();
-                const leaseExpiresAt = now + REQUEST_LEASE_MS;
-                tx.insert(requests)
-                  .values({
-                    id: requestId,
-                    keyId: row.id,
-                    startedAt: now,
-                    leaseExpiresAt,
-                    finishedAt: null,
-                    status: "running",
-                    priority: policy.priority,
-                    localityBias: policy.localityBias,
-                  })
-                  .run();
-                tx.update(apiKeys).set({ lastUsedAt: now }).where(eq(apiKeys.id, row.id)).run();
-                return {
-                  requestId,
-                  keyId: row.id,
-                  prefix: row.prefix,
-                  name: row.name,
-                  policy,
-                  version: row.version,
-                  leaseExpiresAt,
-                  admittedAt: now,
-                } satisfies Admission;
+                assertActive(row, now);
+                return admitRow(tx, row, now);
               },
               { behavior: "immediate" },
             ),
@@ -686,7 +830,9 @@ export const keyRepositoryLayer = (options: {
                   .get();
                 if (
                   lease === undefined ||
+                  lease.keyId !== admission.keyId ||
                   lease.status !== "running" ||
+                  lease.deferred !== 0 ||
                   lease.leaseExpiresAt <= now
                 ) {
                   throw new Conflict({ message: "request lease is no longer valid" });
@@ -706,10 +852,331 @@ export const keyRepositoryLayer = (options: {
         });
       });
 
+      /** Return the metadata-only item/job binding used by attach, defer and
+       * deferred finalization. Request bodies never enter this control-plane
+       * transaction. */
+      function batchBinding(tx: ControlPlaneSession, itemId: string) {
+        return tx
+          .select({ item: batchItems, job: batchJobs })
+          .from(batchItems)
+          .innerJoin(batchJobs, eq(batchItems.jobId, batchJobs.id))
+          .where(eq(batchItems.id, itemId))
+          .get();
+      }
+
+      const attach = Effect.fn("KeyRepository.attach")(function* (
+        admission: Admission,
+        itemId: string,
+      ) {
+        const now = yield* Clock.currentTimeMillis;
+        return yield* Effect.try({
+          try: () =>
+            db.transaction(
+              (tx) => {
+                const binding = batchBinding(tx, itemId);
+                if (binding === undefined || binding.job.keyId !== admission.keyId) {
+                  throw new Conflict({ message: "batch item is not owned by the admitted key" });
+                }
+                if (binding.item.status !== "running") {
+                  throw new Conflict({ message: "batch item is not running" });
+                }
+                if (
+                  binding.item.requestId !== null &&
+                  binding.item.requestId !== admission.requestId
+                ) {
+                  throw new Conflict({ message: "batch item is already bound to another request" });
+                }
+                const key = tx.select().from(apiKeys).where(eq(apiKeys.id, admission.keyId)).get();
+                if (key === undefined) {
+                  throw new KeyNotFound({ message: "key not found" });
+                }
+                assertActive(key, now);
+                if (key.version !== admission.version) {
+                  throw new StaleVersion({ message: "key policy changed before dispatch" });
+                }
+                const lease = tx
+                  .select()
+                  .from(requests)
+                  .where(eq(requests.id, admission.requestId))
+                  .get();
+                if (
+                  lease === undefined ||
+                  lease.keyId !== admission.keyId ||
+                  lease.status !== "running" ||
+                  lease.deferred !== 0 ||
+                  lease.leaseExpiresAt <= now
+                ) {
+                  throw new Conflict({ message: "request lease is no longer valid" });
+                }
+                if (binding.item.requestId === null) {
+                  tx.update(batchItems)
+                    .set({ requestId: admission.requestId })
+                    .where(eq(batchItems.id, itemId))
+                    .run();
+                }
+              },
+              { behavior: "immediate" },
+            ),
+          catch: mapRepoError,
+        });
+      });
+
+      const defer = Effect.fn("KeyRepository.defer")(function* (
+        admission: Admission,
+        itemId: string,
+        metadata: Omit<FinalizeOutcome, "status">,
+        deadlineAt: number,
+      ) {
+        const now = yield* Clock.currentTimeMillis;
+        return yield* Effect.try({
+          try: () =>
+            db.transaction(
+              (tx) => {
+                const binding = batchBinding(tx, itemId);
+                if (binding === undefined || binding.job.keyId !== admission.keyId) {
+                  throw new Conflict({ message: "batch item is not owned by the admitted key" });
+                }
+                if (binding.item.status !== "running") {
+                  throw new Conflict({ message: "batch item is not running" });
+                }
+                if (binding.item.requestId !== admission.requestId) {
+                  throw new Conflict({ message: "batch item is not bound to this request" });
+                }
+                if (
+                  typeof metadata.deploymentId !== "string" ||
+                  metadata.deploymentId.length === 0
+                ) {
+                  throw new Conflict({ message: "deferred request requires a deployment" });
+                }
+                if (
+                  !Number.isSafeInteger(deadlineAt) ||
+                  deadlineAt <= now ||
+                  deadlineAt > now + REQUEST_RETENTION_MS
+                ) {
+                  throw new Conflict({ message: "invalid deferred request deadline" });
+                }
+                const jobDeadlineAt = binding.job.spillAt + binding.job.completionWindowMs;
+                if (!Number.isSafeInteger(jobDeadlineAt) || deadlineAt > jobDeadlineAt) {
+                  throw new Conflict({
+                    message: "deferred request deadline exceeds batch deadline",
+                  });
+                }
+                if (!["validating", "queued", "in_progress"].includes(binding.job.status)) {
+                  throw new Conflict({ message: "batch job no longer accepts dispatch" });
+                }
+                const key = tx.select().from(apiKeys).where(eq(apiKeys.id, admission.keyId)).get();
+                if (key === undefined) {
+                  throw new KeyNotFound({ message: "key not found" });
+                }
+                assertActive(key, now);
+                if (key.version !== admission.version) {
+                  throw new StaleVersion({ message: "key policy changed before dispatch" });
+                }
+                const lease = tx
+                  .select()
+                  .from(requests)
+                  .where(eq(requests.id, admission.requestId))
+                  .get();
+                if (
+                  lease === undefined ||
+                  lease.keyId !== admission.keyId ||
+                  lease.status !== "running" ||
+                  lease.deferred !== 0 ||
+                  lease.leaseExpiresAt <= now
+                ) {
+                  throw new Conflict({ message: "request lease is no longer valid" });
+                }
+                tx.update(requests)
+                  .set({
+                    ...requestOutcomeFields(lease, remoteDeferredFields(metadata)),
+                    deferred: 1,
+                    leaseExpiresAt: deadlineAt,
+                  })
+                  .where(eq(requests.id, admission.requestId))
+                  .run();
+                tx.update(batchItems)
+                  .set({ deploymentId: metadata.deploymentId })
+                  .where(eq(batchItems.id, itemId))
+                  .run();
+              },
+              { behavior: "immediate" },
+            ),
+          catch: mapRepoError,
+        });
+      });
+
+      /** Recheck a remote request after ordinary lease ownership has been handed
+       * to the durable batch row but immediately before a new provider POST.
+       * This never restores process leases or consumes another rate token. */
+      const recheckDeferred = Effect.fn("KeyRepository.recheckDeferred")(function* (
+        admission: Admission,
+      ) {
+        const now = yield* Clock.currentTimeMillis;
+        return yield* Effect.try({
+          try: () =>
+            db.transaction(
+              (tx) => {
+                const key = tx.select().from(apiKeys).where(eq(apiKeys.id, admission.keyId)).get();
+                if (key === undefined) {
+                  throw new KeyNotFound({ message: "key not found" });
+                }
+                assertActive(key, now);
+                if (key.version !== admission.version) {
+                  throw new StaleVersion({ message: "key policy changed before dispatch" });
+                }
+                const lease = tx
+                  .select()
+                  .from(requests)
+                  .where(eq(requests.id, admission.requestId))
+                  .get();
+                if (
+                  lease === undefined ||
+                  lease.keyId !== admission.keyId ||
+                  lease.status !== "running" ||
+                  lease.deferred !== 1 ||
+                  lease.leaseExpiresAt <= now
+                ) {
+                  throw new Conflict({ message: "deferred request is no longer valid" });
+                }
+                const bindings = tx
+                  .select({ item: batchItems, job: batchJobs })
+                  .from(batchItems)
+                  .innerJoin(batchJobs, eq(batchItems.jobId, batchJobs.id))
+                  .where(eq(batchItems.requestId, admission.requestId))
+                  .all();
+                if (bindings.length !== 1 || bindings[0]?.job.keyId !== admission.keyId) {
+                  throw new Conflict({ message: "deferred request is not bound to this key" });
+                }
+                const binding = bindings[0];
+                if (binding.item.status !== "running") {
+                  throw new Conflict({ message: "batch item is not running" });
+                }
+                if (!["validating", "queued", "in_progress"].includes(binding.job.status)) {
+                  throw new Conflict({ message: "batch job no longer accepts dispatch" });
+                }
+              },
+              { behavior: "immediate" },
+            ),
+          catch: mapRepoError,
+        });
+      });
+
+      const finalizeDeferred = Effect.fn("KeyRepository.finalizeDeferred")(function* (
+        keyId: string,
+        requestId: string,
+        outcome: FinalizeOutcome,
+      ) {
+        const now = yield* Clock.currentTimeMillis;
+        return yield* Effect.try({
+          try: () =>
+            db.transaction(
+              (tx) => {
+                const lease = tx.select().from(requests).where(eq(requests.id, requestId)).get();
+                if (lease === undefined || lease.keyId !== keyId) {
+                  throw new Conflict({ message: "deferred request is not owned by this key" });
+                }
+                if (lease.status !== "running") {
+                  if (lease.deferred === 0) {
+                    return;
+                  }
+                  throw new Conflict({ message: "deferred request has an invalid terminal state" });
+                }
+                const bindings = tx
+                  .select({ item: batchItems, job: batchJobs })
+                  .from(batchItems)
+                  .innerJoin(batchJobs, eq(batchItems.jobId, batchJobs.id))
+                  .where(eq(batchItems.requestId, requestId))
+                  .all();
+                if (bindings.length !== 1 || bindings[0]?.job.keyId !== keyId) {
+                  throw new Conflict({
+                    message: "deferred request is not bound to one batch item",
+                  });
+                }
+                if (lease.deferred !== 1) {
+                  throw new Conflict({ message: "request is not deferred" });
+                }
+                tx.update(requests)
+                  .set({
+                    status: outcome.status,
+                    finishedAt: now,
+                    deferred: 0,
+                    ...requestOutcomeFields(lease, outcome),
+                  })
+                  .where(eq(requests.id, requestId))
+                  .run();
+              },
+              { behavior: "immediate" },
+            ),
+          catch: mapRepoError,
+        });
+      });
+
+      /** Settle a request whose batch item was interrupted during recovery.
+       * This is deliberately independent of active-key state and works for
+       * both ordinary and deferred requests without creating a new admission. */
+      const finalizeInterrupted = Effect.fn("KeyRepository.finalizeInterrupted")(function* (
+        keyId: string,
+        itemId: string,
+      ) {
+        const now = yield* Clock.currentTimeMillis;
+        return yield* Effect.try({
+          try: () =>
+            db.transaction(
+              (tx) => {
+                const binding = batchBinding(tx, itemId);
+                if (binding === undefined || binding.job.keyId !== keyId) {
+                  throw new Conflict({ message: "batch item is not owned by this key" });
+                }
+                if (binding.item.status !== "interrupted") {
+                  throw new Conflict({ message: "batch item is not interrupted" });
+                }
+                const requestId = binding.item.requestId;
+                if (requestId === null) {
+                  return;
+                }
+
+                const lease = tx.select().from(requests).where(eq(requests.id, requestId)).get();
+                if (lease === undefined || lease.keyId !== keyId) {
+                  throw new Conflict({ message: "interrupted request is not owned by this key" });
+                }
+                const bindings = tx
+                  .select({ item: batchItems, job: batchJobs })
+                  .from(batchItems)
+                  .innerJoin(batchJobs, eq(batchItems.jobId, batchJobs.id))
+                  .where(eq(batchItems.requestId, requestId))
+                  .all();
+                if (
+                  bindings.length !== 1 ||
+                  bindings[0]?.item.id !== itemId ||
+                  bindings[0]?.job.id !== binding.job.id ||
+                  bindings[0]?.job.keyId !== keyId
+                ) {
+                  throw new Conflict({ message: "interrupted request is not bound to this item" });
+                }
+                if (lease.status !== "running") {
+                  return;
+                }
+                tx.update(requests)
+                  .set({
+                    status: "abandoned",
+                    errorCode: "batch_interrupted",
+                    deferred: 0,
+                    finishedAt: now,
+                  })
+                  .where(eq(requests.id, requestId))
+                  .run();
+              },
+              { behavior: "immediate" },
+            ),
+          catch: mapRepoError,
+        });
+      });
+
       const finalize = Effect.fn("KeyRepository.finalize")(function* (
         admission: Admission,
         outcome: FinalizeOutcome,
       ) {
+        const now = yield* Clock.currentTimeMillis;
         return yield* Effect.try({
           try: () =>
             db.transaction(
@@ -719,58 +1186,19 @@ export const keyRepositoryLayer = (options: {
                   .from(requests)
                   .where(eq(requests.id, admission.requestId))
                   .get();
-                if (lease === undefined || lease.status !== "running") {
+                if (
+                  lease === undefined ||
+                  lease.keyId !== admission.keyId ||
+                  lease.status !== "running" ||
+                  lease.deferred !== 0
+                ) {
                   return;
                 }
                 tx.update(requests)
                   .set({
                     status: outcome.status,
-                    finishedAt: Date.now(),
-                    deploymentId: outcome.deploymentId ?? lease.deploymentId,
-                    promptTokens: outcome.promptTokens ?? lease.promptTokens,
-                    completionTokens: outcome.completionTokens ?? lease.completionTokens,
-                    reasoningTokens: outcome.reasoningTokens ?? lease.reasoningTokens,
-                    cachedInputTokens: outcome.cachedInputTokens ?? lease.cachedInputTokens,
-                    ttftMs: outcome.ttftMs ?? lease.ttftMs,
-                    generationElapsedMs: outcome.generationElapsedMs ?? lease.generationElapsedMs,
-                    providerReportedUsd: outcome.providerReportedUsd ?? lease.providerReportedUsd,
-                    estimatedCostUsd: outcome.estimatedCostUsd ?? lease.estimatedCostUsd,
-                    estimatedCacheSavingsUsd:
-                      outcome.estimatedCacheSavingsUsd ?? lease.estimatedCacheSavingsUsd,
-                    localComputeEstimatedUsd:
-                      outcome.localComputeEstimatedUsd ?? lease.localComputeEstimatedUsd,
-                    priceVersion: outcome.priceVersion ?? lease.priceVersion,
-                    trajectoryHash: outcome.trajectoryHash ?? lease.trajectoryHash,
-                    errorCode: outcome.errorCode ?? lease.errorCode,
-                    classifierBackend: outcome.classifierBackend ?? lease.classifierBackend,
-                    classifierModelRevision: outcome.modelRevision ?? lease.classifierModelRevision,
-                    classifierSource: outcome.source ?? lease.classifierSource,
-                    classifierInputTokens:
-                      outcome.classifierInputTokens ?? lease.classifierInputTokens,
-                    classifierElapsedMs: outcome.classifierElapsedMs ?? lease.classifierElapsedMs,
-                    classifierReuse: outcome.reuse ?? lease.classifierReuse,
-                    location: outcome.location ?? lease.location,
-                    transport: outcome.transport ?? lease.transport,
-                    boundary: outcome.boundary ?? lease.boundary,
-                    saturation:
-                      outcome.saturation === undefined
-                        ? lease.saturation
-                        : outcome.saturation
-                          ? 1
-                          : 0,
-                    queueWaitMs: outcome.queueWaitMs ?? lease.queueWaitMs,
-                    decisionReason: outcome.decisionReason ?? lease.decisionReason,
-                    selectionReasonCode: outcome.selectionReasonCode ?? lease.selectionReasonCode,
-                    selectionReasonDetail:
-                      outcome.selectionReasonDetail ?? lease.selectionReasonDetail,
-                    exclusionJson: outcome.exclusionJson ?? lease.exclusionJson,
-                    taskKind: outcome.taskKind ?? lease.taskKind,
-                    difficulty: outcome.difficulty ?? lease.difficulty,
-                    requestedEffort: outcome.requestedEffort ?? lease.requestedEffort,
-                    decodeTps: outcome.decodeTps ?? lease.decodeTps,
-                    cacheObservation: outcome.cacheObservation ?? lease.cacheObservation,
-                    costSource: outcome.costSource ?? lease.costSource,
-                    decisionTraceJson: outcome.decisionTraceJson ?? lease.decisionTraceJson,
+                    finishedAt: now,
+                    ...requestOutcomeFields(lease, outcome),
                   })
                   .where(eq(requests.id, admission.requestId))
                   .run();
@@ -988,6 +1416,12 @@ export const keyRepositoryLayer = (options: {
         revokeKey,
         rotateKey,
         admit,
+        admitByKeyId,
+        attach,
+        defer,
+        recheckDeferred,
+        finalizeDeferred,
+        finalizeInterrupted,
         authenticate,
         recheck,
         finalize,

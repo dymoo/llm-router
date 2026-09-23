@@ -877,6 +877,159 @@ export const AnalyticsSnapshot = Schema.Struct({
 });
 export type AnalyticsSnapshot = typeof AnalyticsSnapshot.Type;
 
+/** Batch job lifecycle. The four terminals are completed, failed, expired and cancelled. */
+export const BatchStatus = Schema.Literals([
+  "validating",
+  "queued",
+  "in_progress",
+  "finalizing",
+  "completed",
+  "failed",
+  "expired",
+  "cancelling",
+  "cancelled",
+]);
+export type BatchStatus = typeof BatchStatus.Type;
+
+export const BatchItemStatus = Schema.Literals([
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "expired",
+  /** Crash marker: dispatch possibly executed but the process died before the outcome landed. */
+  "interrupted",
+]);
+export type BatchItemStatus = typeof BatchItemStatus.Type;
+
+export const BATCH_TERMINAL_STATUSES = [
+  "completed",
+  "failed",
+  "expired",
+  "cancelled",
+] as const satisfies readonly BatchStatus[];
+export type BatchTerminalStatus = (typeof BATCH_TERMINAL_STATUSES)[number];
+
+const TERMINAL_BY_BATCH_STATUS: Record<BatchStatus, boolean> = {
+  validating: false,
+  queued: false,
+  in_progress: false,
+  finalizing: false,
+  cancelling: false,
+  completed: true,
+  failed: true,
+  expired: true,
+  cancelled: true,
+};
+
+export const batchStatusIsTerminal = (status: BatchStatus): status is BatchTerminalStatus =>
+  TERMINAL_BY_BATCH_STATUS[status];
+
+export const batchItemStatusIsTerminal = (status: BatchItemStatus): boolean =>
+  status !== "queued" && status !== "running";
+
+/** Our submit limits; OpenRouter publishes none. 1000 items, 512KiB/item, 32MiB/job. */
+export const BATCH_MAX_ITEMS_PER_JOB = 1_000;
+export const BATCH_MAX_ITEM_BODY_BYTES = 512 * 1024;
+export const BATCH_MAX_JOB_BODY_BYTES = 32 * 1024 * 1024;
+export const BATCH_MAX_INFLIGHT_JOBS_PER_KEY = 4;
+export const BATCH_MAX_CUSTOM_ID_CHARS = 128;
+
+export const BatchRequestCounts = Schema.Struct({
+  total: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  completed: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  failed: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type BatchRequestCounts = typeof BatchRequestCounts.Type;
+
+/** Batch-level usage only. Remote batch rows carry no per-item cost (the batch discount is
+ * batch-level); local dispatch keeps configured COGS through ordinary request accounting. */
+export const BatchUsage = Schema.Struct({
+  prompt_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  completion_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  total_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  cost: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  is_byok: Schema.NullOr(Schema.Boolean),
+});
+export type BatchUsage = typeof BatchUsage.Type;
+
+/** Metadata-only batch job. Never carries prompts or completions; those live in the dedicated
+ * store's input files (item bodies) and result rows. All timestamps are epoch ms. */
+export const BatchJob = Schema.Struct({
+  id: Schema.NonEmptyString,
+  keyId: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
+  status: BatchStatus,
+  completionWindowMs: Schema.Int.check(Schema.isGreaterThan(0)),
+  createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  finalizedAt: UnknownCount,
+  spillAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  requestCounts: BatchRequestCounts,
+  usage: Schema.NullOr(BatchUsage),
+  errorCode: Schema.NullOr(Schema.String),
+});
+export type BatchJob = typeof BatchJob.Type;
+
+/** Durable remote spill intent: ONE row per compatibility group holding ONE proven remote id
+ * (a job has many groups; compat splits create separate intents). `intended` is persisted —
+ * with its exact itemIds assigned — before the POST; `confirmed` carries a provider id proven
+ * to be ours (never replaced, never similarity-adopted); `unknown` marks an ambiguous POST
+ * (possibly executed); `abandoned` marks a definite clean rejection (provably never executed,
+ * assigned items return to queued). Terminal usage/harvest facts persist once per group. */
+export const BatchRemoteIntent = Schema.Literals(["intended", "confirmed", "unknown", "abandoned"]);
+export type BatchRemoteIntent = typeof BatchRemoteIntent.Type;
+
+export const BatchRemote = Schema.Struct({
+  id: Schema.NonEmptyString,
+  jobId: Schema.NonEmptyString,
+  groupKey: Schema.NonEmptyString,
+  intent: BatchRemoteIntent,
+  submitToken: Schema.NonEmptyString,
+  /** The single proven provider id for this group; null until confirmed. */
+  remoteBatchId: Schema.NullOr(Schema.String),
+  /** Provider-reported usage for this group, persisted once at terminal harvest. */
+  usage: Schema.NullOr(BatchUsage),
+  harvestedAt: UnknownCount,
+  createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  confirmedAt: UnknownCount,
+});
+export type BatchRemote = typeof BatchRemote.Type;
+
+export const BatchItem = Schema.Struct({
+  id: Schema.NonEmptyString,
+  jobId: Schema.NonEmptyString,
+  /** Durable correlation identity: nonempty, ≤128 chars, unique across ALL items of the job. */
+  customId: Schema.NonEmptyString,
+  status: BatchItemStatus,
+  requestId: Schema.NullOr(Schema.String),
+  deploymentId: Schema.NullOr(Schema.String),
+  errorCode: Schema.NullOr(Schema.String),
+  createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  dispatchedAt: UnknownCount,
+  finishedAt: UnknownCount,
+});
+export type BatchItem = typeof BatchItem.Type;
+
+export interface BatchJobDraft {
+  /** Defaults to `batch_` + uuid when omitted. */
+  readonly id?: string;
+  readonly keyId: string;
+  readonly model: string;
+  readonly completionWindowMs: number;
+  /** Computed by the scheduler's spill rule before create; stored verbatim. */
+  readonly spillAt: number;
+  readonly createdAt?: number;
+  readonly status?: BatchStatus;
+  readonly errorCode?: string | null;
+}
+
+export interface BatchItemDraft {
+  readonly customId: string;
+  readonly status?: BatchItemStatus;
+  readonly errorCode?: string | null;
+}
+
 export const decodeKeyPolicy = Schema.decodeUnknownEffect(KeyPolicy);
 export const decodeDeployment = Schema.decodeUnknownEffect(Deployment);
 export const decodeCatalogue = Schema.decodeUnknownEffect(Catalogue);

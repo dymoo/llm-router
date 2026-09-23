@@ -12,7 +12,12 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { checkpointOffline, snapshotDatabase, validateDatabase } from "./sqlite-ops.mjs";
+import {
+  checkpointOffline,
+  quarantineRestoredBatchState,
+  snapshotDatabase,
+  validateDatabase,
+} from "./sqlite-ops.mjs";
 
 const args = process.argv.slice(2);
 const compose = args.includes("--compose");
@@ -89,6 +94,13 @@ if (compose) {
   const previous = `${destination}.before-restore-${randomUUID()}.sqlite`;
   try {
     await snapshotDatabase(source, temporary);
+    // Fail-closed batch quarantine on the staged copy only: a snapshot cannot prove a
+    // pending item was not executed after it was taken. The original backup is untouched.
+    const quarantined = quarantineRestoredBatchState(temporary);
+    if (quarantined.items + quarantined.requests + quarantined.remotes + quarantined.jobs > 0)
+      console.log(
+        `Restore quarantine: ${quarantined.items} pending item(s) interrupted, ${quarantined.requests} linked running request(s) abandoned, ${quarantined.remotes} unconfirmed intent(s) marked unknown, ${quarantined.jobs} job(s) closed with restore_review_required — review batch state before use.`,
+      );
     if (existsSync(destination)) {
       await snapshotDatabase(destination, previous);
       checkpointOffline(destination);
@@ -103,6 +115,9 @@ if (compose) {
     if (existsSync(previous)) console.log(`Previous database retained at ${previous}`);
   } finally {
     rmSync(temporary, { force: true });
+    rmSync(`${temporary}-wal`, { force: true });
+    rmSync(`${temporary}-shm`, { force: true });
+    rmSync(`${temporary}-journal`, { force: true });
   }
 }
 console.log(

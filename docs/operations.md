@@ -12,14 +12,14 @@ Compose always provides `gateway` and CPU `laya`; choose either `llamacpp` or `h
 
 | Volume | Contents |
 | --- | --- |
-| `sqlite-data` | Keys, policy versions, admission leases, metadata usage and audit |
+| `sqlite-data` | Keys, policy versions, admission leases, metadata usage and audit; opt-in batch inputs/results in a separate private content store |
 | `laya-cache` | Local classifier weights and optional ONNX artifacts |
 | `fastflowlm-models` | Optional NPU model downloads |
 | `webui-data` | Open WebUI conversations and document state — separate from gateway metadata |
 | `LLAMACPP_MODELS_DIR` bind | GGUF weights and SSD-backed PLE table |
 | `HALOGEN_MODELS_DIR`, `HALOGEN_CACHE_DIR_HOST` binds | HGN weights/quality overlay and sensitive derived prompt-cache state |
 
-Catalogues are read-only bind mounts. Secrets live in private `.env` files, not images or the repository. Keep `API_KEY_PEPPER` stable: changing it invalidates stored key authentication. The gateway never stores prompts/completions. Open WebUI does store conversations by design. FastFlowLM v1.0.6 prints inputs/transcripts, so the supplied profile disables Docker log persistence.
+Catalogues are read-only bind mounts. Secrets live in private `.env` files, not images or the repository. Keep `API_KEY_PEPPER` stable: changing it invalidates stored key authentication. Ordinary inference stores request metadata, not prompts/completions; submitting a batch explicitly stores its inputs and results in a bounded private store beside `control.sqlite`, outside Analytics, until acknowledgement or the 24 h post-terminal TTL ([batch.md](batch.md#result-holding)). Open WebUI stores conversations by design. FastFlowLM v1.0.6 prints inputs/transcripts, so the supplied profile disables Docker log persistence.
 
 Request metadata retention is 30 days; audit retention is 90 days. Maintenance runs on repository activity. These defaults are not a compliance policy.
 
@@ -33,9 +33,13 @@ node scripts/restore.mjs --compose --replace ./data/backups/control-….sqlite
 docker compose up -d --no-deps gateway
 ```
 
-Native backup uses `SQLITE_PATH=... node scripts/backup.mjs`. Preserve the matching pepper separately. Test restores on an isolated copy before replacing a live database. Current migrations upgrade the identified v1 schema through v4 in a locked transaction and preserve existing keys; arbitrary older/foreign databases are rejected, not guessed.
+Native backup uses `SQLITE_PATH=... node scripts/backup.mjs`. Preserve the matching pepper separately. Test restores on an isolated copy before replacing a live database. Both scripts validate against the same `migrations/` directory that `src/db/migrate.ts` consumes (currently v5, the batch ledger): the control-plane identity must match, `settings.schema_version` must equal `PRAGMA user_version`, and the version must sit inside the supported range. Identified older schemas (v1–v4) are accepted and upgraded in a locked transaction on the next gateway start, preserving existing keys; foreign, corrupt, inconsistent or newer-than-supported databases are refused, not guessed.
 
 Native restore requires stopping the gateway and passing `--replace --offline`. Restore validates the source, stages a private complete snapshot, retains the previous database, and replaces the destination only after verification. Compose restore uses an actual helper container mounted on the gateway volume; a failed copy is an error, never a success message. Backup refuses to overwrite an existing destination.
+
+Restore quarantines batch state; an ordinary restart does not. On a normal restart the ledger leaves never-dispatched queued items untouched, interrupts only locally in-flight running work, and re-polls confirmed remote groups by their proven upstream ids — durable inputs keep queued work recoverable. A restore is a different safety case: a snapshot cannot prove that a queued or locally-running item was not executed after the snapshot was taken. Before the staged copy replaces the destination, restore terminalizes pending batch items with the explicit `restore_review_required` outcome, finalizes the running request rows linked to those items as `abandoned` (spend metadata preserved — deferred remote requests skip ordinary lease recovery and would otherwise stay running forever), marks unconfirmed submit intents `unknown` (no new POST is ever derived from them), and closes non-terminal jobs that own no pending confirmed remote — jobs still holding an unharvested confirmed remote stay nonterminal, and their running items and linked requests stay running, so the proven id can re-poll and finish normally. The original backup file is never modified; quarantined rows need review before the restored database is used.
+
+Batch content is backed up separately, or not at all. `backup.mjs` copies only `control.sqlite`: the sensitive content store (request bodies and result rows under `dirname(SQLITE_PATH)/batch-content`, or `BATCH_RESULTS_DIR`) lives outside the database, is bounded by the 24-hour post-terminal TTL and the per-job/per-key budgets, and is never silently added to metadata backups. To keep it deliberately, copy the directory separately with its own retention — ad-hoc copies must not outlive the TTL bounds that keep this store short-lived.
 
 Pins do not survive a restart or restore. Clients must start a new task or declare a checkpoint. Abandoned leases recover through the normal repository maintenance/admission path.
 

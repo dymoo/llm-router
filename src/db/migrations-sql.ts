@@ -20,3 +20,7 @@ export const CONTROL_PLANE_V4_SQL = readFileSync(
   join(migrationsDir, "0004_add_decision_trace.sql"),
   "utf8",
 );
+export const CONTROL_PLANE_V5_SQL = readFileSync(
+  join(migrationsDir, "0005_batch_ledger.sql"),
+  "utf8",
+);

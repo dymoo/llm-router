@@ -22,10 +22,11 @@ for (const file of [envPath, catalogPath]) {
       `Refusing to overwrite ${file}; use configure-runtime.mjs with a new output path when switching runtimes`,
     );
 }
-if (!existsSync(path.join(root, "classifier-qualification.example.json")))
-  throw new Error(
-    "Missing classifier-qualification.example.json; setup binds this example read-only",
-  );
+for (const example of ["catalog.batch.example.json", "classifier-qualification.example.json"])
+  if (!existsSync(path.join(root, example)))
+    throw new Error(
+      `Missing ${example}; setup ships these examples and Compose binds them read-only`,
+    );
 let body = readFileSync(path.join(root, ".env.example"), "utf8");
 function setValue(name, value) {
   const pattern = new RegExp(`^${name}=.*$`, "m");
@@ -38,6 +39,7 @@ if (values.native) {
   for (const [name, value] of Object.entries({
     SQLITE_PATH: "./data/control.sqlite",
     MODEL_CATALOG: `./${catalogName}`,
+    BATCH_CATALOG: "./catalog.batch.example.json",
     LAYA_URL: "http://127.0.0.1:8090",
     LAYA_HOST: "127.0.0.1",
     LAYA_CACHE_DIR: "./data/laya-cache",

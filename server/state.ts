@@ -4,11 +4,12 @@ import type { Deployment } from "../src/domain.ts";
 import type { AuxiliaryDeployment } from "../src/auxiliary.ts";
 import type { ClassifierUnavailable, SchemaVersionMismatch } from "../src/errors.ts";
 import type { HealthMonitor } from "../src/health.ts";
-import type { FinalizeOutcome, QueueHooks } from "../src/http/contracts.ts";
+import type { BatchDeps, FinalizeOutcome, QueueHooks } from "../src/http/contracts.ts";
 import { createStatusStore, type RequestStatusStore } from "../src/http/status.ts";
 import type { ApiKeys } from "../src/keys/api-keys.ts";
 import type { KeyRepository, RepoError } from "../src/keys/repository.ts";
 import type { Admission } from "../src/keys/types.ts";
+import type { BatchScheduler } from "../src/batch/scheduler.ts";
 import { createCapacityPool, type CapacityPool } from "../src/router/capacity.ts";
 import type { ModelRouter } from "../src/router/model-router.ts";
 
@@ -24,6 +25,9 @@ interface ProcessState {
   >;
   inference?: InferenceRuntime;
   leases: Map<string, Admission>;
+  /** Batch-owned admissions: excluded from the interactive-idle gate so the deferred lane
+   * never counts itself as interactive work. */
+  batchLeases: Set<string>;
   admissionsStarting: number;
   queueHooks: Map<string, QueueHooks>;
   observed: Map<string, Omit<FinalizeOutcome, "status">>;
@@ -31,6 +35,7 @@ interface ProcessState {
   auxiliary?: readonly AuxiliaryDeployment[];
   auxiliaryPool: CapacityPool;
   health?: HealthMonitor;
+  batch?: { scheduler: BatchScheduler; deps: BatchDeps; close?: () => void };
   stopping: boolean;
   shutdown?: Promise<void>;
   signalsRegistered: boolean;
@@ -45,10 +50,12 @@ declare global {
 // Restart the gateway after server code/configuration changes; don't hot-swap live ownership.
 export const processState: ProcessState = (globalThis.__dymooLlmRouterProcess ??= {
   leases: new Map(),
+  batchLeases: new Set(),
   admissionsStarting: 0,
   queueHooks: new Map(),
   observed: new Map(),
   status: createStatusStore(),
+  batch: undefined,
   auxiliaryPool: createCapacityPool(),
   stopping: false,
   signalsRegistered: false,

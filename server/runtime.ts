@@ -12,6 +12,7 @@ import type {
   InferenceGateway,
   RoutedWork,
 } from "../src/http/contracts.ts";
+import type { BatchInferencePort } from "../src/batch/scheduler.ts";
 import { ModelRouter, modelRouterLayer, type RouterWork } from "../src/router/index.ts";
 import type { RoutedCompletion, RoutedStream } from "../src/router/model-router.ts";
 import { disposeControlPlane, keys, recheckLease } from "./control.ts";
@@ -57,7 +58,6 @@ function makeInferenceRuntime(): InferenceRuntime {
         catalogue: loaded.catalogue,
         catalogueVersion: loaded.catalogueVersion,
         classify: (input) => classifier.classify(input),
-        credentials: (name) => credentials[name],
         onBeforeDispatch: (work, reservation) => {
           const deployment = loaded.catalogue.find((item) => item.id === reservation.deploymentId)!;
           observed.set(work.requestId, {
@@ -130,6 +130,51 @@ function getInference() {
 }
 export function configuredChatDeployments(): readonly Deployment[] {
   return getInference().catalogue;
+}
+/** Narrow batch-scheduler access to the authoritative router seam. Local batch
+ * work uses the same assessment, session store, and capacity pool as
+ * interactive requests; spill preparation only classifies and encodes a body.
+ * Remote submission and polling never come through this bridge. */
+export function batchInferencePort(): BatchInferencePort {
+  const inference = getInference();
+  const cleanup = (requestId: string): void => {
+    queueHooks.delete(requestId);
+    observed.delete(requestId);
+  };
+  return {
+    interactiveIdle: () =>
+      processState.leases.size - processState.batchLeases.size + processState.admissionsStarting ===
+      0,
+    complete: async (work, signal) => {
+      const routerWork = toRouterWork(work);
+      try {
+        const result = await runAbortable(
+          ModelRouter.use((router) => router.completeBatch(routerWork, work.requestedModel)),
+          signal,
+        );
+        return {
+          body: result.body,
+          deploymentId: result.headers.deploymentId,
+          metadata: () => resultMetadata(work, result),
+        };
+      } finally {
+        cleanup(work.requestId);
+      }
+    },
+    prepareSpill: async (work, catalogue, signal) => {
+      const routerWork = toRouterWork(work);
+      try {
+        return await runAbortable(
+          ModelRouter.use((router) =>
+            router.planBatchSpill(routerWork, catalogue, work.requestedModel),
+          ),
+          signal,
+        );
+      } finally {
+        cleanup(work.requestId);
+      }
+    },
+  };
 }
 
 function toRouterWork(work: RoutedWork): RouterWork {

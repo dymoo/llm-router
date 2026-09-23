@@ -5,12 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && node scripts/sanitize-standalone.mjs",
     "start": "next start",
     "typecheck": "tsc --noEmit --pretty false",
     "test": "node --import tsx --conditions=react-server --test --test-reporter=spec \"test/**/*.test.ts\"",
     "test:production": "node --test --test-reporter=spec integration/*.test.mjs",
-    "format": "oxfmt --write app components server src test integration scripts env.ts proxy.ts instrumentation.ts next.config.ts drizzle.config.ts tsconfig.json package.json catalog.example.json catalog.auxiliary.example.json compose.yaml .github/workflows",
+    "format": "oxfmt --write app components server src test integration scripts env.ts proxy.ts instrumentation.ts next.config.ts drizzle.config.ts tsconfig.json package.json catalog.example.json catalog.auxiliary.example.json catalog.batch.example.json compose.yaml .github/workflows",
     "check-all": "npm run typecheck && npm test && npm run build && npm run test:production"
   },
   "dependencies": {

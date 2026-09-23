@@ -39,6 +39,7 @@ services:
     volumes:
       - sqlite-data:/var/lib/llm-router
       - ${MODEL_CATALOG_FILE:-./catalog.json}:/etc/llm-router/catalog.json:ro
+      - ${BATCH_CATALOG_FILE:-./catalog.batch.example.json}:/etc/llm-router/batch-catalog.json:ro
       - ./${AUXILIARY_CATALOG_FILE:-catalog.auxiliary.example.json}:/etc/llm-router/auxiliary.json:ro
       - type: bind
         source: ${CLASSIFIER_QUALIFICATION_FILE:-./classifier-qualification.example.json}

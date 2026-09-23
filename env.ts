@@ -29,6 +29,8 @@ const loadEnv = () =>
       API_KEY_PEPPER: z.string().min(1),
       MODEL_CATALOG: z.string().min(1),
       AUXILIARY_CATALOG: z.string().min(1).optional(),
+      BATCH_CATALOG: z.string().min(1).optional(),
+      BATCH_RESULTS_DIR: z.string().min(1).optional(),
       CLASSIFIER_MODE: z.enum(["laya", "jev"]),
       CLASSIFIER_QUALIFICATION: z.string().min(1).optional(),
       LAYA_URL: z.string().url().optional(),
@@ -46,6 +48,8 @@ const loadEnv = () =>
       API_KEY_PEPPER: process.env.API_KEY_PEPPER,
       MODEL_CATALOG: process.env.MODEL_CATALOG,
       AUXILIARY_CATALOG: process.env.AUXILIARY_CATALOG,
+      BATCH_CATALOG: process.env.BATCH_CATALOG,
+      BATCH_RESULTS_DIR: process.env.BATCH_RESULTS_DIR,
       CLASSIFIER_MODE: process.env.CLASSIFIER_MODE,
       CLASSIFIER_QUALIFICATION: process.env.CLASSIFIER_QUALIFICATION,
       LAYA_URL: process.env.LAYA_URL,
@@ -65,6 +69,8 @@ export interface Env {
   API_KEY_PEPPER: string;
   MODEL_CATALOG: string;
   AUXILIARY_CATALOG?: string;
+  BATCH_CATALOG?: string;
+  BATCH_RESULTS_DIR?: string;
   CLASSIFIER_MODE: "laya" | "jev";
   CLASSIFIER_QUALIFICATION?: string;
   LAYA_URL?: string;

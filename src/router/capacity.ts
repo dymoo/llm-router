@@ -39,6 +39,21 @@ export interface QueueEvent {
 export interface CapacityPool {
   readonly snapshot: (deploymentId: string) => GateSnapshot;
   readonly tryAcquire: (deployment: Deployment, priority: WorkPriority) => Permit | undefined;
+  /**
+   * Acquire synchronously only when the caller's idle predicate is true.
+   *
+   * The predicate and permit grant execute in one synchronous turn: callers
+   * must not take an idle snapshot and then call `tryAcquire`, because a
+   * foreground request can enter between those operations. The predicate is
+   * checked again after the gate has reserved a slot so an implementation
+   * which observes a foreground admission while acquiring cannot leak a
+   * permit.
+   */
+  readonly tryAcquireIdleOnly: (
+    ranked: readonly Deployment[],
+    priority: WorkPriority,
+    isIdle: () => boolean,
+  ) => Permit | undefined;
   readonly acquire: (
     ranked: readonly Deployment[],
     priority: WorkPriority,
@@ -113,11 +128,15 @@ export function createCapacityPool(options?: { readonly queueSlots?: number }): 
     return true;
   };
 
-  const start = (gate: Gate, priority: WorkPriority): Permit | undefined => {
-    if (!canStart(gate, priority)) {
+  const start = (
+    gate: Gate,
+    priority: WorkPriority,
+    capacityPriority: WorkPriority = priority,
+  ): Permit | undefined => {
+    if (!canStart(gate, capacityPriority)) {
       return undefined;
     }
-    incrementRunning(gate, priority, 1);
+    incrementRunning(gate, capacityPriority, 1);
     let released = false;
     return {
       deploymentId: gate.deploymentId,
@@ -127,7 +146,7 @@ export function createCapacityPool(options?: { readonly queueSlots?: number }): 
           return;
         }
         released = true;
-        incrementRunning(gate, priority, -1);
+        incrementRunning(gate, capacityPriority, -1);
         wake();
       },
     };
@@ -206,6 +225,26 @@ export function createCapacityPool(options?: { readonly queueSlots?: number }): 
     tryAcquire(deployment, priority) {
       return start(gateFor(deployment), priority);
     },
+    tryAcquireIdleOnly(ranked, priority, isIdle) {
+      // This method intentionally has no Effect boundary or wait queue. The
+      // idle check, gate checks, and permit grant stay in one synchronous
+      // critical section on the JS event loop.
+      if (!isIdle()) {
+        return undefined;
+      }
+      const permit = tryRanked(ranked, priority, start, gateFor, "low");
+      if (permit === undefined) {
+        return undefined;
+      }
+      // Recheck immediately before handing the permit to the caller. If the
+      // predicate is stateful, release the reservation rather than allowing
+      // batch work to start alongside newly admitted foreground work.
+      if (!isIdle()) {
+        permit.release();
+        return undefined;
+      }
+      return permit;
+    },
     acquire(ranked, priority, options) {
       const waitMs = Math.min(Math.max(0, options.waitMs), MAX_CAPACITY_WAIT_MS);
       return Effect.uninterruptibleMask((restore) =>
@@ -280,17 +319,23 @@ function incrementRunning(gate: Gate, priority: WorkPriority, delta: number): vo
     gate.runningMedium += delta;
     return;
   }
+
   gate.runningLow += delta;
 }
 
 function tryRanked(
   ranked: readonly Deployment[],
   priority: WorkPriority,
-  start: (gate: Gate, priority: WorkPriority) => Permit | undefined,
+  start: (
+    gate: Gate,
+    priority: WorkPriority,
+    capacityPriority?: WorkPriority,
+  ) => Permit | undefined,
   gateFor: (deployment: Deployment) => Gate,
+  capacityPriority?: WorkPriority,
 ): Permit | undefined {
   for (const deployment of ranked) {
-    const permit = start(gateFor(deployment), priority);
+    const permit = start(gateFor(deployment), priority, capacityPriority);
     if (permit !== undefined) {
       return permit;
     }

@@ -1,6 +1,14 @@
 import type { ClassifierHealth } from "../classifier.ts";
 import type { SamplingOptions } from "../sampling.ts";
-import type { AnalyticsSnapshot, ClassifierQualification } from "../domain.ts";
+import type {
+  AnalyticsSnapshot,
+  BatchRequestCounts,
+  BatchStatus,
+  BatchUsage,
+  ClassifierQualification,
+} from "../domain.ts";
+import type { BatchLedger } from "../batch/ledger.ts";
+import type { BatchResultRow, BatchResultStore } from "../batch/results.ts";
 import type { AnalyticsQuery } from "../keys/analytics.ts";
 import type {
   Admission as RepoAdmission,
@@ -283,4 +291,45 @@ export type InferenceDeps = {
 
 export type HealthDeps = {
   health: HealthService;
+};
+
+/** Every batch handler is wired through this and nothing else. `keys` authenticates the
+ * bearer (and supplies localityBias for the submit-time spill computation); `kick` wakes
+ * the deferred-lane scheduler after a state change it must notice. */
+export type BatchDeps = {
+  ledger: BatchLedger;
+  results: BatchResultStore;
+  keys: KeyService;
+  /** POST-only drain guard, wired to server/lifecycle assertAcceptingWork: throws 503 while
+   * the gateway drains. GET/list/DELETE never call it — reads stay available during drain. */
+  assertAccepting(): void;
+  kick(): void;
+};
+
+/** OpenRouter-shaped batch object. All times are Unix seconds. `local_wait_until` is our
+ * spill boundary (= spillAt) and `deadline_at` = spillAt + the 24h provider window; the two
+ * windows are independent of each other and of our 24h post-terminal result TTL. */
+export type BatchWireObject = {
+  id: string;
+  object: "batch";
+  endpoint: "/v1/chat/completions";
+  model: string;
+  completion_window: "24h";
+  status: BatchStatus;
+  created_at: number;
+  finalized_at: number | null;
+  local_wait_until: number;
+  deadline_at: number;
+  request_counts: BatchRequestCounts;
+  usage: BatchUsage | null;
+  results: readonly BatchResultRow[] | null;
+  error: { code: string; message: string } | null;
+};
+
+export type BatchWireList = {
+  object: "list";
+  data: readonly BatchWireObject[];
+  first_id: string | null;
+  last_id: string | null;
+  has_more: boolean;
 };

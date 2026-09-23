@@ -82,6 +82,10 @@ Never publish `0.0.0.0` on a public interface. LAN reachability is admin access 
 | `HALOGEN_DOWNLOAD` | First-boot weights repo; passed into the unmodified Halogen image |
 | Catalogue `credentialEnvVar` | Secret variable name, e.g. `OPENROUTER_API_KEY`; never put the credential itself in a catalogue |
 | `AUXILIARY_CATALOG` | Optional NPU deployment catalogue; absent disables modality deployments |
+| `BATCH_RESULTS_DIR` | Optional batch result-holding directory override; unset defaults to `dirname(SQLITE_PATH)/batch-content` beside the metadata DB — dedicated store outside `control.sqlite`/Analytics, see [batch.md](batch.md) |
+| `BATCH_CATALOG` | In-gateway path of the batch-only deployment catalogue (`/etc/llm-router/batch-catalog.json` on Compose, `./catalog.batch.example.json` native; `cloud-glm-batch` → `z-ai/glm-5.3-flash` via `deepinfra/fp4`) — [batch.md](batch.md) |
+| `BATCH_CATALOG_FILE` | Host file bound read-only into the gateway as the batch catalogue (`${BATCH_CATALOG_FILE:-./catalog.batch.example.json}:/etc/llm-router/batch-catalog.json:ro`); never merged into the synchronous chat catalogue |
+| Batch limits (no env) | Fixed code constants: 1000 items/job, 512 KiB/item, 32 MiB/job, 4 in-flight jobs/key, `deadline_at` = spill + 24 h provider window, 24 h result TTL after terminal, 64/256 MiB result budgets — [batch.md](batch.md) |
 | `WEBUI_GATEWAY_KEY`, `WEBUI_SECRET_KEY` | Dedicated inference credential and stable WebUI secret |
 
 ## Optional AI hub services

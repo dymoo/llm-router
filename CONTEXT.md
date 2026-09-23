@@ -92,6 +92,24 @@ _Avoid_: locality bias, monthly budget, invoice cap
 The thinking control requested from the Assessment and mapped onto what the chosen deployment actually supports.
 _Avoid_: applied `on` as a graded `high`, no-thinking as the default for coding
 
+## Batch
+
+**Batch job**:
+A submitted unit of low-priority deferred chat work: one model, one completion window, a bounded set of items, and one terminal status.
+_Avoid_: background job, bulk request, upload, task queue
+
+**Batch item**:
+One chat request inside a Batch job, admitted and accounted through the ordinary routing path when it dispatches.
+_Avoid_: sub-request, queued message, row
+
+**Deferred lane**:
+The scheduling lane in which Batch items wait for idle capacity — dispatch only when interactive queues are empty, and never compete with high, medium, or low admission.
+_Avoid_: low priority, background priority, overflow queue, preemption
+
+**Result holding**:
+The bounded per-key opt-in store of a Batch job's terminal results — read retry-safely, held briefly, then deleted — kept apart from the metadata store and Analytics.
+_Avoid_: transcript archive, prompt store, results database, full capture
+
 ## Continuity
 
 **Session**:

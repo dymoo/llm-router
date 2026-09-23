@@ -26,6 +26,7 @@ function fixture() {
   for (const file of [
     ".env.example",
     "catalog.example.json",
+    "catalog.batch.example.json",
     "classifier-qualification.example.json",
   ])
     copyFileSync(file, join(root, file));
@@ -88,6 +89,7 @@ test("native and Compose setup do not overwrite each other's catalogue or secret
     assert.equal(hash(join(root, "catalog.json")), beforeCatalogue);
     const env = parseEnv(readFileSync(join(root, ".env.native"), "utf8"));
     assert.equal(env.MODEL_CATALOG, "./catalog.native.json");
+    assert.equal(env.BATCH_CATALOG, "./catalog.batch.example.json");
     assert.equal(env.CLASSIFIER_QUALIFICATION, undefined, "native qualification stays optional");
     assert.equal(
       new URL(catalogue(join(root, "catalog.native.json"))[0]!.endpoint).hostname,
@@ -137,5 +139,78 @@ test("unknown runtime selection fails before creating configuration", () => {
     assert.equal(existsSync(join(root, "catalog.json")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("compose setup selects the shipped batch catalogue and keeps sync/batch provider pins isolated", () => {
+  const root = fixture();
+  try {
+    const shipped = join(root, "catalog.batch.example.json");
+    const before = hash(shipped);
+    assert.equal(run(root, "setup.mjs", ["--runtime", "llamacpp"]).status, 0);
+    const env = parseEnv(readFileSync(join(root, ".env"), "utf8"));
+    assert.equal(env.BATCH_CATALOG, "/etc/llm-router/batch-catalog.json");
+    assert.equal(env.BATCH_CATALOG_FILE, "./catalog.batch.example.json");
+    assert.equal(env.BATCH_RESULTS_DIR, undefined, "setup must not force a content-dir override");
+    assert.equal(env.CLASSIFIER_QUALIFICATION_FILE, "./classifier-qualification.example.json");
+    assert.equal(
+      env.CLASSIFIER_QUALIFICATION,
+      undefined,
+      "setup must leave record selection to the operator; compose pins the container path itself",
+    );
+    assert.equal(env.OPENROUTER_API_KEY, undefined, "setup must never fabricate provider secrets");
+    assert.equal(hash(shipped), before, "setup must not rewrite the shipped batch catalogue");
+
+    const batch = catalogue(shipped);
+    assert.equal(batch.length, 1);
+    const spill = batch[0]!;
+    assert.equal(spill.id, "cloud-glm-batch");
+    assert.equal(spill.modelId, "z-ai/glm-5.3-flash");
+    assert.equal(spill.endpoint, "https://openrouter.ai/api/v1");
+    assert.equal(spill.transport, "openrouter");
+    assert.equal(spill.credentialEnvVar, "OPENROUTER_API_KEY");
+    assert.equal(spill.providerRestriction, "deepinfra/fp4");
+    assert.equal(spill.contextLimitTokens, 1048576);
+    assert.equal(spill.maxOutputTokens, 131072);
+    assert.deepEqual(
+      [
+        spill.prices.inputUsdPerMillion,
+        spill.prices.cachedInputUsdPerMillion,
+        spill.prices.outputUsdPerMillion,
+      ],
+      [0.06, 0.012, 0.2],
+    );
+
+    // Sync/batch isolation: disjoint deployment ids keep per-key allowlists precise,
+    // and the synchronous Sail FP8 pin must survive untouched.
+    const chat = catalogue(join(root, "catalog.json"));
+    assert.equal(
+      chat.find((item) => item.id === "cloud-glm")?.providerRestriction,
+      "sail-research/fp8",
+    );
+    assert.equal(
+      chat.some((item) => item.id === "cloud-glm-batch"),
+      false,
+    );
+    assert.equal(
+      batch.some((item) => item.id === "cloud-glm"),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup fails before writing configuration when a shipped example is missing", () => {
+  for (const missing of ["catalog.batch.example.json", "classifier-qualification.example.json"]) {
+    const root = fixture();
+    try {
+      rmSync(join(root, missing));
+      assert.notEqual(run(root, "setup.mjs", ["--runtime", "llamacpp"]).status, 0);
+      assert.equal(existsSync(join(root, ".env")), false);
+      assert.equal(existsSync(join(root, "catalog.json")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });

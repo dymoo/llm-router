@@ -6,7 +6,7 @@ import { sqliteDatabaseLayer } from "../src/db/index.ts";
 import { AuthFailed, DatabaseError } from "../src/errors.ts";
 import type { AdminDeps, KeyService, PublicKey } from "../src/http/contracts.ts";
 import { ApiKeys, apiKeysLayer, keyRepositoryLayer, type Admission } from "../src/keys/index.ts";
-import type { ListedKey } from "../src/keys/types.ts";
+import type { FinalizeOutcome, ListedKey } from "../src/keys/types.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
 import { loadClassifierQualifications } from "./qualification.ts";
 import { processState } from "./state.ts";
@@ -35,7 +35,18 @@ async function run<A, E>(effect: Effect.Effect<A, E, ApiKeys>): Promise<A> {
 }
 
 const leases = processState.leases;
-export const pendingAdmissions = (): number => leases.size + processState.admissionsStarting;
+/** Process-local item→request correlation used only to clean a stale lease
+ * map when interrupted recovery runs in the same process. Durable recovery
+ * always relies on batch_items.request_id, not this ephemeral map. */
+const batchItemLeases = new Map<string, string>();
+
+function forgetBatchRequest(requestId: string): void {
+  leases.delete(requestId);
+  processState.batchLeases.delete(requestId);
+  for (const [itemId, linkedRequestId] of batchItemLeases) {
+    if (linkedRequestId === requestId) batchItemLeases.delete(itemId);
+  }
+}
 
 function flattenKey(listed: ListedKey): PublicKey {
   return {
@@ -138,6 +149,83 @@ export function leaseFor(requestId: string): Admission | undefined {
   return leases.get(requestId);
 }
 
+/** Number of admissions whose request state can still be touched by this process. */
+export function pendingAdmissions(): number {
+  return processState.leases.size + processState.admissionsStarting;
+}
+
+/** Internal batch-only admission surface: same admission transaction/validation as the
+ * interactive `admit` (revocation/expiry/rate/concurrency/policy), but addressable by key
+ * id because batch clients hand us no raw key. No public route can choose a key id: only
+ * the deferred-lane scheduler receives this. Batch admissions are tracked apart from
+ * interactive ones so the deferred lane's idle gate never counts its own work. */
+export const batchKeys = {
+  admitByKeyId: async (keyId: string): Promise<Admission> => {
+    processState.admissionsStarting++;
+    try {
+      const admission = await run(ApiKeys.use((api) => api.admitByKeyId(keyId)));
+      leases.set(admission.requestId, admission);
+      processState.batchLeases.add(admission.requestId);
+      return admission;
+    } finally {
+      processState.admissionsStarting--;
+    }
+  },
+  attach: async (admission: Admission, itemId: string): Promise<void> => {
+    await run(ApiKeys.use((api) => api.attach(admission, itemId)));
+    batchItemLeases.set(itemId, admission.requestId);
+  },
+  recheck: async (admission: Admission): Promise<Admission> => {
+    const next = await run(ApiKeys.use((api) => api.recheck(admission)));
+    // `recheck` rejects a deferred row. Consequently this map never regains a
+    // request after defer has handed ownership to the durable batch lifecycle.
+    leases.set(next.requestId, next);
+    return next;
+  },
+  recheckDeferred: async (admission: Admission): Promise<void> => {
+    // Remote handoff owns the durable request after defer; never reinsert it
+    // into the process lease map for this last pre-POST check.
+    await run(ApiKeys.use((api) => api.recheckDeferred(admission)));
+  },
+  defer: async (
+    admission: Admission,
+    itemId: string,
+    metadata: Omit<FinalizeOutcome, "status">,
+    deadlineAt: number,
+  ): Promise<void> => {
+    await run(ApiKeys.use((api) => api.defer(admission, itemId, metadata, deadlineAt)));
+    leases.delete(admission.requestId);
+    processState.batchLeases.delete(admission.requestId);
+  },
+  finalize: async (admission: Admission, outcome: FinalizeOutcome): Promise<void> => {
+    try {
+      await run(ApiKeys.use((api) => api.finalize(admission, outcome)));
+    } finally {
+      forgetBatchRequest(admission.requestId);
+    }
+  },
+  finalizeDeferred: async (
+    keyId: string,
+    requestId: string,
+    outcome: FinalizeOutcome,
+  ): Promise<void> => {
+    try {
+      await run(ApiKeys.use((api) => api.finalizeDeferred(keyId, requestId, outcome)));
+    } finally {
+      // Remote requests normally left these maps at defer time; deleting is
+      // intentional and makes recovery idempotent if a stale process entry
+      // survived the handoff.
+      forgetBatchRequest(requestId);
+    }
+  },
+  finalizeInterrupted: async (keyId: string, itemId: string): Promise<void> => {
+    await run(ApiKeys.use((api) => api.finalizeInterrupted(keyId, itemId)));
+    const requestId = batchItemLeases.get(itemId);
+    batchItemLeases.delete(itemId);
+    if (requestId !== undefined) forgetBatchRequest(requestId);
+  },
+};
+
 export const recheckLease = Effect.fn("recheckLease")(function* (requestId: string) {
   const admission = leases.get(requestId);
   if (admission === undefined) {
@@ -149,6 +237,9 @@ export const recheckLease = Effect.fn("recheckLease")(function* (requestId: stri
   });
   yield* api.recheck(admission);
 });
+
+/** The batch HTTP surface authenticates bearers through the ordinary KeyService. */
+export const batchKeyService: KeyService = keys;
 
 export function getAdminDeps(): AdminDeps {
   const env = getEnv();

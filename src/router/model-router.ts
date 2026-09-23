@@ -16,6 +16,7 @@ import {
   type SessionBoundary,
   type SessionPin,
 } from "../domain.ts";
+import type { FinalizeOutcome } from "../keys/types.ts";
 import {
   BoundaryRequired,
   CapacityBusy,
@@ -31,7 +32,7 @@ import {
   type KeyLifecycleError,
   InvalidInput,
 } from "../errors.ts";
-import { adaptersFor } from "./adapters/index.ts";
+import { adaptersFor, openRouterBody } from "./adapters/index.ts";
 import { holdReadableStream, type FetchImpl } from "./adapters/http.ts";
 import { observeSseUsage } from "./sse.ts";
 import { attachUsage } from "./cost.ts";
@@ -138,6 +139,12 @@ export interface RoutedStream {
   readonly decision: RouteDecision;
 }
 
+export interface BatchSpillPlan {
+  readonly deployment: Deployment;
+  readonly body: Record<string, unknown>;
+  readonly metadata: Omit<FinalizeOutcome, "status">;
+}
+
 export type RouterFailure =
   | BoundaryRequired
   | CapacityBusy
@@ -176,11 +183,51 @@ export interface RouterOptions {
   readonly queueSlots?: number;
 }
 
+type RouteMode =
+  | { readonly kind: "interactive" }
+  | { readonly kind: "batch-local"; readonly requestedModel: string }
+  | {
+      readonly kind: "batch-spill";
+      readonly requestedModel: string;
+      readonly catalogue: readonly Deployment[];
+    };
+
+interface ForegroundTracker {
+  readonly enter: () => () => void;
+  readonly state: { value: number };
+}
+
+function createForegroundTracker(): ForegroundTracker {
+  const state = { value: 0 };
+  return {
+    state,
+    enter: () => {
+      state.value += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        state.value = Math.max(0, state.value - 1);
+      };
+    },
+  };
+}
+
 export class ModelRouter extends Context.Service<
   ModelRouter,
   {
     readonly complete: (work: RouterWork) => Effect.Effect<RoutedCompletion, RouterFailure>;
     readonly stream: (work: RouterWork) => Effect.Effect<RoutedStream, RouterFailure>;
+    readonly completeBatch: (
+      work: RouterWork,
+      requestedModel: string,
+    ) => Effect.Effect<RoutedCompletion, RouterFailure>;
+    readonly planBatchSpill: (
+      work: RouterWork,
+      catalogue: readonly Deployment[],
+      requestedModel: string,
+    ) => Effect.Effect<BatchSpillPlan, RouterFailure>;
+    readonly interactiveIdle: () => boolean;
   }
 >()("llm-router/router/ModelRouter") {}
 
@@ -196,7 +243,47 @@ export const modelRouterLayer = (options: RouterOptions) =>
       const adapters = adaptersFor(options.fetch ?? fetch);
       const credentials = options.credentials ?? ((envVar: string) => process.env[envVar]);
       const lockWaitMs = options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS;
+      const foreground = createForegroundTracker();
       const complete = (work: RouterWork) =>
+        Effect.acquireUseRelease(
+          Effect.sync(foreground.enter),
+          (release) =>
+            runRouted(
+              work,
+              options,
+              sessions,
+              pool,
+              adapters,
+              credentials,
+              lockWaitMs,
+              false,
+              { kind: "interactive" },
+              release,
+            ),
+          (release) => Effect.sync(release),
+        ) as Effect.Effect<RoutedCompletion, RouterFailure>;
+      const stream = (work: RouterWork) =>
+        Effect.acquireUseRelease(
+          Effect.sync(foreground.enter),
+          (release) =>
+            runRouted(
+              work,
+              options,
+              sessions,
+              pool,
+              adapters,
+              credentials,
+              lockWaitMs,
+              true,
+              { kind: "interactive" },
+              release,
+            ),
+          (release, exit) =>
+            Effect.sync(() => {
+              if (exit._tag !== "Success") release();
+            }),
+        ) as Effect.Effect<RoutedStream, RouterFailure>;
+      const completeBatch = (work: RouterWork, requestedModel: string) =>
         runRouted(
           work,
           options,
@@ -206,22 +293,26 @@ export const modelRouterLayer = (options: RouterOptions) =>
           credentials,
           lockWaitMs,
           false,
-        ) as Effect.Effect<RoutedCompletion, RouterFailure>;
-      const stream = (work: RouterWork) =>
-        runRouted(
-          work,
-          options,
-          sessions,
-          pool,
-          adapters,
-          credentials,
-          lockWaitMs,
-          true,
-        ) as Effect.Effect<RoutedStream, RouterFailure>;
-      return ModelRouter.of({ complete, stream });
+          { kind: "batch-local", requestedModel },
+          undefined,
+          () => foreground.state.value === 0,
+        ).pipe(Effect.map((result) => result as RoutedCompletion));
+      const planBatchSpill = (
+        work: RouterWork,
+        catalogue: readonly Deployment[],
+        requestedModel: string,
+      ) =>
+        planSpill(work, options, sessions, pool, adapters, credentials, catalogue, requestedModel);
+      const interactiveIdle = () => foreground.state.value === 0;
+      return ModelRouter.of({
+        complete,
+        stream,
+        completeBatch,
+        planBatchSpill,
+        interactiveIdle,
+      });
     }),
   );
-
 function runRouted(
   work: RouterWork,
   options: RouterOptions,
@@ -231,17 +322,38 @@ function runRouted(
   credentials: (envVar: string) => string | undefined,
   lockWaitMs: number,
   stream: boolean,
-): Effect.Effect<RoutedCompletion | RoutedStream, RouterFailure> {
+  mode: RouteMode = { kind: "interactive" },
+  onInteractiveRelease?: () => void,
+  isInteractiveIdle: () => boolean = () => true,
+): Effect.Effect<RoutedCompletion | RoutedStream | BatchSpillPlan, RouterFailure> {
   return sessions.withLock(
     work.keyId,
     work.routing.sessionId,
     lockWaitMs,
-    executeLocked(work, options, sessions, pool, adapters, credentials, stream),
+    executeLocked(
+      work,
+      options,
+      sessions,
+      pool,
+      adapters,
+      credentials,
+      stream,
+      mode,
+      isInteractiveIdle,
+    ),
     stream
       ? (result, release) => {
           if (result.body instanceof ReadableStream) {
-            Object.assign(result, { body: holdReadableStream(new Response(result.body), release) });
-          } else release();
+            Object.assign(result, {
+              body: holdReadableStream(new Response(result.body), () => {
+                release();
+                onInteractiveRelease?.();
+              }),
+            });
+          } else {
+            release();
+            onInteractiveRelease?.();
+          }
         }
       : undefined,
   );
@@ -255,9 +367,41 @@ function executeLocked(
   adapters: Record<Deployment["transport"], ProviderAdapter>,
   credentials: (envVar: string) => string | undefined,
   stream: boolean,
-): Effect.Effect<RoutedCompletion | RoutedStream, RouterFailure> {
+  mode: RouteMode,
+  isInteractiveIdle: () => boolean,
+): Effect.Effect<RoutedCompletion | RoutedStream | BatchSpillPlan, RouterFailure> {
   return Effect.gen(function* () {
-    const catalogue = yield* checkCatalogueForInference(options.catalogue);
+    const configuredCatalogue = yield* checkCatalogueForInference(options.catalogue);
+    let sourceCatalogue: readonly Deployment[] = configuredCatalogue;
+    if (mode.kind === "batch-spill") {
+      sourceCatalogue = yield* checkCatalogueForInference(mode.catalogue);
+    }
+    const catalogue = sourceCatalogue.filter((deployment) => {
+      if (mode.kind === "interactive") {
+        return true;
+      }
+      if (mode.kind === "batch-local") {
+        return (
+          deployment.location === "local" &&
+          (mode.requestedModel === "auto" || deployment.id === mode.requestedModel)
+        );
+      }
+      return (
+        deployment.location === "cloud" &&
+        deployment.transport === "openrouter" &&
+        (mode.requestedModel === "auto" || deployment.id === mode.requestedModel)
+      );
+    });
+    if (catalogue.length === 0) {
+      return yield* Effect.fail(
+        new NoEligibleModel({
+          message:
+            mode.kind === "batch-spill"
+              ? "No eligible cloud OpenRouter batch deployment"
+              : "No eligible local batch deployment",
+        }),
+      );
+    }
     const generationAllowance = Math.min(
       work.maxCompletionTokens ?? work.policy.maxCompletionTokens,
       work.policy.maxCompletionTokens,
@@ -297,14 +441,14 @@ function executeLocked(
       }
     }
 
-    const classified = yield* classifyIfNeeded(work, options, catalogue, pin);
+    const classified = yield* classifyIfNeeded(work, options, configuredCatalogue, pin);
     options.onClassified?.(work, classified);
-    const unavailable = yield* probeUnavailable(
-      catalogue,
-      adapters,
-      credentials,
-      options.unavailable,
-    );
+    let unavailable: ReadonlySet<string>;
+    if (mode.kind === "batch-spill") {
+      unavailable = unavailableWithoutProviderProbe(catalogue, credentials, options.unavailable);
+    } else {
+      unavailable = yield* probeUnavailable(catalogue, adapters, credentials, options.unavailable);
+    }
     const selected = selectRoute({
       assessment: classified.assessment,
       deployments: catalogue,
@@ -336,16 +480,19 @@ function executeLocked(
       return yield* Effect.fail(chosen.error);
     }
 
-    const saturation =
-      options.saturation !== undefined
-        ? options.saturation("local")
-        : yield* readLocalSaturation(catalogue, adapters, credentials);
-    const spill = cloudSpillPermitted(
-      work.policy,
-      classified.assessment,
-      saturation,
-      work.routing.boundary,
-    );
+    let saturation: SaturationEvidence;
+    if (mode.kind === "interactive") {
+      if (options.saturation !== undefined) {
+        saturation = options.saturation("local");
+      } else {
+        saturation = yield* readLocalSaturation(catalogue, adapters, credentials);
+      }
+    } else {
+      saturation = UNKNOWN_SATURATION;
+    }
+    const spill =
+      mode.kind === "interactive" &&
+      cloudSpillPermitted(work.policy, classified.assessment, saturation, work.routing.boundary);
     let rankedDeployments = chosen.candidates.map((candidate) => candidate.deployment);
     if (work.routing.boundary === "continue" && pin !== undefined) {
       rankedDeployments = rankedDeployments.filter(
@@ -356,7 +503,7 @@ function executeLocked(
           new BoundaryRequired({ message: "pinned deployment is no longer eligible" }),
         );
       }
-    } else if (!spill) {
+    } else if (!spill && mode.kind !== "batch-spill") {
       rankedDeployments = rankedDeployments.filter((deployment) => deployment.location === "local");
       if (rankedDeployments.length === 0) {
         const detail =
@@ -388,22 +535,35 @@ function executeLocked(
 
     let queued = false;
     let waitedMs = 0;
-    const permit = yield* pool.acquire(rankedDeployments, work.policy.priority, {
-      requestId: work.requestId,
-      waitMs: waitBudgetMs(work.policy),
-      spill: spill && work.routing.boundary !== "continue",
-      onQueue: (event) => {
-        if (event.state === "queued") {
-          queued = true;
-        }
-        waitedMs = event.waitedMs;
-        options.onQueue?.(event);
-      },
-    });
+    let permit: Permit | undefined;
+    if (mode.kind === "batch-spill") {
+      permit = undefined;
+    } else if (mode.kind === "batch-local") {
+      permit = pool.tryAcquireIdleOnly(rankedDeployments, work.policy.priority, isInteractiveIdle);
+      if (permit === undefined) {
+        return yield* Effect.fail(
+          new CapacityBusy({ message: "batch requires an interactive-idle permit" }),
+        );
+      }
+    } else {
+      permit = yield* pool.acquire(rankedDeployments, work.policy.priority, {
+        requestId: work.requestId,
+        waitMs: waitBudgetMs(work.policy),
+        spill: spill && work.routing.boundary !== "continue",
+        onQueue: (event) => {
+          if (event.state === "queued") {
+            queued = true;
+          }
+          waitedMs = event.waitedMs;
+          options.onQueue?.(event);
+        },
+      });
+    }
 
     const candidate =
-      chosen.candidates.find((entry) => entry.deployment.id === permit.deploymentId) ??
-      chosen.candidates[0]!;
+      chosen.candidates.find(
+        (entry) => entry.deployment.id === (permit?.deploymentId ?? rankedDeployments[0]?.id),
+      ) ?? chosen.candidates[0]!;
     const reservation: Reservation = {
       requestId: work.requestId,
       deploymentId: candidate.deployment.id,
@@ -462,6 +622,17 @@ function executeLocked(
       },
     };
     options.onDecision?.(decision, work);
+    if (mode.kind === "batch-spill") {
+      const request = adapterRequestFor(work, candidate, credentials);
+      return {
+        deployment: candidate.deployment,
+        body: openRouterBody(request, false),
+        metadata: batchMetadataOf(work, candidate, classified, decision, pin),
+      } satisfies BatchSpillPlan;
+    }
+    if (permit === undefined) {
+      return yield* Effect.fail(new CapacityBusy({ message: "missing route permit" }));
+    }
 
     const dispatched = yield* Effect.acquireUseRelease(
       Effect.succeed(permit),
@@ -491,6 +662,29 @@ function executeLocked(
     );
     return dispatched;
   });
+}
+
+function planSpill(
+  work: RouterWork,
+  options: RouterOptions,
+  sessions: SessionStore,
+  pool: CapacityPool,
+  adapters: Record<Deployment["transport"], ProviderAdapter>,
+  credentials: (envVar: string) => string | undefined,
+  catalogue: readonly Deployment[],
+  requestedModel: string,
+): Effect.Effect<BatchSpillPlan, RouterFailure> {
+  return runRouted(
+    work,
+    options,
+    sessions,
+    pool,
+    adapters,
+    credentials,
+    options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS,
+    false,
+    { kind: "batch-spill", catalogue, requestedModel },
+  ).pipe(Effect.map((result) => result as BatchSpillPlan));
 }
 
 function classifyIfNeeded(
@@ -592,6 +786,23 @@ function probeUnavailable(
   });
 }
 
+function unavailableWithoutProviderProbe(
+  catalogue: readonly Deployment[],
+  credentials: (envVar: string) => string | undefined,
+  extra?: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const unavailable = new Set<string>(extra ?? []);
+  for (const deployment of catalogue) {
+    if (
+      deployment.credentialEnvVar !== null &&
+      (credentials(deployment.credentialEnvVar) ?? "").length === 0
+    ) {
+      unavailable.add(deployment.id);
+    }
+  }
+  return unavailable;
+}
+
 function chooseCandidate(
   work: RouterWork,
   pin: SessionPin | undefined,
@@ -646,6 +857,68 @@ function toDenialError(result: Extract<SelectRouteResult, { _tag: "Denied" }>): 
   }
 }
 
+function adapterRequestFor(
+  work: RouterWork,
+  candidate: RankedCandidate,
+  credentials: (envVar: string) => string | undefined,
+): AdapterRequest {
+  const credential =
+    candidate.deployment.credentialEnvVar === null
+      ? undefined
+      : credentials(candidate.deployment.credentialEnvVar);
+  return {
+    deployment: candidate.deployment,
+    messages: work.messages,
+    tools: work.tools,
+    toolChoice: work.toolChoice,
+    responseFormat: work.responseFormat,
+    sampling: work.sampling,
+    maxCompletionTokens: Math.min(
+      work.maxCompletionTokens ?? work.policy.maxCompletionTokens,
+      work.policy.maxCompletionTokens,
+      candidate.deployment.maxOutputTokens,
+    ),
+    requestedEffort: candidate.requestedEffort,
+    appliedEffort: candidate.appliedEffort,
+    credential,
+  };
+}
+
+function batchMetadataOf(
+  work: RouterWork,
+  candidate: RankedCandidate,
+  classified: Classification,
+  decision: RouteDecision,
+  pin: SessionPin | undefined,
+): BatchSpillPlan["metadata"] {
+  const accounting = accountingOf(classified, candidate, emptyProviderUsage(), pin, 0, null);
+  return {
+    ...accounting,
+    deploymentId: candidate.deployment.id,
+    location: candidate.deployment.location,
+    transport: candidate.deployment.transport,
+    boundary: work.routing.boundary,
+    trajectoryHash: accounting.trajectoryHash,
+    decodeTps: null,
+    queueWaitMs: 0,
+    decisionReason: decision.reason,
+    selectionReasonCode: decision.selectionReason.code,
+    selectionReasonDetail: decision.selectionReason.detail,
+    exclusionJson: JSON.stringify(decision.exclusions),
+    taskKind: decision.assessment.task,
+    difficulty: decision.assessment.difficulty,
+    requestedEffort: decision.assessment.requestedEffort,
+    saturation: decision.saturation.verified && decision.saturation.saturated,
+    cacheObservation:
+      accounting.cachedInputTokens === null
+        ? "unknown"
+        : accounting.cachedInputTokens > 0
+          ? "observed-hit"
+          : "observed-miss",
+    decisionTraceJson: JSON.stringify(decision),
+  };
+}
+
 function dispatch(
   work: RouterWork,
   options: RouterOptions,
@@ -665,26 +938,7 @@ function dispatch(
     if (options.onBeforeDispatch !== undefined) {
       yield* options.onBeforeDispatch(work, reservation);
     }
-    const credential =
-      candidate.deployment.credentialEnvVar === null
-        ? undefined
-        : credentials(candidate.deployment.credentialEnvVar);
-    const adapterRequest: AdapterRequest = {
-      deployment: candidate.deployment,
-      messages: work.messages,
-      tools: work.tools,
-      toolChoice: work.toolChoice,
-      responseFormat: work.responseFormat,
-      sampling: work.sampling,
-      maxCompletionTokens: Math.min(
-        work.maxCompletionTokens ?? work.policy.maxCompletionTokens,
-        work.policy.maxCompletionTokens,
-        candidate.deployment.maxOutputTokens,
-      ),
-      requestedEffort: candidate.requestedEffort,
-      appliedEffort: candidate.appliedEffort,
-      credential,
-    };
+    const adapterRequest = adapterRequestFor(work, candidate, credentials);
     const adapter = adapters[candidate.deployment.transport];
     const startedAt = yield* Clock.currentTimeMillis;
     if (stream) {

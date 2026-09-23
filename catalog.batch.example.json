@@ -1,0 +1,64 @@
+[
+  {
+    "id": "cloud-glm-batch",
+    "modelId": "z-ai/glm-5.3-flash",
+    "endpoint": "https://openrouter.ai/api/v1",
+    "location": "cloud",
+    "transport": "openrouter",
+    "credentialEnvVar": "OPENROUTER_API_KEY",
+    "providerRestriction": "deepinfra/fp4",
+    "contextLimitTokens": 1048576,
+    "maxOutputTokens": 131072,
+    "capabilities": {
+      "tools": true,
+      "json": true,
+      "vision": false
+    },
+    "capacity": {
+      "maxParallel": 1,
+      "reservedInteractiveSlots": 0
+    },
+    "quality": {
+      "chat": 0.85,
+      "coding": 0.85,
+      "math": 0.8,
+      "analysis": 0.85,
+      "writing": 0.85,
+      "extraction": 0.85,
+      "provenance": {
+        "unit": "probability",
+        "source": "operator-bootstrap-ranking-prior-not-calibrated-success-probability",
+        "asOf": "2026-09-22"
+      }
+    },
+    "prices": {
+      "inputUsdPerMillion": 0.06,
+      "cachedInputUsdPerMillion": 0.012,
+      "outputUsdPerMillion": 0.2,
+      "provenance": {
+        "unit": "USD-per-million-tokens",
+        "source": "https://openrouter.ai/api/v1/models/z-ai/glm-5.3-flash%3Abatch/endpoints (deepinfra/fp4; prices can change; cache savings require observed hits)",
+        "asOf": "2026-09-22"
+      }
+    },
+    "latency": {
+      "initialMs": 2000,
+      "tokensPerSecond": 30,
+      "provenance": {
+        "unit": "tokens-per-second",
+        "source": "operator-bootstrap-latency-prior-not-measured",
+        "asOf": "2026-09-22"
+      }
+    },
+    "reasoning": {
+      "kind": "binary"
+    },
+    "reasoningTokenEstimates": {
+      "none": 0,
+      "low": 1024,
+      "medium": 4096,
+      "high": 8192,
+      "xhigh": 16384
+    }
+  }
+]

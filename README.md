@@ -43,6 +43,9 @@ For an explicitly cloud-only fresh installation, use `--runtime cloud` and confi
 | `POST /v1/embeddings` | Explicit configured embedding deployment |
 | `POST /v1/audio/transcriptions` | Multipart audio to configured STT deployment |
 | `GET /v1/requests/:id` | Key-scoped admission/queue/terminal status |
+| `POST /v1/batches` | Low-priority batch submit (deferred lane, local-first with OpenRouter Batch spill) |
+| `GET /v1/batches/:id`, `GET /v1/batches` | Batch status with retry-safe inline results; key-scoped list |
+| `DELETE /v1/batches/:id` | Cancel undispatched batch items and purge held results |
 | `GET /health/live` | Process liveness, no model calls |
 | `GET /health/ready` | Cached dependency readiness, 503 when chat is unavailable |
 | `GET /api/health` | Detailed dependency snapshot for the console |
@@ -71,6 +74,7 @@ The AMD machine has not arrived. Live gfx1151 generation, physical NPU execution
 
 - [Operator documentation](docs/index.md)
 - [Routing policy](docs/routing-policy.md) and [domain vocabulary](CONTEXT.md)
+- [Batch surface](docs/batch.md) — deferred lane, spill rule, result holding
 - [Choose llama.cpp or Halogen](docs/runtime-selection.md)
 - [Native llama.cpp setup](docs/llamacpp.md)
 - [AI hub / Open WebUI](docs/ai-hub.md)
