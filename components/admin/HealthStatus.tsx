@@ -14,7 +14,11 @@ export function HealthStatus({ health }: { health: HealthSnapshot }) {
       </span>
       <span>
         Classifier <strong>{health.classifier.backend}</strong>
-        {health.classifier.ready ? "" : " unavailable"}
+        {health.classifier.ready
+          ? ""
+          : health.classifier.evidence === "unqualified"
+            ? " unqualified"
+            : " unavailable"}
       </span>
       <span className="pill" data-tone={classifierTone}>
         {health.classifier.local ? "Local" : "Remote"}
@@ -22,7 +26,11 @@ export function HealthStatus({ health }: { health: HealthSnapshot }) {
       <span>
         {total === 0 ? "No deployments reported" : `${readyCount} of ${total} deployments ready`}
       </span>
-      {!health.classifier.local ? (
+      {health.classifier.evidence === "unqualified" ? (
+        <p className="health-note">
+          No qualifying calibration record; assessment use fails closed.
+        </p>
+      ) : !health.classifier.local ? (
         <p className="health-note">
           {health.classifier.evidence === "configuration-only"
             ? "Jev is configured; health checks do not make paid classification calls."

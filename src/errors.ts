@@ -92,6 +92,24 @@ export class ClassifierContextExceeded extends Schema.TaggedError<ClassifierCont
   },
 ) {}
 
+export class ClassifierUnqualified extends Schema.TaggedError<ClassifierUnqualified>()(
+  "ClassifierUnqualified",
+  {
+    message: Schema.String,
+    reason: Schema.Literals([
+      "missing",
+      "identity-mismatch",
+      "placeholder",
+      "not-passed",
+      "metric-invalid",
+      "unmeasured",
+      "error-rate",
+      "false-positive-rate",
+    ]),
+    questionId: Schema.optional(Schema.String),
+  },
+) {}
+
 export class BriefRequired extends Schema.TaggedError<BriefRequired>()("BriefRequired", {
   message: Schema.String,
   inputTokens: Schema.NullOr(Schema.Int),
@@ -145,6 +163,7 @@ export type ClassifierError =
   | ClassifierInvalidResponse
   | ClassifierInputTooLarge
   | ClassifierContextExceeded
+  | ClassifierUnqualified
   | BriefRequired;
 
 export type KeyLifecycleError =

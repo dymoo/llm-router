@@ -560,6 +560,186 @@ export type RequestAccounting = typeof RequestAccounting.Type;
 export const CostSource = Schema.Literals(["provider-reported", "local-rate-card", "estimated"]);
 export type CostSource = typeof CostSource.Type;
 
+export const CalibrationMetric = Schema.Struct({
+  cases: Schema.Int.check(Schema.isGreaterThan(0)),
+  negativeCases: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))),
+  errors: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  falsePositives: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+});
+export type CalibrationMetric = typeof CalibrationMetric.Type;
+
+export const CalibrationThreshold = Schema.Struct({
+  maxErrorRate: Schema.Finite.check(
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(1),
+  ),
+  maxFalsePositiveRate: Schema.NullOr(
+    Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(1)),
+  ),
+});
+export type CalibrationThreshold = typeof CalibrationThreshold.Type;
+
+export const Calibration = Schema.Struct({
+  evaluationSet: Schema.Struct({
+    id: Schema.NonEmptyString,
+    cases: Schema.Int.check(Schema.isGreaterThan(0)),
+    labelsSource: Schema.NonEmptyString,
+    asOf: Schema.NonEmptyString,
+  }),
+  measuredAt: Schema.NonEmptyString,
+  method: Schema.NonEmptyString,
+  metrics: Schema.Record(Schema.String, CalibrationMetric),
+  thresholds: Schema.Record(Schema.String, CalibrationThreshold),
+  verdict: Schema.Literals(["pass", "fail"]),
+});
+export type Calibration = typeof Calibration.Type;
+
+export const ClassifierRates = Schema.Struct({
+  inputUsdPerMillion: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  outputUsdPerMillion: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  provenance: EstimateProvenance,
+});
+export type ClassifierRates = typeof ClassifierRates.Type;
+
+export const ClassifierQualification = Schema.Struct({
+  backend: ClassifierMode,
+  modelRevision: Schema.NonEmptyString,
+  questionSchemaVersion: Schema.NonEmptyString,
+  calibration: Calibration,
+  rates: ClassifierRates,
+});
+export type ClassifierQualification = typeof ClassifierQualification.Type;
+
+export const ClassifierQualifications = Schema.Array(ClassifierQualification).check(
+  Schema.makeFilter<ReadonlyArray<ClassifierQualification>>(
+    (records) =>
+      new Set(records.map((r) => `${r.backend}\0${r.modelRevision}\0${r.questionSchemaVersion}`))
+        .size === records.length ||
+      "Classifier qualifications must be unique per backend, model revision and question schema",
+  ),
+);
+export type ClassifierQualifications = typeof ClassifierQualifications.Type;
+
+export type QualificationFailure =
+  | { _tag: "missing" }
+  | { _tag: "identity-mismatch" }
+  | { _tag: "placeholder" }
+  | { _tag: "not-passed" }
+  | { _tag: "metric-invalid"; questionId: string }
+  | { _tag: "unmeasured"; questionId: string }
+  | { _tag: "error-rate"; questionId: string }
+  | { _tag: "false-positive-rate"; questionId: string };
+
+export type QualificationOutcome =
+  | { _tag: "qualified"; record: ClassifierQualification }
+  | QualificationFailure;
+
+export const qualificationIsPlaceholder = (record: ClassifierQualification): boolean =>
+  isPlaceholderValue(record.modelRevision) ||
+  isPlaceholderValue(record.questionSchemaVersion) ||
+  isPlaceholderValue(record.calibration.evaluationSet.id) ||
+  isPlaceholderValue(record.calibration.evaluationSet.labelsSource) ||
+  isPlaceholderValue(record.calibration.evaluationSet.asOf) ||
+  isPlaceholderValue(record.calibration.measuredAt) ||
+  isPlaceholderValue(record.calibration.method) ||
+  isPlaceholderValue(record.rates.provenance.unit) ||
+  isPlaceholderValue(record.rates.provenance.source) ||
+  (record.rates.provenance.asOf !== null && isPlaceholderValue(record.rates.provenance.asOf));
+
+export const evaluateClassifierQualification = (
+  records: readonly ClassifierQualification[],
+  selected: {
+    backend: ClassifierMode;
+    modelRevision: string | undefined;
+    questionSchemaVersion: string;
+  },
+  requiredQuestionIds: readonly string[],
+): QualificationOutcome => {
+  const { backend, modelRevision, questionSchemaVersion } = selected;
+  if (modelRevision === undefined || modelRevision === "") {
+    return { _tag: "identity-mismatch" };
+  }
+  const record = records.find(
+    (r) =>
+      r.backend === backend &&
+      r.modelRevision === modelRevision &&
+      r.questionSchemaVersion === questionSchemaVersion,
+  );
+  if (record === undefined) {
+    return records.some((r) => r.backend === backend)
+      ? { _tag: "identity-mismatch" }
+      : { _tag: "missing" };
+  }
+  if (qualificationIsPlaceholder(record)) {
+    return { _tag: "placeholder" };
+  }
+  if (record.calibration.verdict !== "pass") {
+    return { _tag: "not-passed" };
+  }
+  for (const questionId of requiredQuestionIds) {
+    const metric = record.calibration.metrics[questionId];
+    const threshold = record.calibration.thresholds[questionId];
+    if (metric === undefined || threshold === undefined) {
+      return { _tag: "unmeasured", questionId };
+    }
+    if (
+      metric.errors > metric.cases ||
+      metric.cases > record.calibration.evaluationSet.cases ||
+      (metric.falsePositives !== null && metric.falsePositives > metric.cases)
+    ) {
+      return { _tag: "metric-invalid", questionId };
+    }
+    if (
+      (questionId === "localSufficiency" || questionId === "trivialChat") &&
+      threshold.maxFalsePositiveRate === null
+    ) {
+      return { _tag: "false-positive-rate", questionId };
+    }
+    if (threshold.maxFalsePositiveRate !== null) {
+      const { negativeCases, falsePositives } = metric;
+      if (
+        negativeCases == null ||
+        negativeCases === 0 ||
+        negativeCases > metric.cases ||
+        falsePositives === null ||
+        falsePositives > negativeCases ||
+        falsePositives > metric.errors
+      ) {
+        return { _tag: "metric-invalid", questionId };
+      }
+      if (metric.errors / metric.cases > threshold.maxErrorRate) {
+        return { _tag: "error-rate", questionId };
+      }
+      if (falsePositives / negativeCases > threshold.maxFalsePositiveRate) {
+        return { _tag: "false-positive-rate", questionId };
+      }
+    } else if (metric.errors / metric.cases > threshold.maxErrorRate) {
+      return { _tag: "error-rate", questionId };
+    }
+  }
+  return { _tag: "qualified", record };
+};
+
+export type ClassifierCost =
+  | { _tag: "zero"; usd: 0 }
+  | { _tag: "unknown" }
+  | { _tag: "priced"; usd: number };
+
+/** Linearity: callers may pass a group token sum. Only input tokens are persisted, so a backend
+ * with a non-zero output rate cannot be priced from input counts alone. */
+export const classifierCostUsd = (
+  reuse: ClassificationReuse,
+  inputTokens: number | null,
+  rates: ClassifierRates | undefined,
+): ClassifierCost => {
+  if (reuse !== "classified") return { _tag: "zero", usd: 0 };
+  if (rates === undefined || inputTokens === null) return { _tag: "unknown" };
+  if (rates.outputUsdPerMillion !== 0) return { _tag: "unknown" };
+  if (inputTokens === 0) return { _tag: "priced", usd: 0 };
+  if (rates.inputUsdPerMillion === null) return { _tag: "unknown" };
+  return { _tag: "priced", usd: (inputTokens * rates.inputUsdPerMillion) / 1_000_000 };
+};
+
 /** Internal normalized accounting; the adapter shapes the OpenRouter-compatible wire usage. */
 export const GenerationUsage = Schema.Struct({
   prompt_tokens: UnknownCount,
@@ -653,6 +833,7 @@ export const AnalyticsBucket = Schema.Struct({
   classifiedFresh: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   classifierInputTokens: UnknownCount,
   classifierEstimatedUsd: UnknownUsd,
+  classifierCostUnknownCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   promptTokens: UnknownCount,
   completionTokens: UnknownCount,
   reasoningTokens: UnknownCount,

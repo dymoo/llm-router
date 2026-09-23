@@ -145,7 +145,56 @@ test(
       });
       const cataloguePath = join(directory, "catalog.json");
       const databasePath = join(directory, "control.sqlite");
+      const qualificationPath = join(directory, "classifier-qualification.json");
+      const questionIds = [
+        "task",
+        "difficulty",
+        "effort",
+        "trivialChat",
+        "localSufficiency",
+        "freshFacts",
+        "expectedLength",
+      ];
+      // Drain test evidence: labelled per-question counts, not a quality claim.
+      const metric = { cases: 20, negativeCases: 10, errors: 1, falsePositives: 0 };
+      const threshold = (id) => ({
+        maxErrorRate: 0.2,
+        maxFalsePositiveRate: ["localSufficiency", "trivialChat"].includes(id) ? 0 : null,
+      });
       await writeFile(cataloguePath, JSON.stringify(catalogue), { mode: 0o600 });
+      await writeFile(
+        qualificationPath,
+        JSON.stringify([
+          {
+            backend: "jev",
+            modelRevision: "jev-1.13.0",
+            questionSchemaVersion: "dymoo-assessment-questions/v1",
+            calibration: {
+              evaluationSet: {
+                id: "production-drain-fixture",
+                cases: 20,
+                labelsSource: "test fixture",
+                asOf: "2026-09-22",
+              },
+              measuredAt: "2026-09-22",
+              method: "test fixture",
+              metrics: Object.fromEntries(questionIds.map((id) => [id, { ...metric }])),
+              thresholds: Object.fromEntries(questionIds.map((id) => [id, threshold(id)])),
+              verdict: "pass",
+            },
+            rates: {
+              inputUsdPerMillion: 0.042,
+              outputUsdPerMillion: 0,
+              provenance: {
+                unit: "USD-per-million-tokens",
+                source: "test fixture",
+                asOf: "2026-09-22",
+              },
+            },
+          },
+        ]),
+        { mode: 0o600 },
+      );
       child = spawn(
         process.execPath,
         [
@@ -171,6 +220,7 @@ test(
             API_KEY_PEPPER: randomUUID(),
             ADMIN_BASIC_AUTH: "",
             CLASSIFIER_MODE: "jev",
+            CLASSIFIER_QUALIFICATION: qualificationPath,
             TYPESAFE_API_KEY: "fixture-only",
             TYPESAFE_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
             TYPESAFE_MODEL: "jev-1.13.0",

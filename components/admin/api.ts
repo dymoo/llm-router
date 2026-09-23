@@ -486,7 +486,8 @@ export function decodeHealth(payload: unknown): HealthSnapshot {
       evidence:
         classifierRaw.evidence === "runtime-probe" ||
         classifierRaw.evidence === "configuration-only" ||
-        classifierRaw.evidence === "unavailable"
+        classifierRaw.evidence === "unavailable" ||
+        classifierRaw.evidence === "unqualified"
           ? classifierRaw.evidence
           : undefined,
     },

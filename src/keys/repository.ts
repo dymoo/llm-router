@@ -8,6 +8,7 @@ import {
   type ApiKeyPublic,
   type ClassificationReuse,
   type ClassifierMode,
+  type ClassifierQualification,
   type ClassifierSource,
   type KeyPolicy as KeyPolicyType,
 } from "../domain.ts";
@@ -104,7 +105,10 @@ export class KeyRepository extends Context.Service<
       priority?: "high" | "medium" | "low";
       deploymentId?: string;
     }): Effect.Effect<RecentRequestList, RepoError>;
-    analytics(input: AnalyticsQuery): Effect.Effect<AnalyticsSnapshot, RepoError>;
+    analytics(
+      input: AnalyticsQuery,
+      qualifications: readonly ClassifierQualification[],
+    ): Effect.Effect<AnalyticsSnapshot, RepoError>;
   }
 >()("dymoo/llm-router/keys/KeyRepository") {}
 
@@ -966,9 +970,12 @@ export const keyRepositoryLayer = (options: {
           catch: mapRepoError,
         });
       });
-      const analytics = Effect.fn("KeyRepository.analytics")(function* (input: AnalyticsQuery) {
+      const analytics = Effect.fn("KeyRepository.analytics")(function* (
+        input: AnalyticsQuery,
+        qualifications: readonly ClassifierQualification[],
+      ) {
         return yield* Effect.try({
-          try: () => queryAnalyticsSnapshot(db, input),
+          try: () => queryAnalyticsSnapshot(db, input, qualifications),
           catch: mapRepoError,
         });
       });

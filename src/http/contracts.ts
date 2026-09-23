@@ -1,5 +1,6 @@
+import type { ClassifierHealth } from "../classifier.ts";
 import type { SamplingOptions } from "../sampling.ts";
-import type { AnalyticsSnapshot } from "../domain.ts";
+import type { AnalyticsSnapshot, ClassifierQualification } from "../domain.ts";
 import type { AnalyticsQuery } from "../keys/analytics.ts";
 import type {
   Admission as RepoAdmission,
@@ -87,13 +88,6 @@ export type RequestQuery = {
   until?: number;
   priority?: Priority;
   deploymentId?: string;
-};
-
-export type ClassifierHealth = {
-  ready: boolean;
-  backend: string;
-  local: boolean;
-  evidence?: "runtime-probe" | "configuration-only" | "unavailable";
 };
 
 export type DeploymentHealth = {
@@ -253,7 +247,10 @@ export type KeyService = {
   finalize: (admission: Admission, outcome: FinalizeOutcome) => Promise<void>;
   usageSummary: (query: UsageQuery) => Promise<UsageSummary>;
   recentRequests: (query: RequestQuery) => Promise<RecentRequestList>;
-  analytics: (query: AnalyticsQuery) => Promise<AnalyticsSnapshot>;
+  analytics: (
+    query: AnalyticsQuery,
+    qualifications: readonly ClassifierQualification[],
+  ) => Promise<AnalyticsSnapshot>;
 };
 
 export type InferenceGateway = {
@@ -273,6 +270,7 @@ export type AdminDeps = {
   appOrigin: string;
   basicAuth?: { username: string; password: string };
   keys: KeyService;
+  classifierQualifications: readonly ClassifierQualification[];
 };
 
 export type InferenceDeps = {

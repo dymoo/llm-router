@@ -152,7 +152,7 @@ export function adminDeps(
   keys: KeyService,
   basicAuth?: { username: string; password: string },
 ): AdminDeps {
-  return { appOrigin: ORIGIN, keys, basicAuth };
+  return { appOrigin: ORIGIN, keys, basicAuth, classifierQualifications: [] };
 }
 
 export function inferenceDeps(keys: KeyService, gateway: InferenceDeps["gateway"]): InferenceDeps {

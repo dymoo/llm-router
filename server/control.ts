@@ -8,6 +8,7 @@ import type { AdminDeps, KeyService, PublicKey } from "../src/http/contracts.ts"
 import { ApiKeys, apiKeysLayer, keyRepositoryLayer, type Admission } from "../src/keys/index.ts";
 import type { ListedKey } from "../src/keys/types.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
+import { loadClassifierQualifications } from "./qualification.ts";
 import { processState } from "./state.ts";
 
 function makeControlRuntime() {
@@ -129,7 +130,8 @@ export const keys: KeyService = {
   },
   usageSummary: (query) => run(ApiKeys.use((api) => api.usageSummary(query))),
   recentRequests: (query) => run(ApiKeys.use((api) => api.recentRequests(query))),
-  analytics: (query) => run(ApiKeys.use((api) => api.analytics(query))),
+  analytics: (query, qualifications) =>
+    run(ApiKeys.use((api) => api.analytics(query, qualifications))),
 };
 
 export function leaseFor(requestId: string): Admission | undefined {
@@ -153,6 +155,7 @@ export function getAdminDeps(): AdminDeps {
   return {
     appOrigin: env.APP_ORIGIN,
     basicAuth: env.ADMIN_BASIC_AUTH,
+    classifierQualifications: loadClassifierQualifications(),
     keys,
   };
 }

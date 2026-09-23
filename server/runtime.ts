@@ -15,6 +15,7 @@ import type {
 import { ModelRouter, modelRouterLayer, type RouterWork } from "../src/router/index.ts";
 import type { RoutedCompletion, RoutedStream } from "../src/router/model-router.ts";
 import { disposeControlPlane, keys, recheckLease } from "./control.ts";
+import { loadClassifierQualifications } from "./qualification.ts";
 import { GatewayFailure } from "../src/http/gateway-failure.ts";
 import { processState, type InferenceRuntime } from "./state.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
@@ -43,6 +44,7 @@ function makeInferenceRuntime(): InferenceRuntime {
     jevModel: env.TYPESAFE_MODEL,
     jevApiKey: env.TYPESAFE_API_KEY,
     jevBaseUrl: env.TYPESAFE_BASE_URL,
+    qualifications: loadClassifierQualifications(),
   });
   const credentials = getProviderCredentials(
     loaded.catalogue.flatMap((deployment) =>

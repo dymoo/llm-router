@@ -30,6 +30,7 @@ const loadEnv = () =>
       MODEL_CATALOG: z.string().min(1),
       AUXILIARY_CATALOG: z.string().min(1).optional(),
       CLASSIFIER_MODE: z.enum(["laya", "jev"]),
+      CLASSIFIER_QUALIFICATION: z.string().min(1).optional(),
       LAYA_URL: z.string().url().optional(),
       LAYA_MODEL_REVISION: z.string().min(1).default("1c5edc17a7acd8701df6fc341c0d179f1c62c982"),
       TYPESAFE_API_KEY: z.string().min(1).optional(),
@@ -46,6 +47,7 @@ const loadEnv = () =>
       MODEL_CATALOG: process.env.MODEL_CATALOG,
       AUXILIARY_CATALOG: process.env.AUXILIARY_CATALOG,
       CLASSIFIER_MODE: process.env.CLASSIFIER_MODE,
+      CLASSIFIER_QUALIFICATION: process.env.CLASSIFIER_QUALIFICATION,
       LAYA_URL: process.env.LAYA_URL,
       LAYA_MODEL_REVISION: process.env.LAYA_MODEL_REVISION,
       TYPESAFE_API_KEY: process.env.TYPESAFE_API_KEY,
@@ -64,6 +66,7 @@ export interface Env {
   MODEL_CATALOG: string;
   AUXILIARY_CATALOG?: string;
   CLASSIFIER_MODE: "laya" | "jev";
+  CLASSIFIER_QUALIFICATION?: string;
   LAYA_URL?: string;
   LAYA_MODEL_REVISION: string;
   TYPESAFE_API_KEY?: string;

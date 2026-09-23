@@ -14,6 +14,7 @@ dist/
 .DS_Store
 /catalog*.json
 !/catalog*.example.json
+/classifier-qualification.json
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

@@ -158,7 +158,13 @@ export async function handleUsage(request: Request, deps: AdminDeps): Promise<Re
     if (since === undefined || until === undefined) {
       throw new HttpFailure(400, "invalid", "Both since and until are required");
     }
-    return jsonResponse(200, await deps.keys.analytics({ since, until, ...queryFilters(url) }));
+    return jsonResponse(
+      200,
+      await deps.keys.analytics(
+        { since, until, ...queryFilters(url) },
+        deps.classifierQualifications,
+      ),
+    );
   } catch (error) {
     return adminError(error, deps);
   }

@@ -23,7 +23,12 @@ function fixture() {
   mkdirSync(join(root, "scripts"));
   for (const file of ["setup.mjs", "runtime-catalog.mjs", "configure-runtime.mjs"])
     copyFileSync(`scripts/${file}`, join(root, "scripts", file));
-  for (const file of [".env.example", "catalog.example.json"]) copyFileSync(file, join(root, file));
+  for (const file of [
+    ".env.example",
+    "catalog.example.json",
+    "classifier-qualification.example.json",
+  ])
+    copyFileSync(file, join(root, file));
   return root;
 }
 function run(root: string, script: string, args: string[]) {
@@ -83,6 +88,7 @@ test("native and Compose setup do not overwrite each other's catalogue or secret
     assert.equal(hash(join(root, "catalog.json")), beforeCatalogue);
     const env = parseEnv(readFileSync(join(root, ".env.native"), "utf8"));
     assert.equal(env.MODEL_CATALOG, "./catalog.native.json");
+    assert.equal(env.CLASSIFIER_QUALIFICATION, undefined, "native qualification stays optional");
     assert.equal(
       new URL(catalogue(join(root, "catalog.native.json"))[0]!.endpoint).hostname,
       "127.0.0.1",

@@ -1,12 +1,14 @@
 import "server-only";
 import { Effect, Predicate } from "effect";
 import { getEnv, getProviderCredentials } from "../env.ts";
-import { decodeLayaHealth, deploymentIsPlaceholder } from "../src/domain.ts";
+import { RouterClassifier, type ClassifierHealth } from "../src/classifier.ts";
+import { deploymentIsPlaceholder } from "../src/domain.ts";
 import { createHealthMonitor } from "../src/health.ts";
-import type { ClassifierHealth, DeploymentHealth } from "../src/http/contracts.ts";
+import type { DeploymentHealth } from "../src/http/contracts.ts";
 import { adaptersFor } from "../src/router/adapters/index.ts";
 import { configuredAuxiliaryDeployments } from "./auxiliary.ts";
 import { keys } from "./control.ts";
+import { loadClassifierQualifications } from "./qualification.ts";
 import { configuredChatDeployments } from "./runtime.ts";
 import { processState } from "./state.ts";
 
@@ -21,32 +23,16 @@ const adapters = adaptersFor(fetch);
 
 async function classifier(): Promise<ClassifierHealth> {
   const env = getEnv();
-  if (env.CLASSIFIER_MODE === "jev") {
-    // Jev has no documented free authenticated readiness endpoint. Never spend on a probe.
-    return {
-      ready: env.TYPESAFE_API_KEY !== undefined,
-      backend: "jev",
-      local: false,
-      evidence: "configuration-only",
-    };
-  }
-  if (!env.LAYA_URL) return { ready: false, backend: "laya", local: true, evidence: "unavailable" };
-  try {
-    const response = await boundedFetch(`${env.LAYA_URL.replace(/\/$/, "")}/healthz`);
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error("unavailable");
-    }
-    const health = await Effect.runPromise(decodeLayaHealth(await response.json()));
-    return {
-      ready: health.ready && health.model_revision === env.LAYA_MODEL_REVISION,
-      backend: health.backend ?? "laya",
-      local: true,
-      evidence: "runtime-probe",
-    };
-  } catch {
-    return { ready: false, backend: "laya", local: true, evidence: "unavailable" };
-  }
+  return Effect.runPromise(
+    RouterClassifier.readiness({
+      mode: env.CLASSIFIER_MODE,
+      layaUrl: env.LAYA_URL,
+      layaModelRevision: env.LAYA_MODEL_REVISION,
+      jevModel: env.TYPESAFE_MODEL,
+      jevApiKey: env.TYPESAFE_API_KEY,
+      qualifications: loadClassifierQualifications(),
+    }),
+  );
 }
 
 async function deployments(): Promise<DeploymentHealth[]> {

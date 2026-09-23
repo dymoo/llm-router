@@ -75,6 +75,8 @@ Never publish `0.0.0.0` on a public interface. LAN reachability is admin access 
 | `COMPOSE_PROFILES` | Selected GPU runtime and optional `npu,webui` services |
 | `LAYA_URL` | `http://laya:8090` on Compose; `http://127.0.0.1:8090` native |
 | `CLASSIFIER_MODE` | `laya` or `jev` only. No automatic fallback. |
+| `CLASSIFIER_QUALIFICATION_FILE` | Host selector for the qualification record bound read-only into the gateway (default `./classifier-qualification.example.json` — keep the `./` prefix in short syntax; the mount itself is long-syntax bind, so bare-relative or absolute paths are safe). The shipped example has `verdict: fail` + `REPLACE_` placeholders so the default can never pass the gate. A real record is never generated: keep it outside the repository or under the ignored `./data/` directory, verify the chosen path is excluded from Git and the Docker build context, and never stage it. Only the literal root `classifier-qualification.json` is ignored by default; an arbitrary custom path is **not** automatically excluded |
+| `CLASSIFIER_QUALIFICATION` | Native-only local path to the qualification records; absent by default = no evidence, fail-closed `unqualified` routing. On Compose the gateway instead uses the pinned container path `/etc/llm-router/classifier-qualification.json` (same precedence as `MODEL_CATALOG`, overrides any `.env` value), mounted `:ro` from `CLASSIFIER_QUALIFICATION_FILE` |
 | `TYPESAFE_API_KEY` | Required only for `jev` |
 | `LAYA_MODEL_REVISION` | Pinned snapshot `1c5edc17a7acd8701df6fc341c0d179f1c62c982` |
 | `HALOGEN_DOWNLOAD` | First-boot weights repo; passed into the unmodified Halogen image |

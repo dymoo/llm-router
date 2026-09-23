@@ -65,6 +65,8 @@ The AMD machine has not arrived. Live gfx1151 generation, physical NPU execution
 
 **Classifier quality gate:** real CPU Laya smoke tests exposed misclassification and low local-sufficiency judgments for simple tasks with deployment metadata. Policy remains fail-closed; it was not weakened to hide this. [Diagnostic findings and the production decision](docs/research/laya-routing-validation.md) are recorded separately. Use an explicitly selected/authorized Jev backend or calibrate Laya before trusting production routing.
 
+**Classifier qualification gate:** Assessment use now requires a qualification record with measured per-question Calibration and sourced token rates for the exact backend revision and question schema ([operations](docs/operations.md#classifier-qualification)). Missing or unqualified evidence fails closed — readiness reports `unqualified` and chat returns `503 classifier_unqualified` — so uncalibrated backends cannot silently route production work. The [assumptions audit](docs/research/classifier-economics-and-gates.md) records what is measured versus assumed.
+
 ## Read next
 
 - [Operator documentation](docs/index.md)

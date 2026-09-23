@@ -9,29 +9,43 @@ const baseEnv = {
   MODEL_CATALOG: "./catalog.example.json",
   API_KEY_PEPPER: "test-pepper-not-a-production-credential",
   CLASSIFIER_MODE: "laya",
+  CLASSIFIER_QUALIFICATION: "",
   ADMIN_BASIC_AUTH: "",
 };
 
-function inspect(overrides: Record<string, string | undefined>) {
+function evaluate(script: string, overrides: Record<string, string | undefined>) {
   return spawnSync(
     process.execPath,
-    [
-      "--import",
-      "tsx",
-      "--conditions=react-server",
-      "--input-type=module",
-      "-e",
-      'import { getEnv } from "./env.ts"; const env=getEnv(); console.log(JSON.stringify({ mode:env.CLASSIFIER_MODE, basic:env.ADMIN_BASIC_AUTH!==undefined, username:env.ADMIN_BASIC_AUTH?.username, passwordLength:env.ADMIN_BASIC_AUTH?.password.length }));',
-    ],
+    ["--import", "tsx", "--conditions=react-server", "--input-type=module", "-e", script],
     { cwd: process.cwd(), env: { ...baseEnv, ...overrides }, encoding: "utf8" },
+  );
+}
+
+function inspect(overrides: Record<string, string | undefined>) {
+  return evaluate(
+    'import { getEnv } from "./env.ts"; const env=getEnv(); console.log(JSON.stringify({ mode:env.CLASSIFIER_MODE, qualification:env.CLASSIFIER_QUALIFICATION ?? null, basic:env.ADMIN_BASIC_AUTH!==undefined, username:env.ADMIN_BASIC_AUTH?.username, passwordLength:env.ADMIN_BASIC_AUTH?.password.length }));',
+    overrides,
   );
 }
 
 test("typed configuration accepts absent Basic auth and keeps credentials out of output", () => {
   const result = inspect({});
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { mode: "laya", basic: false });
+  assert.deepEqual(JSON.parse(result.stdout), { mode: "laya", qualification: null, basic: false });
   assert.equal(result.stdout.includes(baseEnv.API_KEY_PEPPER), false);
+});
+
+test("optional qualification evidence path survives and empty stays absent", () => {
+  const configured = inspect({ CLASSIFIER_QUALIFICATION: "/etc/llm-router/qualification.json" });
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.deepEqual(
+    JSON.parse(configured.stdout).qualification,
+    "/etc/llm-router/qualification.json",
+  );
+
+  const empty = inspect({ CLASSIFIER_QUALIFICATION: "" });
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.deepEqual(JSON.parse(empty.stdout).qualification, null);
 });
 
 test("optional Basic auth keeps colons in its password", () => {
@@ -39,6 +53,7 @@ test("optional Basic auth keeps colons in its password", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
     mode: "laya",
+    qualification: null,
     basic: true,
     username: "operator",
     passwordLength: 18,

@@ -54,7 +54,7 @@ export type ClassifierHealth = {
   ready: boolean;
   backend: string;
   local: boolean;
-  evidence?: "runtime-probe" | "configuration-only" | "unavailable";
+  evidence?: "runtime-probe" | "configuration-only" | "unavailable" | "unqualified";
 };
 
 export type DeploymentHealth = {

@@ -30,6 +30,18 @@ _Avoid_: route, live wait/load/price text, Jev as fallback router, classificatio
 The assessment backend, either local Laya or explicitly selected remote Jev.
 _Avoid_: generator, Router, automatic fallback
 
+**Classifier readiness**:
+Operational status used to decide whether to attempt an Assessment, based on configuration evidence for a remote backend or a live local probe. It does not establish calibrated quality or Task success.
+_Avoid_: quality score, Task success, benchmark
+
+**Calibration**:
+Measured agreement between one Classifier backend revision and labelled judgments on a declared evaluation set, reported per Assessment question with the errors it permits.
+_Avoid_: confidence, readiness, self-claimed accuracy, benchmark as Task success
+
+**Classifier qualification**:
+The dated record pairing one Classifier backend revision and question schema with its measured Calibration and sourced token rates. Production routing fails closed without it; absent rates stay unknown.
+_Avoid_: licence, certification, model card, readiness
+
 **Laya**:
 The local classifier model. Default execution is CPU. NPU is optional and only when IOMMU is enabled.
 _Avoid_: Halogen, local Qwen, NPU as the default, generator

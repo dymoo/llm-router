@@ -9,6 +9,7 @@ export type HttpErrorCode =
   | "unavailable"
   | "classifier_unavailable"
   | "classifier_context_exceeded"
+  | "classifier_unqualified"
   | "no_eligible_model"
   | "busy"
   | "provider_failure"
@@ -101,6 +102,11 @@ const TAG_MAP: Record<string, { status: number; code: HttpErrorCode; message: st
     status: 503,
     code: "classifier_unavailable",
     message: "classifier unavailable",
+  },
+  ClassifierUnqualified: {
+    status: 503,
+    code: "classifier_unqualified",
+    message: "classifier is not qualified for production routing",
   },
   ClassifierInvalidResponse: {
     status: 503,

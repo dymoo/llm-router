@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleCreateKey, handleListKeys, handleUpdateKey } from "../../src/http/admin.ts";
+import {
+  handleCreateKey,
+  handleListKeys,
+  handleUpdateKey,
+  handleUsage,
+} from "../../src/http/admin.ts";
+import type { AdminDeps, AnalyticsSnapshot, KeyService } from "../../src/http/contracts.ts";
 import { adminDeps, jsonRequest, memoryKeys, ORIGIN, samplePolicy } from "./helpers.ts";
 
 test("lists keys without a session cookie", async () => {
@@ -62,4 +68,28 @@ test("basic auth challenges when configured", async () => {
   );
   assert.equal(response.status, 401);
   assert.equal(response.headers.get("www-authenticate"), 'Basic realm="llm-router"');
+});
+
+test("usage forwards the AdminDeps classifier qualifications into analytics", async () => {
+  const classifierQualifications: AdminDeps["classifierQualifications"] = [];
+  let observedQuery: { since?: number; until?: number } | undefined;
+  let observedQualifications: readonly unknown[] | undefined;
+  const keys: KeyService = {
+    ...memoryKeys(),
+    analytics: async (query, qualifications) => {
+      observedQuery = query;
+      observedQualifications = qualifications;
+      return { marker: "usage" } as unknown as AnalyticsSnapshot;
+    },
+  };
+  const deps: AdminDeps = { appOrigin: ORIGIN, keys, classifierQualifications };
+  const response = await handleUsage(
+    new Request(`${ORIGIN}/api/admin/usage?since=1000&until=2000`),
+    deps,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(observedQualifications, classifierQualifications);
+  assert.equal(observedQuery?.since, 1000);
+  assert.equal(observedQuery?.until, 2000);
+  assert.deepEqual(await response.json(), { marker: "usage" });
 });
