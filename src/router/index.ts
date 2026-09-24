@@ -37,6 +37,7 @@ export { cloudSpillPermitted, preferredLocationFromBias, UNKNOWN_SATURATION } fr
 export type { SaturationEvidence } from "./locality.ts";
 export {
   adaptersFor,
+  gufoAdapter,
   halogenAdapter,
   llamaCppAdapter,
   openAiCompatibleAdapter,

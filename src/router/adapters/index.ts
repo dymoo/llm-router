@@ -1,4 +1,5 @@
 import type { Deployment } from "../../domain.ts";
+import { gufoAdapter } from "./gufo.ts";
 import { halogenAdapter } from "./halogen.ts";
 import { llamaCppAdapter } from "./llamacpp.ts";
 import { openAiCompatibleAdapter } from "./openai-compatible.ts";
@@ -11,6 +12,7 @@ export function adaptersFor(
 ): Record<Deployment["transport"], ProviderAdapter> {
   return {
     llamacpp: llamaCppAdapter(fetchImpl),
+    gufo: gufoAdapter(fetchImpl),
     halogen: halogenAdapter(fetchImpl),
     "openai-compatible": openAiCompatibleAdapter(fetchImpl),
     openrouter: openRouterAdapter(fetchImpl),
@@ -19,6 +21,7 @@ export function adaptersFor(
 
 export type { ProviderAdapter, AdapterRequest, AdapterCompletion } from "./types.ts";
 export { halogenAdapter } from "./halogen.ts";
+export { gufoAdapter } from "./gufo.ts";
 export { llamaCppAdapter } from "./llamacpp.ts";
 export { openAiCompatibleAdapter } from "./openai-compatible.ts";
 export { openRouterAdapter } from "./openrouter.ts";

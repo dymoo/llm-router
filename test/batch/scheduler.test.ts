@@ -46,6 +46,7 @@ const policy: KeyPolicy = {
   contextLimitTokens: 200_000,
   maxCompletionTokens: 4_096,
   maxWaitMs: 250,
+  overloadAction: "report",
   maxConcurrent: 8,
   requestsPerMinute: 600,
   allowedModels: null,

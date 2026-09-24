@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { decodePublicKey, decodeUsage } from "../components/admin/api.ts";
+import { POLICY_PRESETS } from "../components/admin/presets.ts";
 import { filterLoadedKeys } from "../components/admin/filter.ts";
 import { resolveStaleEdit, validatePolicy } from "../components/admin/policy.ts";
 import type { KeyPolicy, PublicKey } from "../components/admin/types.ts";
@@ -15,6 +16,7 @@ const policy: KeyPolicy = {
   requestsPerMinute: 60,
   maxConcurrent: 2,
   maxWaitMs: 0,
+  overloadAction: "report",
   maxEstimatedUsd: null,
   bias: { cost: 0.7, quality: 0.5, latency: 0.3 },
 };
@@ -83,6 +85,30 @@ test("public key decode never keeps a secret field", () => {
   assert.equal(decoded.version, 3);
   assert.equal("secret" in decoded, false);
   assert.equal("digest" in decoded, false);
+});
+
+test("admin decodes historical and explicit overload policy without losing the choice", () => {
+  const { overloadAction: _omitted, ...historical } = policy;
+  assert.equal(
+    decodePublicKey({ ...sampleKey(), policy: historical }).policy.overloadAction,
+    "report",
+  );
+  const optedIn = decodePublicKey({
+    ...sampleKey(),
+    policy: { ...historical, overloadAction: "failover" },
+  });
+  assert.equal(optedIn.policy.overloadAction, "failover");
+  assert.throws(() =>
+    decodePublicKey({ ...sampleKey(), policy: { ...historical, overloadAction: "auto" } }),
+  );
+  assert.equal(
+    validatePolicy({ ...policy, overloadAction: "auto" as "report" }),
+    "Local overload action must be report or failover.",
+  );
+  assert.equal(
+    POLICY_PRESETS.every((preset) => preset.policy.overloadAction === "report"),
+    true,
+  );
 });
 
 test("usage decode keeps unknown tokens and cost as null", () => {

@@ -41,11 +41,15 @@ export type Priority = typeof Priority.Type;
 export const Location = Schema.Literals(["local", "cloud"]);
 export type Location = typeof Location.Type;
 
+export const OverloadAction = Schema.Literals(["report", "failover"]);
+export type OverloadAction = typeof OverloadAction.Type;
+
 export const Transport = Schema.Literals([
   "llamacpp",
   "openai-compatible",
   "openrouter",
   "halogen",
+  "gufo",
 ]);
 export type Transport = typeof Transport.Type;
 
@@ -142,6 +146,9 @@ export const KeyPolicy = Schema.Struct({
   requestsPerMinute: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   maxConcurrent: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   maxWaitMs: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_CAPACITY_WAIT_MS })),
+  overloadAction: OverloadAction.pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed<OverloadAction>("report")),
+  ),
   maxEstimatedUsd: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
   bias: Schema.Struct({
     cost: Bias,
@@ -161,6 +168,7 @@ export const POLICY_SUGGESTIONS = {
     requestsPerMinute: 60,
     maxConcurrent: 2,
     maxWaitMs: 0,
+    overloadAction: "report",
     maxEstimatedUsd: null,
     bias: { cost: 0.7, quality: 0.5, latency: 0.3 },
   },
@@ -173,6 +181,7 @@ export const POLICY_SUGGESTIONS = {
     requestsPerMinute: 120,
     maxConcurrent: 4,
     maxWaitMs: 0,
+    overloadAction: "report",
     maxEstimatedUsd: null,
     bias: { cost: 0.2, quality: 0.9, latency: 0.3 },
   },
@@ -185,6 +194,7 @@ export const POLICY_SUGGESTIONS = {
     requestsPerMinute: 30,
     maxConcurrent: 1,
     maxWaitMs: 5_000,
+    overloadAction: "report",
     maxEstimatedUsd: null,
     bias: { cost: 1, quality: 0.3, latency: 0.05 },
   },
@@ -200,6 +210,7 @@ export const KEY_POLICY_EDITABLE_FIELDS = [
   "requestsPerMinute",
   "maxConcurrent",
   "maxWaitMs",
+  "overloadAction",
   "maxEstimatedUsd",
   "bias",
 ] as const;
@@ -758,6 +769,8 @@ export const SelectionCode = Schema.Literals([
   "cloud-quality",
   "complexity-escalation",
   "local-saturation",
+  "local-overload-failover",
+  "local-overloaded",
   "queue-admitted",
   "highest-quality",
   "no-eligible",

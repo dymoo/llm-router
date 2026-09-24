@@ -55,6 +55,17 @@ Low-priority, high-locality work that is waiting for local capacity must surface
 
 Do not claim a per-stream TPS floor or a measured host throughput. Those are unverified on this hardware.
 
+## Local overload action
+
+Local overload is an admission observation, **not Verified saturation**: no immediately available Router-owned permit for any Key-eligible local Deployment, or a definitive local runtime pre-execution rejection (Gufo HTTP 429 queue_full or client_queue_full). Gateway permit counts alone do not prove the runtime is saturated. Unknown health and uncertain provider failures are not local overload evidence.
+
+Each Key has an editable overloadAction, persisted with its policy. Missing values on historical policies and all suggestions default to report. A full-policy PATCH from an older client that omits the field preserves the stored action. No paid cloud dispatch is enabled by this default.
+
+- **report**: retain the Key's local capacity wait up to maxWaitMs, then return local_overloaded: HTTP 503 with Retry-After for non-streaming requests, or a terminal SSE `router.error` event with `retry_after_seconds` for streams (their 200 SSE headers are already committed).
+- **failover**: while still **before provider dispatch**, switch only to an already eligible cloud Deployment. Key allowlist, required capabilities, context/completion limits, credential availability, and maxEstimatedUsd with usable pricing still apply. If none qualifies, report local overload instead; never waive limits or infer a price of zero.
+
+This action is separate from continuous Locality bias and must not turn incidental capacity into Verified saturation or alter locality-biased ranking spill. Never replay after uncertain provider contact. A pinned continue request does not silently migrate; only the existing safe-boundary rules permit switching. Operators must opt in to cloud failover per Key and understand it may incur provider charges.
+
 ## Policy suggestions
 
 Every field is editable. Biases and locality use sliders with live descriptions. Names are starting points for Dylan’s keys, a balanced key, and a cheap background key — not locked profiles.

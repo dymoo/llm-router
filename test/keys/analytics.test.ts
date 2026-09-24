@@ -420,3 +420,46 @@ test("mixed known and unknown spend reports the priced partial sum plus the unkn
   assert.equal(seriesUnknown, 1);
   assert.ok(Math.abs(seriesUsd - expected) < 1e-12);
 });
+
+test("analytics keeps overload reasons distinct without reclassifying historic decisions", async () => {
+  const snapshot = await snapshotFor(
+    [
+      {
+        status: "success",
+        deploymentId: "cloud",
+        location: "cloud",
+        decisionReason: "local-overload-failover",
+        selectionReasonCode: "local-overload-failover",
+      },
+      {
+        status: "error",
+        deploymentId: "local",
+        location: "local",
+        errorCode: "LocalOverloaded",
+        decisionReason: "local-overloaded",
+        selectionReasonCode: "local-overloaded",
+      },
+      {
+        status: "success",
+        deploymentId: "historic-cloud",
+        location: "cloud",
+        decisionReason: "cloud-quality",
+        selectionReasonCode: "cloud-quality",
+      },
+      {
+        status: "error",
+        deploymentId: "historic-local",
+        location: "local",
+        decisionReason: "failed-precheck",
+        selectionReasonCode: "failed-precheck",
+      },
+    ],
+    [],
+  );
+  assert.equal(snapshot.window.requests, 4);
+  assert.equal(snapshot.bySelectionCode["local-overload-failover"]?.requests, 1);
+  assert.equal(snapshot.bySelectionCode["local-overloaded"]?.requests, 1);
+  assert.equal(snapshot.bySelectionCode["cloud-quality"]?.requests, 1);
+  assert.equal(snapshot.bySelectionCode["failed-precheck"]?.requests, 1);
+  assert.equal(snapshot.errors.LocalOverloaded, 1);
+});

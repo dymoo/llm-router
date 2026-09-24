@@ -84,6 +84,14 @@ _Avoid_: interactive, background, preemption, SLA, reservedInteractiveSlots (dep
 Evidence from the local runtime that it cannot accept more work. Gateway slot counts and missing telemetry are not saturation.
 _Avoid_: semaphore full, unknown health, complexity, busy guess
 
+**Local overload**:
+No immediately available Router-owned permit on any eligible local deployment, or a definitive local runtime rejection before execution (such as queue-full). It is not a claim of Verified saturation.
+_Avoid_: verified saturation, unknown health, an uncertain failure after provider contact
+
+**Overload action**:
+A Key's choice to report Local overload or permit a pre-dispatch switch to an already eligible cloud Deployment. It does not override Hard constraints or Session boundaries.
+_Avoid_: locality bias, automatic paid fallback, retry after dispatch
+
 **Cost bias** / **Quality bias** / **Latency bias**:
 Independent per-key ranking weights in `[0, 1]`. They never relax a hard constraint.
 _Avoid_: locality bias, monthly budget, invoice cap

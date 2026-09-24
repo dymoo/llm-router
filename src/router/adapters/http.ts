@@ -89,7 +89,7 @@ export function readJsonCompletion(
   );
 }
 
-function readBoundedBody(response: Response): Effect.Effect<string, ProviderFailure> {
+export function readBoundedBody(response: Response): Effect.Effect<string, ProviderFailure> {
   return Effect.tryPromise({
     try: (signal) =>
       readBytes(response, signal, UPSTREAM_RESPONSE_MAX_BYTES, UPSTREAM_JSON_TIMEOUT_MS),

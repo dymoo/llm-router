@@ -51,6 +51,7 @@ const POLICY_KEYS: Record<string, true> = {
   requestsPerMinute: true,
   maxConcurrent: true,
   maxWaitMs: true,
+  overloadAction: true,
   maxEstimatedUsd: true,
   bias: true,
 };
@@ -98,6 +99,10 @@ export function decodeKeyPolicy(value: unknown): KeyPolicy {
   if (localityBias < 0 || localityBias > 1) {
     throw new InvalidInput("policy.localityBias must be in [0,1]");
   }
+  const overloadAction = record.overloadAction === undefined ? "report" : record.overloadAction;
+  if (overloadAction !== "report" && overloadAction !== "failover") {
+    throw new InvalidInput("policy.overloadAction is invalid");
+  }
   let allowedModels: readonly string[] | null = null;
   if (record.allowedModels !== null && record.allowedModels !== undefined) {
     if (
@@ -128,6 +133,7 @@ export function decodeKeyPolicy(value: unknown): KeyPolicy {
     requestsPerMinute: finiteNumber(record.requestsPerMinute, "policy.requestsPerMinute"),
     maxConcurrent: finiteNumber(record.maxConcurrent, "policy.maxConcurrent"),
     maxWaitMs: finiteNumber(record.maxWaitMs, "policy.maxWaitMs"),
+    overloadAction,
     maxEstimatedUsd: optionalNullNumber(record.maxEstimatedUsd, "policy.maxEstimatedUsd"),
     bias: { cost, quality, latency },
   };
@@ -168,7 +174,11 @@ export function decodeKeyPatch(value: Record<string, unknown>): KeyPatch {
     expiresAt: value.expiresAt,
     policy: value.policy,
   });
-  return { ...draft, expectedVersion };
+  const { overloadAction: _default, ...legacyPolicy } = draft.policy;
+  const policy = Object.hasOwn(asRecord(value.policy, "policy"), "overloadAction")
+    ? draft.policy
+    : legacyPolicy;
+  return { ...draft, policy, expectedVersion };
 }
 
 export function decodeRotateBody(value: Record<string, unknown>): { expectedVersion: number } {

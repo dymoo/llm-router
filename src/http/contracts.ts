@@ -19,6 +19,7 @@ import type {
 import type { RequestStatusStore } from "./status.ts";
 
 export type Priority = "high" | "medium" | "low";
+export type OverloadAction = "report" | "failover";
 export type SessionBoundary = "new-task" | "continue" | "checkpoint";
 
 export type KeyPolicy = {
@@ -30,6 +31,7 @@ export type KeyPolicy = {
   requestsPerMinute: number;
   maxConcurrent: number;
   maxWaitMs: number;
+  overloadAction: OverloadAction;
   maxEstimatedUsd: number | null;
   bias: {
     cost: number;
@@ -72,7 +74,8 @@ export type KeyDraft = {
   policy: KeyPolicy;
 };
 
-export type KeyPatch = KeyDraft & {
+export type KeyPatch = Omit<KeyDraft, "policy"> & {
+  policy: Omit<KeyPolicy, "overloadAction"> & Partial<Pick<KeyPolicy, "overloadAction">>;
   expectedVersion: number;
 };
 

@@ -76,6 +76,9 @@ export type RepoError =
   | ConcurrentLimit
   | PepperMismatch;
 
+type KeyPolicyUpdate = Omit<KeyPolicyType, "overloadAction"> &
+  Partial<Pick<KeyPolicyType, "overloadAction">>;
+
 export class KeyRepository extends Context.Service<
   KeyRepository,
   {
@@ -91,7 +94,7 @@ export class KeyRepository extends Context.Service<
       expectedVersion: number;
       name: string;
       expiresAt: number | null;
-      policy: KeyPolicyType;
+      policy: KeyPolicyUpdate;
     }): Effect.Effect<ApiKeyPublic, RepoError>;
     revokeKey(id: string): Effect.Effect<ApiKeyPublic, RepoError>;
     rotateKey(input: { id: string; expectedVersion: number }): Effect.Effect<CreatedKey, RepoError>;
@@ -570,7 +573,7 @@ export const keyRepositoryLayer = (options: {
         expectedVersion: number;
         name: string;
         expiresAt: number | null;
-        policy: KeyPolicyType;
+        policy: KeyPolicyUpdate;
       }) {
         const now = yield* Clock.currentTimeMillis;
         return yield* Effect.try({
@@ -591,11 +594,13 @@ export const keyRepositoryLayer = (options: {
                 if (input.expiresAt !== null && input.expiresAt < now) {
                   throw new InvalidInput({ message: "expiry must be in the future" });
                 }
+                const overloadAction =
+                  input.policy.overloadAction ?? decodePolicyJson(row.policyJson).overloadAction;
                 tx.update(apiKeys)
                   .set({
                     name,
                     expiresAt: input.expiresAt,
-                    policyJson: encodePolicy(input.policy),
+                    policyJson: encodePolicy({ ...input.policy, overloadAction }),
                     version: row.version + 1,
                   })
                   .where(and(eq(apiKeys.id, input.id), eq(apiKeys.version, input.expectedVersion)))

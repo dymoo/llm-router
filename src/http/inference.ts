@@ -9,7 +9,7 @@ import type {
   StreamSuccess,
 } from "./contracts.ts";
 import { classifierInputFor, decodeChatCompletion, requestCapabilities } from "./decode.ts";
-import { failureResponse, jsonResponse } from "./errors.ts";
+import { errorBody, failureResponse, jsonResponse, toHttpFailure } from "./errors.ts";
 import { sessionResponseHeaders, sseHeaders } from "./headers.ts";
 import { BODY_READ_TIMEOUT_MS, GATEWAY_EFFECT_TIMEOUT_MS, INFERENCE_MAX_BYTES } from "./limits.ts";
 import { bearerToken } from "./security.ts";
@@ -251,7 +251,26 @@ function streamCompletion(
         // No prompt, credential, or provider response is logged on a persistence failure.
         console.error("Request accounting could not be persisted", admission.requestId);
       }
-      await writer.abort(error).catch(() => undefined);
+      const publicFailure = toHttpFailure(error);
+      // The 200 SSE response is committed before routing; close with a public terminal event.
+      if (!signal.aborted && publicFailure.code === "local_overloaded") {
+        const body = {
+          error: {
+            ...errorBody(publicFailure).error,
+            retry_after_seconds: publicFailure.retryAfterSeconds ?? 1,
+          },
+        };
+        try {
+          await write(
+            new TextEncoder().encode("event: router.error\ndata: " + JSON.stringify(body) + "\n\n"),
+          );
+          await writer.close();
+        } catch {
+          await writer.abort(error).catch(() => undefined);
+        }
+      } else {
+        await writer.abort(error).catch(() => undefined);
+      }
     } finally {
       clearInterval(keepalive);
       signal.removeEventListener("abort", abort);

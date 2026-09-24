@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { Effect } from "effect";
+import { selectRoute } from "../src/router/select-route.ts";
 import {
   POLICY_SUGGESTIONS,
   checkCatalogueForInference,
@@ -84,6 +86,54 @@ test("decodes a valid halogen catalogue entry", async () => {
   assert.equal(catalogue[0]?.location, "local");
 });
 
+test("the optional Gufo catalogue template decodes but cannot be used before endpoint injection", async () => {
+  const raw: unknown = JSON.parse(
+    await readFile(new URL("../catalog.gufo.example.json", import.meta.url), "utf8"),
+  );
+  const [gufo] = await run(decodeCatalogue(raw));
+  assert.equal(gufo?.transport, "gufo");
+  assert.equal(gufo?.modelId, "qwen3.8-flash-next-gufo");
+  assert.equal(gufo?.credentialEnvVar, "GUFO_API_KEY");
+  assert.deepEqual(gufo?.reasoning, {
+    kind: "graded",
+    levels: ["none", "low", "medium", "xhigh"],
+  });
+  assert.deepEqual(gufo?.capacity, { maxParallel: 2, reservedInteractiveSlots: 1 });
+  assert.deepEqual(gufo?.capabilities, { tools: true, json: false, vision: false });
+  assert.equal(gufo?.contextLimitTokens, 131_072);
+  assert.equal(gufo?.maxOutputTokens, 8_192);
+  await assert.rejects(() => run(checkCatalogueForInference([gufo!])), /placeholder/i);
+});
+
+test("unknown Gufo prices deny requests with a hard estimated-spend ceiling", async () => {
+  const raw: unknown = JSON.parse(
+    await readFile(new URL("../catalog.gufo.example.json", import.meta.url), "utf8"),
+  );
+  const [template] = await run(decodeCatalogue(raw));
+  const gufo = { ...template!, endpoint: "http://127.0.0.1:1/v1" };
+  const result = selectRoute({
+    assessment: {
+      task: "coding",
+      difficulty: { value: "easy", confidence: 1 },
+      effort: { value: "low", confidence: 1 },
+      trivialChat: 0,
+      localSufficiency: 1,
+      freshFacts: 0,
+      expectedLength: "short",
+    },
+    deployments: [gufo],
+    policy: { ...POLICY_SUGGESTIONS.Balanced, maxEstimatedUsd: 0.01 },
+    inputTokens: 100,
+    generationAllowance: 512,
+    tools: true,
+    json: false,
+    vision: false,
+    boundary: "new-task",
+    freshFactsAvailable: false,
+  });
+  assert.equal(result._tag === "Denied" ? result.code : null, "cost");
+});
+
 test("rejects a catalogue missing required deployment fields", async () => {
   await assert.rejects(() => run(decodeCatalogue([{ id: "broken" }])));
 });
@@ -110,7 +160,14 @@ test("policy suggestions decode as KeyPolicy", async () => {
   assert.equal(POLICY_SUGGESTIONS.Balanced.localityBias, 0.65);
   assert.equal(POLICY_SUGGESTIONS["Free Vibecode"].localityBias, 0.95);
 });
-
+test("historical policies default to reporting local overload and invalid actions are rejected", async () => {
+  const { overloadAction: _omitted, ...historical } = POLICY_SUGGESTIONS.Balanced;
+  const decoded = await run(decodeKeyPolicy(historical));
+  assert.equal(decoded.overloadAction, "report");
+  await assert.rejects(() =>
+    run(decodeKeyPolicy({ ...historical, overloadAction: "always-cloud" })),
+  );
+});
 test("explainLocalityBias describes preference not chance", () => {
   assert.match(explainLocalityBias(0), /Cloud-first/);
   assert.match(explainLocalityBias(0.15), /Lean cloud/);

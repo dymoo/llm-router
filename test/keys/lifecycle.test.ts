@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { POLICY_SUGGESTIONS } from "../../src/domain.ts";
@@ -79,6 +80,50 @@ describe("key lifecycle", () => {
     await runtime.dispose();
   });
 
+  it("persists failover, defaults historical rows, and preserves action on legacy full-policy edits", async () => {
+    const path = tempDb();
+    const runtime = ManagedRuntime.make(live(path, "pepper-a"));
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const keys = yield* ApiKeys;
+        const created = yield* keys.createKey({
+          name: "policy",
+          expiresAt: null,
+          policy: { ...POLICY_SUGGESTIONS.Balanced, overloadAction: "failover" },
+        });
+        assert.equal((yield* keys.getKey(created.key.id)).policy.overloadAction, "failover");
+
+        const { overloadAction: _omitted, ...oldClientPolicy } = POLICY_SUGGESTIONS.Dylan;
+        const updated = yield* keys.updateKey({
+          id: created.key.id,
+          expectedVersion: created.key.version,
+          name: "edited",
+          expiresAt: null,
+          policy: oldClientPolicy,
+        });
+        assert.equal(updated.policy.overloadAction, "failover");
+        assert.equal(updated.policy.priority, "high");
+
+        const database = new DatabaseSync(path);
+        database
+          .prepare("UPDATE api_keys SET policy_json = ? WHERE id = ?")
+          .run(JSON.stringify(oldClientPolicy), created.key.id);
+        database.close();
+        const historical = yield* keys.getKey(created.key.id);
+        assert.equal(historical.policy.overloadAction, "report");
+        const optedIn = yield* keys.updateKey({
+          id: created.key.id,
+          expectedVersion: historical.version,
+          name: "opted in",
+          expiresAt: null,
+          policy: { ...oldClientPolicy, overloadAction: "failover" },
+        });
+        assert.equal((yield* keys.getKey(created.key.id)).policy.overloadAction, "failover");
+        assert.equal(optedIn.policy.overloadAction, "failover");
+      }),
+    );
+    await runtime.dispose();
+  });
   it("rejects stale version updates and rolls the transaction back", async () => {
     const path = tempDb();
     const runtime = ManagedRuntime.make(live(path, "pepper-a"));

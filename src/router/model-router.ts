@@ -25,6 +25,7 @@ import {
   ImpossibleLimits,
   MissingSession,
   NoEligibleModel,
+  LocalOverloaded,
   ProviderFailure,
   RetrievalRequired,
   UnsupportedCapabilities,
@@ -153,6 +154,7 @@ export type RouterFailure =
   | ImpossibleLimits
   | MissingSession
   | NoEligibleModel
+  | LocalOverloaded
   | ProviderFailure
   | RetrievalRequired
   | UnsupportedCapabilities
@@ -533,6 +535,21 @@ function executeLocked(
       }
     }
 
+    const overloadFailover =
+      mode.kind === "interactive" &&
+      work.policy.overloadAction === "failover" &&
+      work.routing.boundary !== "continue" &&
+      rankedDeployments[0]?.location === "local";
+    if (overloadFailover) {
+      const localFirst: Deployment[] = [];
+      for (const entry of chosen.candidates) {
+        if (entry.deployment.location === "local") localFirst.push(entry.deployment);
+      }
+      for (const entry of chosen.candidates) {
+        if (entry.deployment.location === "cloud") localFirst.push(entry.deployment);
+      }
+      rankedDeployments = localFirst;
+    }
     let queued = false;
     let waitedMs = 0;
     let permit: Permit | undefined;
@@ -546,18 +563,61 @@ function executeLocked(
         );
       }
     } else {
-      permit = yield* pool.acquire(rankedDeployments, work.policy.priority, {
-        requestId: work.requestId,
-        waitMs: waitBudgetMs(work.policy),
-        spill: spill && work.routing.boundary !== "continue",
-        onQueue: (event) => {
-          if (event.state === "queued") {
-            queued = true;
-          }
-          waitedMs = event.waitedMs;
-          options.onQueue?.(event);
-        },
-      });
+      const capacityStartedAt = yield* Clock.currentTimeMillis;
+      permit = yield* pool
+        .acquire(rankedDeployments, work.policy.priority, {
+          requestId: work.requestId,
+          waitMs: overloadFailover ? 0 : waitBudgetMs(work.policy),
+          spill: spill && work.routing.boundary !== "continue",
+          onQueue: (event) => {
+            if (event.state === "queued") {
+              queued = true;
+            }
+            waitedMs = event.waitedMs;
+            options.onQueue?.(event);
+          },
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            rankedDeployments.some((deployment) => deployment.location === "local")
+              ? new LocalOverloaded({
+                  message: "Local deployment overloaded",
+                  retryAfterSeconds: null,
+                })
+              : error,
+          ),
+          Effect.tapError((error) =>
+            Effect.gen(function* () {
+              if (error._tag !== "LocalOverloaded") return;
+              waitedMs = Math.max(waitedMs, (yield* Clock.currentTimeMillis) - capacityStartedAt);
+              const failed = denialDecision(work, options, classified, {
+                _tag: "Denied",
+                code: "health",
+                detail: "local-overloaded",
+                denials: selected.denials,
+              });
+              options.onDecision?.(
+                {
+                  ...failed,
+                  reason: "local-overloaded",
+                  selectionReason: { code: "local-overloaded", detail: "local-overloaded" },
+                  queue: { queued, waitedMs },
+                  exclusions: [
+                    ...failed.exclusions,
+                    ...rankedDeployments
+                      .filter((deployment) => deployment.location === "local")
+                      .map((deployment) => ({
+                        deploymentId: deployment.id,
+                        code: "saturation" as const,
+                        detail: "router-owned local permit unavailable",
+                      })),
+                  ],
+                },
+                work,
+              );
+            }),
+          ),
+        );
     }
 
     const candidate =
@@ -581,22 +641,38 @@ function executeLocked(
       queued,
       waitedMs,
     };
-    const reason = decideReason({
-      pinned: work.routing.boundary === "continue",
-      qualityOverride: work.routing.qualityOverride === "highest",
-      queued,
-      selectedLocation: candidate.deployment.location,
-      spilledForSaturation:
-        saturation.verified && saturation.saturated && candidate.deployment.location === "cloud",
-      spilledForComplexity:
-        candidate.deployment.location === "cloud" &&
-        (classified.assessment.difficulty.value === "hard" ||
-          classified.assessment.localSufficiency < 0.8),
-    });
+    const overloadedToCloud = overloadFailover && candidate.deployment.location === "cloud";
+    const reason = overloadedToCloud
+      ? "local-overload-failover"
+      : decideReason({
+          pinned: work.routing.boundary === "continue",
+          qualityOverride: work.routing.qualityOverride === "highest",
+          queued,
+          selectedLocation: candidate.deployment.location,
+          spilledForSaturation:
+            saturation.verified &&
+            saturation.saturated &&
+            candidate.deployment.location === "cloud",
+          spilledForComplexity:
+            candidate.deployment.location === "cloud" &&
+            (classified.assessment.difficulty.value === "hard" ||
+              classified.assessment.localSufficiency < 0.8),
+        });
     const decision: RouteDecision = {
       reason,
       selectionReason: { code: reason, detail: reason },
-      exclusions: exclusionsOf(selected.denials),
+      exclusions: overloadedToCloud
+        ? [
+            ...exclusionsOf(selected.denials),
+            ...chosen.candidates
+              .filter((entry) => entry.deployment.location === "local")
+              .map((entry) => ({
+                deploymentId: entry.deployment.id,
+                code: "saturation" as const,
+                detail: "router-owned local permit unavailable",
+              })),
+          ]
+        : exclusionsOf(selected.denials),
       assessment: {
         task: classified.assessment.task,
         difficulty: classified.assessment.difficulty.value,
@@ -634,33 +710,123 @@ function executeLocked(
       return yield* Effect.fail(new CapacityBusy({ message: "missing route permit" }));
     }
 
-    const dispatched = yield* Effect.acquireUseRelease(
-      Effect.succeed(permit),
-      (held) =>
-        dispatch(
-          work,
-          options,
-          sessions,
-          candidate,
-          held,
-          adapters,
-          credentials,
-          stream,
-          classified,
-          headers,
-          reservation,
-          pin,
-          decision,
-        ),
-      (held, exit) =>
-        Effect.sync(() => {
-          if (stream && exit._tag === "Success") {
-            return;
+    const send = (
+      entry: RankedCandidate,
+      heldPermit: Permit,
+      routeHeaders: RouteHeaders,
+      routeReservation: Reservation,
+      routeDecision: RouteDecision,
+    ) =>
+      Effect.acquireUseRelease(
+        Effect.succeed(heldPermit),
+        (held) =>
+          dispatch(
+            work,
+            options,
+            sessions,
+            entry,
+            held,
+            adapters,
+            credentials,
+            stream,
+            classified,
+            routeHeaders,
+            routeReservation,
+            pin,
+            routeDecision,
+          ),
+        (held, exit) =>
+          Effect.sync(() => {
+            if (stream && exit._tag === "Success") return;
+            held.release();
+          }),
+      );
+
+    return yield* send(candidate, permit, headers, reservation, decision).pipe(
+      Effect.catchTag("LocalOverloaded", (error) =>
+        Effect.gen(function* () {
+          const reportRejected = () => {
+            if (candidate.deployment.location !== "local") return;
+            options.onDecision?.(
+              {
+                ...decision,
+                reason: "local-overloaded",
+                selectionReason: { code: "local-overloaded", detail: "local-overloaded" },
+                exclusions: [
+                  ...decision.exclusions,
+                  {
+                    deploymentId: candidate.deployment.id,
+                    code: "saturation",
+                    detail: "local runtime rejected before enqueue",
+                  },
+                ],
+              },
+              work,
+            );
+          };
+          if (
+            mode.kind !== "interactive" ||
+            work.policy.overloadAction !== "failover" ||
+            work.routing.boundary === "continue" ||
+            candidate.deployment.location !== "local"
+          ) {
+            reportRejected();
+            return yield* error;
           }
-          held.release();
+
+          let next: RankedCandidate | undefined;
+          let cloudPermit: Permit | undefined;
+          for (const entry of chosen.candidates) {
+            if (entry.deployment.location !== "cloud") continue;
+            cloudPermit = pool.tryAcquire(entry.deployment, work.policy.priority);
+            if (cloudPermit !== undefined) {
+              next = entry;
+              break;
+            }
+          }
+          if (next === undefined || cloudPermit === undefined) {
+            reportRejected();
+            return yield* error;
+          }
+          const nextDecision: RouteDecision = {
+            ...decision,
+            reason: "local-overload-failover",
+            selectionReason: { code: "local-overload-failover", detail: "local-overload-failover" },
+            exclusions: [
+              ...decision.exclusions,
+              {
+                deploymentId: candidate.deployment.id,
+                code: "saturation",
+                detail: "local runtime rejected before enqueue",
+              },
+            ],
+            assessment: {
+              ...decision.assessment,
+              requestedEffort: next.requestedEffort,
+              appliedEffort: next.appliedEffort,
+            },
+          };
+          options.onDecision?.(nextDecision, work);
+          return yield* send(
+            next,
+            cloudPermit,
+            {
+              ...headers,
+              deploymentId: next.deployment.id,
+              requestedEffort: next.requestedEffort,
+              appliedEffort: next.appliedEffort,
+            },
+            {
+              ...reservation,
+              deploymentId: next.deployment.id,
+              requestedEffort: next.requestedEffort,
+              appliedEffort: next.appliedEffort,
+            },
+            nextDecision,
+          );
         }),
+      ),
     );
-    return dispatched;
   });
 }
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { GatewayFailure } from "../../src/http/gateway-failure.ts";
 import { handleChatCompletions } from "../../src/http/inference.ts";
 import { inferenceDeps, jsonRequest, memoryKeys, ORIGIN } from "./helpers.ts";
 
@@ -8,6 +9,37 @@ const completion = {
   choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
 };
 
+test("returns local overload with Retry-After and records the typed error", async () => {
+  const keys = memoryKeys();
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: { model: "auto", messages: [{ role: "user", content: "hi" }] },
+    }),
+    inferenceDeps(keys, {
+      complete: async () => {
+        throw new GatewayFailure(
+          Object.assign(new Error("secret not exposed"), {
+            _tag: "LocalOverloaded",
+            retryAfterSeconds: 7,
+          }),
+          { deploymentId: "local-qwen" },
+        );
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    }),
+  );
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "7");
+  assert.deepEqual(await response.json(), {
+    error: { code: "local_overloaded", message: "local deployment overloaded" },
+  });
+  assert.equal(keys.finalizes[0]?.errorCode, "LocalOverloaded");
+  assert.equal(keys.finalizes[0]?.deploymentId, "local-qwen");
+});
 test("requires bearer authentication", async () => {
   const keys = memoryKeys();
   const response = await handleChatCompletions(
@@ -202,6 +234,35 @@ test("SSE responses use event-stream and do not call complete", async () => {
   assert.equal(completeCalls, 0);
 });
 
+test("streaming overload sends a terminal structured SSE error after commitment", async () => {
+  const keys = memoryKeys();
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: { model: "auto", stream: true, messages: [{ role: "user", content: "hi" }] },
+    }),
+    inferenceDeps(keys, {
+      complete: async () => {
+        throw new Error("unexpected completion");
+      },
+      stream: async () => {
+        throw Object.assign(new Error("private overload detail"), {
+          _tag: "LocalOverloaded",
+          retryAfterSeconds: 3,
+        });
+      },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
+  const events = await response.text();
+  assert.match(events, /event: router\.error/);
+  assert.match(events, /"code":"local_overloaded"/);
+  assert.match(events, /"retry_after_seconds":3/);
+  assert.doesNotMatch(events, /private overload detail/);
+  assert.equal(keys.finalizes[0]?.errorCode, "LocalOverloaded");
+});
 test("tool schemas consume key context budget before any model dispatch", async () => {
   const keys = memoryKeys();
   const admit = keys.admit;

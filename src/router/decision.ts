@@ -19,6 +19,8 @@ export const ROUTE_DECISION_REASONS: readonly SelectionCode[] = [
   "cloud-quality",
   "complexity-escalation",
   "local-saturation",
+  "local-overload-failover",
+  "local-overloaded",
   "queue-admitted",
   "highest-quality",
   "no-eligible",

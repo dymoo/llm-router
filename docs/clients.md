@@ -62,6 +62,12 @@ While a streaming request waits for capacity, the gateway emits `event: router.q
 
 The status endpoint checks current key expiry/revocation without taking another admission. Terminal status is retained for a bounded period. A reused in-flight correlation ID conflicts rather than mixing two requests.
 
+## Local overload responses
+
+Keys default to reporting local overload rather than sending work to a paid cloud Deployment. Local overload means no immediately available Router-owned permit on any eligible local Deployment, or a definitive local runtime pre-execution rejection (Gufo HTTP 429 `queue_full` / `client_queue_full`); it is not proof of Verified saturation, and Gufo exposes no pre-request "all sessions busy" signal. With the default report action, the gateway waits up to the Key's maxWaitMs, then reports overload. Non-streaming requests receive HTTP 503, error code `local_overloaded`, and `Retry-After`. Streaming requests have already received HTTP 200 SSE headers, so they receive a terminal `event: router.error` whose data is `{"error":{"code":"local_overloaded","message":"local deployment overloaded","retry_after_seconds":N}}`, then the stream closes. Do not treat an overload response as a provider-completed answer.
+
+An operator may enable failover per Key. It can select an already eligible cloud Deployment only before provider dispatch, subject to allowlist, capability, context, credentials and estimated-spend/pricing limits. It does not silently migrate a continue pin or replay after uncertain provider contact. Clients should not request an automatic retry of a possibly dispatched turn.
+
 ## Usage and optional modalities
 
 Local chat `usage` contains integer prompt/completion/total token counts, optional nested cached/reasoning counts and `cost`, with zero upstream API cost details. Configured internal local rates determine cost; missing rates/counts produce null, not invented zero. Provenance is internal metadata, not a nonstandard `cost_source` wire field. Cloud usage is passed through.

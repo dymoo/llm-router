@@ -143,6 +143,11 @@ export class ProviderFailure extends Schema.TaggedError<ProviderFailure>()(
   Message,
 ) {}
 
+export class LocalOverloaded extends Schema.TaggedError<LocalOverloaded>()("LocalOverloaded", {
+  message: Schema.String,
+  retryAfterSeconds: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+}) {}
+
 export class RequestTimeout extends Schema.TaggedError<RequestTimeout>()(
   "RequestTimeout",
   Message,
@@ -189,5 +194,6 @@ export type DomainError =
   | MissingSession
   | CapacityBusy
   | ProviderFailure
+  | LocalOverloaded
   | RequestTimeout
   | Cancelled;
