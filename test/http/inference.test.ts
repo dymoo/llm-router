@@ -263,6 +263,64 @@ test("streaming overload sends a terminal structured SSE error after commitment"
   assert.doesNotMatch(events, /private overload detail/);
   assert.equal(keys.finalizes[0]?.errorCode, "LocalOverloaded");
 });
+test("streaming failures before provider output send a terminal structured SSE error", async () => {
+  const keys = memoryKeys();
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: { model: "auto", stream: true, messages: [{ role: "user", content: "hi" }] },
+    }),
+    inferenceDeps(keys, {
+      complete: async () => {
+        throw new Error("unexpected completion");
+      },
+      stream: async () => {
+        throw Object.assign(new Error("private classifier detail"), {
+          _tag: "ClassifierUnqualified",
+          reason: "missing",
+        });
+      },
+    }),
+  );
+  assert.equal(response.status, 200);
+  const events = await response.text();
+  assert.match(events, /event: router\.error/);
+  assert.match(events, /"code":"classifier_unqualified"/);
+  assert.doesNotMatch(events, /retry_after_seconds/);
+  assert.doesNotMatch(events, /private classifier detail/);
+  assert.equal(keys.finalizes[0]?.errorCode, "ClassifierUnqualified");
+});
+test("provider failure after streamed output aborts instead of closing cleanly", async () => {
+  const keys = memoryKeys();
+  let pulls = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      if (pulls === 1) controller.enqueue(new TextEncoder().encode('data: {"partial":true}\n\n'));
+      else controller.error(new Error("upstream reset"));
+    },
+  });
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: { model: "auto", stream: true, messages: [{ role: "user", content: "hi" }] },
+    }),
+    inferenceDeps(keys, {
+      complete: async () => {
+        throw new Error("unexpected completion");
+      },
+      stream: async () => ({
+        headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+        body,
+        metadata: () => ({ deploymentId: "d" }),
+      }),
+    }),
+  );
+  assert.equal(response.status, 200);
+  await assert.rejects(response.text());
+});
 test("tool schemas consume key context budget before any model dispatch", async () => {
   const keys = memoryKeys();
   const admit = keys.admit;

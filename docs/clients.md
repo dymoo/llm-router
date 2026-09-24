@@ -50,6 +50,8 @@ Supported ordinary generation controls are `temperature`, `top_p`, `presence_pen
 
 Streaming holds model capacity and session ownership through the complete SSE lifetime. Disconnect aborts pending classification/queue work and cancels the chat upstream reader. The gateway does not retry after generation dispatch.
 
+Streaming responses commit HTTP 200 SSE headers before classification and routing. If the request fails before a provider stream is established (for example `classifier_unqualified`, `no_eligible_model` or `local_overloaded`), the stream ends with one `event: router.error` whose data is the same `{"error":{"code","message"}}` body a non-streaming request would receive, then closes. Only `local_overloaded` adds `retry_after_seconds`. Once a provider stream is established, any later failure (including accounting that cannot be persisted) aborts the stream instead, so a truncated or unaccounted answer never ends like a complete one.
+
 ## Classifier cache (server)
 
 Assessments are reused only for the same authenticated key, backend/model revision, question schema, state/brief and catalogue version. The completed-result cache is bounded by size and TTL. There is no in-flight request coalescing or fuzzy semantic cache. Exact-cache reuse reports no new classifier usage. A session pin is not a generator cache hit.

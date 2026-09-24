@@ -252,12 +252,16 @@ function streamCompletion(
         console.error("Request accounting could not be persisted", admission.requestId);
       }
       const publicFailure = toHttpFailure(error);
-      // The 200 SSE response is committed before routing; close with a public terminal event.
-      if (!signal.aborted && publicFailure.code === "local_overloaded") {
+      // The 200 SSE response is committed before routing. Until a provider stream is established,
+      // close with a public terminal event; after that, abort so a truncated or unaccounted stream
+      // never ends like a complete one.
+      if (!signal.aborted && result === undefined) {
         const body = {
           error: {
             ...errorBody(publicFailure).error,
-            retry_after_seconds: publicFailure.retryAfterSeconds ?? 1,
+            ...(publicFailure.code === "local_overloaded"
+              ? { retry_after_seconds: publicFailure.retryAfterSeconds ?? 1 }
+              : {}),
           },
         };
         try {
