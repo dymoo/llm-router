@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { HttpFailure } from "../src/http/errors.ts";
 import { stopHealth } from "./health.ts";
 import { pendingAdmissions } from "./control.ts";
-import { drainBatch, startBatch } from "./batch.ts";
+import { drainBatch } from "./batch.ts";
 import { disposeGateway } from "./runtime.ts";
 import { processState } from "./state.ts";
 import { stopMetricsListener } from "./metrics-listener.ts";
@@ -31,9 +31,7 @@ export function drainGateway(): Promise<void> {
 export function registerShutdown(): void {
   if (processState.signalsRegistered) return;
   processState.signalsRegistered = true;
-  // Process boot hook (instrumentation calls registerShutdown): the deferred-lane
-  // scheduler recovers here — not on the first batch HTTP request.
-  startBatch();
+  // Signal registration is optional; batch scheduling starts at every production Node boot.
   const stop = () => {
     void drainGateway().then(
       () => process.exit(0),

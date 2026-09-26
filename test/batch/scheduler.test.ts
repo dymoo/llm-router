@@ -26,6 +26,8 @@ import {
 import type { Admission, FinalizeOutcome } from "../../src/keys/types.ts";
 import type { KeyPolicy } from "../../src/http/contracts.ts";
 import { ConcurrentLimit } from "../../src/errors.ts";
+import { processState } from "../../server/state.ts";
+import { register } from "../../instrumentation.ts";
 import {
   BatchSpillAborted,
   BatchSubmitRejected,
@@ -95,6 +97,7 @@ class TestKeys implements BatchKeysPort {
   failDeferredFinalizeCount = 0;
   failRecheckCount = 0;
   enforceConcurrentLimit = false;
+  concurrentLimit = policy.maxConcurrent;
   private sequence = 0;
 
   constructor(private readonly opened: SqliteDatabase["Service"]) {}
@@ -106,7 +109,7 @@ class TestKeys implements BatchKeysPort {
           "SELECT count(*) AS n FROM requests WHERE key_id = ? AND status = 'running' AND deferred = 0",
         )
         .get(keyId) as { n: number };
-      if (running.n >= policy.maxConcurrent) {
+      if (running.n >= this.concurrentLimit) {
         throw new ConcurrentLimit({ message: "concurrent request limit reached" });
       }
     }
@@ -206,7 +209,9 @@ class TestInference implements BatchInferencePort {
   readonly localCalls: BatchRoutedWork[] = [];
   readonly spillPlans: BatchRoutedWork[] = [];
   constructor(
-    private readonly completion: (work: BatchRoutedWork) => BatchDispatchResult = (work) =>
+    private readonly completion: (
+      work: BatchRoutedWork,
+    ) => BatchDispatchResult | Promise<BatchDispatchResult> = (work) =>
       localCompletion(work.requestId),
   ) {}
 
@@ -216,7 +221,7 @@ class TestInference implements BatchInferencePort {
 
   complete(work: BatchRoutedWork): Promise<BatchDispatchResult> {
     this.localCalls.push(work);
-    return Promise.resolve(this.completion(work));
+    return Promise.resolve().then(() => this.completion(work));
   }
 
   prepareSpill(work: BatchRoutedWork): Promise<{
@@ -355,7 +360,9 @@ function harness(
     withSpill?: boolean;
     itemCount?: number;
     batchCatalogue?: readonly Deployment[];
-    completion?: (work: BatchRoutedWork) => BatchDispatchResult;
+    completion?: (work: BatchRoutedWork) => BatchDispatchResult | Promise<BatchDispatchResult>;
+    intervalMs?: number;
+    onTickError?: () => void;
   } = {},
 ): Harness {
   const opened = openControlPlaneSqlite(":memory:");
@@ -398,9 +405,10 @@ function harness(
     inference,
     keys,
     now: () => now.value,
-    intervalMs: 60_000,
+    intervalMs: options.intervalMs ?? 60_000,
     batchCatalogue: options.batchCatalogue ?? [batchDeployment],
     ...(options.withSpill === false ? {} : { spill }),
+    onTickError: options.onTickError,
   });
   const h: Harness = {
     opened,
@@ -578,9 +586,119 @@ test(
     });
     await settle(h);
     assert.equal(h.ledger.items(h.jobId)[0]?.status, "queued");
+    assert.equal(h.results.rows(h.jobId).length, 0);
     await settle(h);
     assert.equal(h.ledger.items(h.jobId)[0]?.status, "completed");
     assert.equal(attempts, 2);
+    assert.equal(h.results.rows(h.jobId).length, 1);
+  },
+);
+
+test("a failed tick is reported and later ticks still dispatch", { timeout: 5_000 }, async (t) => {
+  let metricErrors = 0;
+  const h = harness(t, {
+    onTickError: () => {
+      metricErrors++;
+    },
+  });
+  const claim = h.ledger.claim;
+  h.ledger.claim = () => {
+    h.ledger.claim = claim;
+    throw new Error("transient ledger fault");
+  };
+  const logged: unknown[][] = [];
+  const originalLog = console.error;
+  console.error = (...args: unknown[]) => {
+    logged.push(args);
+  };
+  t.after(() => {
+    console.error = originalLog;
+  });
+  await settle(h);
+  assert.equal(h.ledger.items(h.jobId)[0]?.status, "queued");
+  assert.equal(metricErrors, 1);
+  assert.equal(logged[0]?.[0], "batch scheduler tick failed");
+  assert.match(String(logged[0]?.[1]), /transient ledger fault/);
+  await settle(h);
+  assert.equal(h.ledger.items(h.jobId)[0]?.status, "completed");
+});
+
+test(
+  "eight local items complete with two provider slots and no foreground traffic",
+  { timeout: 5_000 },
+  async (t) => {
+    let active = 0;
+    let peak = 0;
+    const h = harness(t, {
+      itemCount: 8,
+      intervalMs: 5,
+      withSpill: false,
+      completion: async (work) => {
+        if (active >= 2) throw Object.assign(new Error("busy"), { _tag: "CapacityBusy" });
+        active++;
+        peak = Math.max(peak, active);
+        try {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          return localCompletion(work.requestId);
+        } finally {
+          active--;
+        }
+      },
+    });
+    h.keys.enforceConcurrentLimit = true;
+    h.keys.concurrentLimit = 2;
+    const previousBatch = processState.batch;
+    const envKeys = [
+      "NODE_ENV",
+      "NEXT_RUNTIME",
+      "NEXT_MANUAL_SIG_HANDLE",
+      "APP_ORIGIN",
+      "SQLITE_PATH",
+      "API_KEY_PEPPER",
+      "MODEL_CATALOG",
+      "CLASSIFIER_MODE",
+    ];
+    const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    t.after(() => {
+      processState.batch = previousBatch;
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+    Object.assign(process.env, {
+      NODE_ENV: "production",
+      NEXT_RUNTIME: "nodejs",
+      APP_ORIGIN: "http://127.0.0.1:14300",
+      SQLITE_PATH: ":memory:",
+      API_KEY_PEPPER: "fixture",
+      MODEL_CATALOG: "fixture",
+      CLASSIFIER_MODE: "laya",
+    });
+    delete process.env.NEXT_MANUAL_SIG_HANDLE;
+    processState.batch = {
+      scheduler: h.scheduler,
+      deps: {} as NonNullable<typeof processState.batch>["deps"],
+    };
+    await register();
+    h.scheduler.kick(); // Submission kicks once; boot must supply subsequent ticks.
+    for (let turn = 0; turn < 40 && h.ledger.job(h.jobId)?.status !== "completed"; turn++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    const items = h.ledger.items(h.jobId);
+    assert.equal(peak, 2);
+    assert.equal(
+      items.filter((item) => item.status === "completed").length,
+      8,
+      "scheduled items: " + items.map((item) => item.status).join(","),
+    );
+    assert.equal(h.ledger.job(h.jobId)?.status, "completed");
+    assert.equal(h.results.rows(h.jobId).length, 8);
+    assert.equal(new Set(h.results.rows(h.jobId).map((row) => row.id)).size, 8);
+    const accounting = h.opened.sqlite.prepare("SELECT id FROM requests").all() as { id: string }[];
+    assert.equal(accounting.length, 8);
+    assert.equal(new Set(accounting.map((row) => row.id)).size, 8);
+    assert.equal(h.keys.finalized.filter((row) => row.outcome.status === "success").length, 8);
   },
 );
 

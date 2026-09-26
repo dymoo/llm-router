@@ -314,6 +314,14 @@ it("holds a session lock through streaming and releases it on cancellation", asy
       const first = yield* router.stream(
         work({ stream: true, routing: { sessionId: "locked", boundary: "new-task" } }),
       );
+      // Both identities hashed to stripe 103 under the former 128-stripe lock table.
+      const unrelated = yield* router.complete(
+        work({
+          requestId: "unrelated",
+          routing: { sessionId: "session-418", boundary: "new-task" },
+        }),
+      );
+      assert.equal(unrelated.headers.deploymentId, localQwen.id);
       const blocked = yield* router
         .complete(work({ routing: { sessionId: "locked", boundary: "continue" } }))
         .pipe(Effect.result);

@@ -92,6 +92,7 @@ export interface RouterWork {
   readonly keyPolicyVersion?: number;
   readonly messages: readonly ChatMessage[];
   readonly tools?: unknown;
+  readonly parallelToolCalls?: boolean;
   readonly toolChoice?: unknown;
   readonly responseFormat?: unknown;
   readonly sampling?: SamplingOptions;
@@ -1041,6 +1042,7 @@ function adapterRequestFor(
     messages: work.messages,
     tools: work.tools,
     toolChoice: work.toolChoice,
+    parallelToolCalls: work.parallelToolCalls,
     responseFormat: work.responseFormat,
     sampling: work.sampling,
     maxCompletionTokens: Math.min(

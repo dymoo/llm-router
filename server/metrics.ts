@@ -293,6 +293,10 @@ export function observeBatchDispatch(lane: unknown, outcome: unknown): void {
     outcome: bounded(outcome, ["completed", "failed", "cancelled", "deferred"]),
   });
 }
+export function observeBatchSchedulerError(): void {
+  counter("batch_scheduler_errors");
+}
+
 export function observeStream(outcome: unknown): void {
   counter("streams", 1, {
     outcome: bounded(outcome, ["completed", "terminal_error", "aborted", "cancelled"]),

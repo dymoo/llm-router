@@ -41,6 +41,9 @@ export function openRouterBody(request: AdapterRequest, stream: boolean): Record
   if (request.tools !== undefined && request.tools !== null) {
     body.tools = request.tools;
   }
+  if (request.parallelToolCalls !== undefined) {
+    body.parallel_tool_calls = request.parallelToolCalls;
+  }
   if (request.toolChoice !== undefined && request.toolChoice !== null) {
     body.tool_choice = request.toolChoice;
   }

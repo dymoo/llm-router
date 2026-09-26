@@ -117,6 +117,7 @@ export async function handleChatCompletions(
       keyPolicyVersion: admission.version,
       messages: decoded.messages,
       tools: decoded.tools,
+      parallelToolCalls: decoded.parallelToolCalls,
       toolChoice: decoded.tool_choice,
       responseFormat: decoded.response_format,
       sampling: decoded.sampling,

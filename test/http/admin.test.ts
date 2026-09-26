@@ -122,6 +122,33 @@ test("unknown overload actions are rejected on create and PATCH", async () => {
   );
   assert.equal(patchResponse.status, 400);
 });
+
+test("admin rejects policy values outside the domain limits before storing a key", async () => {
+  for (const override of [
+    { contextLimitTokens: 0 },
+    { maxCompletionTokens: 0 },
+    { requestsPerMinute: -1 },
+    { maxConcurrent: -1 },
+    { maxConcurrent: 1.5 },
+    { maxWaitMs: -1 },
+    { maxWaitMs: 30_001 },
+    { maxEstimatedUsd: -0.01 },
+    { localityBias: 2 },
+    { bias: { cost: 0, quality: 0, latency: 0 } },
+  ]) {
+    const keys = memoryKeys();
+    const response = await handleCreateKey(
+      jsonRequest(ORIGIN + "/api/admin/keys", {
+        method: "POST",
+        headers: { origin: ORIGIN, "x-jev-admin": "1" },
+        json: { name: "invalid", policy: samplePolicy(override) },
+      }),
+      adminDeps(keys),
+    );
+    assert.equal(response.status, 400, JSON.stringify(override));
+    assert.equal((await keys.listKeys({ limit: 1 })).items.length, 0, JSON.stringify(override));
+  }
+});
 test("stale edits return stale_version without leaking secrets", async () => {
   const keys = memoryKeys();
   await keys.createKey({ name: "a", expiresAt: null, policy: samplePolicy() });

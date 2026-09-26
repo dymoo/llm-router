@@ -46,9 +46,28 @@ Point the harness at `http://127.0.0.1:3000/v1` with the gateway API key (`jrv_�
 - subsequent tool/user turns of that task → `continue`
 - compact/handoff/model reconsideration → `checkpoint`
 
-Supported ordinary generation controls are `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `seed`, `stop`, `n: 1`, and `stream_options.include_usage`. Unknown/provider-specific controls are rejected; clients cannot override routing-owned reasoning or provider selection. The gateway requests terminal usage for accounting. Never put provider credentials in browser code. Admin access is network reachability plus optional Basic authentication, not an inference key.
+OMP v18.3.2 with an isolated `openai-completions` provider was captured against a local SSE endpoint: both the plain reply and tool-request prompt sent `model`, `messages` (system and user), `tools` (12 function definitions), `max_completion_tokens: 8192`, `store: false`, `stream: true`, and `stream_options: { include_usage: true }`. Headers included `Accept: text/event-stream`, `Content-Type: application/json`, and bearer authorization; the bearer value was not recorded in this table. Neither request sent `parallel_tool_calls` by default.
+
+| Chat request field | Gateway decision / upstream behavior |
+| --- | --- |
+| `model`, `messages`, `tools` | Accept `model: "auto"` and validated chat/function-tool content; route the messages and tools unchanged in meaning. |
+| `store`, `user`, `metadata`, `service_tier`, `prompt_cache_key`, `safety_identifier` | Accept well-formed standard values, **drop** before routing/upstream. The gateway does not store OpenAI completions or forward client identity, metadata, billing tier, cache identity or safety identity to a provider. `store: true` does not enable storage. |
+| `parallel_tool_calls` | Accept a boolean; forward only to OpenAI-compatible and OpenRouter adapters. Gufo, llama.cpp and Halogen do not receive this control; do not rely on it to restrict their tool behavior. |
+| `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `seed`, `stop` | Validate and forward where supported. Gufo explicitly rejects `stop` rather than silently ignoring it. |
+| `max_tokens`, `max_completion_tokens` | Accept one positive integer (not both). Requests exceeding the key limit fail; dispatch caps the output to the lesser of the key and selected deployment limits. |
+| `stream`, `stream_options.include_usage` | Validate; include terminal usage on streaming upstream requests regardless of the client's include-usage choice, for gateway accounting. |
+| `n` | Accept only `1`; multiple choices fail with HTTP 400. |
+| `tool_choice` | Accept `none`, `auto`, `required`, or a named function choice. Forward to supporting adapters; Gufo translates a named choice to a single required tool. |
+| `response_format` | Accept `text`, `json_object`, or `json_schema` with a named object schema; forward where supported. Gufo explicitly rejects response formatting. |
+| `logit_bias`, `logprobs`, `top_logprobs` | Reject with HTTP 400: these generation controls are not implemented consistently across selected adapters. |
+| `reasoning_effort` | Reject with HTTP 400: classifier, key policy and deployment own reasoning effort; clients cannot override it. |
+| Unknown/provider-specific fields | Reject with HTTP 400; no arbitrary inference-body passthrough or override of provider selection/routing policy. |
+
+Never put provider credentials in browser code. Admin access is network reachability plus optional Basic authentication, not an inference key.
 
 Streaming holds model capacity and session ownership through the complete SSE lifetime. Disconnect aborts pending classification/queue work and cancels the chat upstream reader. The gateway does not retry after generation dispatch.
+
+Session ownership is exclusive for the exact API-key and session-id pair. Another turn for that pair waits up to 10 seconds by default, then fails with a lock timeout if the stream still owns it. Unrelated sessions do not share a session lock, although deployment capacity may independently queue them.
 
 Streaming responses commit HTTP 200 SSE headers before classification and routing. If the request fails before a provider stream is established (for example `classifier_unqualified`, `no_eligible_model` or `local_overloaded`), the stream ends with one `event: router.error` whose data is the same `{"error":{"code","message"}}` body a non-streaming request would receive, then closes. Only `local_overloaded` adds `retry_after_seconds`. Once a provider stream is established, any later failure (including accounting that cannot be persisted) aborts the stream instead, so a truncated or unaccounted answer never ends like a complete one.
 

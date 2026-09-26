@@ -9,6 +9,277 @@ const completion = {
   choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
 };
 
+test("admits an OMP-shaped streamed request without sending client storage controls to routing", async () => {
+  const keys = memoryKeys();
+  let routed = false;
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: {
+        model: "auto",
+        messages: [
+          { role: "system", content: "You are a coding assistant." },
+          { role: "user", content: "Reply captured" },
+        ],
+        tools: [{ type: "function", function: { name: "read", parameters: { type: "object" } } }],
+        max_completion_tokens: 8192,
+        store: false,
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+    }),
+    inferenceDeps(keys, {
+      complete: async () => {
+        throw new Error("unexpected non-streaming dispatch");
+      },
+      stream: async (work) => {
+        routed = true;
+        assert.equal("store" in work, false);
+        return {
+          headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+          body: new ReadableStream({
+            start(controller) {
+              controller.close();
+            },
+          }),
+          metadata: () => ({ deploymentId: "d" }),
+        };
+      },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(routed, true);
+  await response.body?.cancel();
+});
+
+test("keeps client identity and storage metadata private while retaining parallel tool control", async () => {
+  const keys = memoryKeys();
+  let dispatched = false;
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: {
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        store: true,
+        user: "private-user",
+        metadata: { account: "private-account" },
+        service_tier: "priority",
+        prompt_cache_key: "private-cache-key",
+        safety_identifier: "private-safety-id",
+        parallel_tool_calls: false,
+        n: 1,
+        stop: "HALT",
+        max_completion_tokens: 128,
+      },
+    }),
+    inferenceDeps(keys, {
+      complete: async (work) => {
+        dispatched = true;
+        assert.equal(work.parallelToolCalls, false);
+        assert.equal(work.sampling?.stop, "HALT");
+        assert.equal(work.maxCompletionTokens, 128);
+        for (const field of [
+          "store",
+          "user",
+          "metadata",
+          "service_tier",
+          "prompt_cache_key",
+          "safety_identifier",
+        ]) {
+          assert.equal(field in work, false);
+        }
+        return {
+          headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+          body: completion,
+          metadata: () => ({ deploymentId: "d" }),
+        };
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(dispatched, true);
+});
+
+test("client completion budget cannot exceed the key policy", async () => {
+  const keys = memoryKeys();
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: {
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        max_completion_tokens: 8193,
+        store: false,
+      },
+    }),
+    inferenceDeps(keys, {
+      complete: async () => {
+        throw new Error("must not dispatch");
+      },
+      stream: async () => {
+        throw new Error("must not dispatch");
+      },
+    }),
+  );
+  assert.equal(response.status, 422);
+  assert.equal(((await response.json()) as { error: { code: string } }).error.code, "invalid");
+  assert.equal(keys.admits, 1);
+  assert.equal(keys.finalizes[0]?.errorCode, "ImpossibleLimits");
+});
+
+test("rejects unknown, unsupported, and multi-choice controls before admission", async () => {
+  for (const control of [
+    { enable_thinking: false },
+    { nonsense: 1 },
+    { n: 2 },
+    { logprobs: true },
+    { top_logprobs: 2 },
+    { logit_bias: { "42": 1 } },
+    { reasoning_effort: "none" },
+    { parallel_tool_calls: "no" },
+    { metadata: { user: 42 } },
+  ]) {
+    const keys = memoryKeys();
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: { model: "auto", messages: [{ role: "user", content: "hi" }], ...control },
+      }),
+      inferenceDeps(keys, {
+        complete: async () => {
+          throw new Error("must not dispatch");
+        },
+        stream: async () => {
+          throw new Error("must not dispatch");
+        },
+      }),
+    );
+    assert.equal(response.status, 400, JSON.stringify(control));
+    assert.equal(keys.admits, 0, JSON.stringify(control));
+  }
+});
+
+test("rejects malformed tool choice and response format before dispatch", async () => {
+  for (const control of [
+    { tool_choice: true },
+    { tool_choice: 2 },
+    { tool_choice: "" },
+    { tool_choice: "sometimes" },
+    { tool_choice: [] },
+    { tool_choice: {} },
+    { tool_choice: { type: "function", function: { name: 2 } } },
+    { response_format: 2 },
+    { response_format: { type: "magic" } },
+    { response_format: { type: "json_schema" } },
+    { response_format: { type: "json_schema", json_schema: { name: "data", schema: 2 } } },
+  ]) {
+    const keys = memoryKeys();
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: { model: "auto", messages: [{ role: "user", content: "hi" }], ...control },
+      }),
+      inferenceDeps(keys, {
+        complete: async () => ({
+          headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+          body: completion,
+          metadata: () => ({ deploymentId: "d" }),
+        }),
+        stream: async () => {
+          throw new Error("unexpected stream");
+        },
+      }),
+    );
+    assert.equal(response.status, 400, JSON.stringify(control));
+    assert.equal(((await response.json()) as { error: { code: string } }).error.code, "invalid");
+    assert.equal(keys.admits, 0, JSON.stringify(control));
+    assert.equal(keys.finalizes.length, 0, JSON.stringify(control));
+  }
+});
+
+test("accepts validated named tools and JSON schema without discarding their constraints", async () => {
+  const keys = memoryKeys();
+  let routed = false;
+  const choice = { type: "function", function: { name: "read" } };
+  const format = {
+    type: "json_schema",
+    json_schema: { name: "result", schema: { type: "object" }, strict: true },
+  };
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: {
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ type: "function", function: { name: "read", parameters: { type: "object" } } }],
+        tool_choice: choice,
+        response_format: format,
+      },
+    }),
+    inferenceDeps(keys, {
+      complete: async (work) => {
+        routed = true;
+        assert.deepEqual(work.toolChoice, choice);
+        assert.deepEqual(work.responseFormat, format);
+        assert.equal(work.capabilities.json, true);
+        return {
+          headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+          body: completion,
+          metadata: () => ({ deploymentId: "d" }),
+        };
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(routed, true);
+});
+
+test("treats an explicit text response format as the default so format-less deployments stay eligible", async () => {
+  const keys = memoryKeys();
+  let routed = false;
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: {
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        response_format: { type: "text" },
+      },
+    }),
+    inferenceDeps(keys, {
+      complete: async (work) => {
+        routed = true;
+        assert.equal(work.responseFormat, undefined);
+        assert.equal(work.capabilities.json, false);
+        return {
+          headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+          body: completion,
+          metadata: () => ({ deploymentId: "d" }),
+        };
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(routed, true);
+});
+
 test("returns local overload with Retry-After and records the typed error", async () => {
   const keys = memoryKeys();
   const response = await handleChatCompletions(

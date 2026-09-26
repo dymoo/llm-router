@@ -26,7 +26,11 @@ import { batchKeyService, batchKeys } from "./control.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
 import { batchInferencePort } from "./runtime.ts";
 import { processState } from "./state.ts";
-import { observeBatchDispatch, registerDeployments } from "./metrics.ts";
+import {
+  observeBatchDispatch,
+  observeBatchSchedulerError,
+  registerDeployments,
+} from "./metrics.ts";
 
 /** BATCH_CATALOG is deliberately separate from MODEL_CATALOG. It may contain only operator-
  * approved batch deployments, and every item carries the selected id through defer/recovery. */
@@ -217,6 +221,7 @@ function ensureBatch(): { scheduler: BatchScheduler; deps: BatchDeps } {
       now: Date.now,
       intervalMs: 1_000,
       batchCatalogue,
+      onTickError: observeBatchSchedulerError,
       spill: makeSpillPort(ledger, batchCatalogue),
     });
     const deps: BatchDeps = {

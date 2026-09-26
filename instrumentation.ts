@@ -8,6 +8,11 @@ export async function register() {
       await startMetricsListener(config.METRICS_PORT);
     }
   }
+  if (process.env.NEXT_RUNTIME === "nodejs" && process.env.NODE_ENV === "production") {
+    // The deferred scheduler must run even when Next owns signal handling.
+    const { startBatch } = await import("./server/batch.ts");
+    startBatch();
+  }
   if (
     process.env.NEXT_RUNTIME === "nodejs" &&
     process.env.NODE_ENV === "production" &&

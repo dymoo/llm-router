@@ -128,6 +128,8 @@ export interface BatchSchedulerDeps {
   readonly intervalMs: number;
   /** Dedicated BATCH_CATALOG; never merged with the synchronous catalogue. */
   readonly batchCatalogue: readonly Deployment[];
+  /** Called after a failed scheduler tick; errors are also logged regardless of this hook. */
+  readonly onTickError?: () => void;
   readonly spill?: BatchSpillPort & Partial<BatchSpillResume>;
 }
 
@@ -824,6 +826,7 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
       keyPolicyVersion: admission.version,
       messages: decoded.messages,
       tools: decoded.tools,
+      parallelToolCalls: decoded.parallelToolCalls,
       toolChoice: decoded.tool_choice,
       responseFormat: decoded.response_format,
       sampling: decoded.sampling,
@@ -1522,7 +1525,14 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
       return;
     }
     tickInFlight = runTick()
-      .catch(() => undefined)
+      .catch((error: unknown) => {
+        console.error("batch scheduler tick failed", error);
+        try {
+          deps.onTickError?.();
+        } catch (metricError) {
+          console.error("batch scheduler error metric failed", metricError);
+        }
+      })
       .finally(() => {
         tickInFlight = undefined;
         if (tickAgain && !stopping) {

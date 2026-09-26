@@ -168,6 +168,7 @@ export type ChatCompletionRequest = {
   model: "auto";
   stream: boolean;
   sampling?: SamplingOptions;
+  parallelToolCalls?: boolean;
   messages: ChatMessage[];
   tools?: ToolDefinition[];
   tool_choice?: unknown;
@@ -201,6 +202,7 @@ export type RoutedWork = {
   policy: KeyPolicy;
   keyPolicyVersion: number;
   messages: ChatMessage[];
+  parallelToolCalls?: boolean;
   tools?: ToolDefinition[];
   toolChoice?: unknown;
   responseFormat?: unknown;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Effect } from "effect";
+import { gufoBody } from "../../src/router/adapters/gufo.ts";
 import {
   halogenBody,
   halogenEffort,
@@ -14,6 +15,7 @@ import {
   llamaCppSlotsSaturated,
 } from "../../src/router/adapters/llamacpp.ts";
 import { joinUrl } from "../../src/router/adapters/http.ts";
+import { completionBody } from "../../src/router/adapters/openai-compatible.ts";
 import { openRouterBody } from "../../src/router/adapters/openrouter.ts";
 import { localQwen, cloudGlm, frontier } from "./fixtures.ts";
 import type { AdapterRequest } from "../../src/router/adapters/types.ts";
@@ -32,6 +34,29 @@ const request = (
 });
 
 describe("adapters", () => {
+  it("only sends parallel tool control to upstreams that understand it", () => {
+    for (const enabled of [true, false]) {
+      const options = { parallelToolCalls: enabled, appliedEffort: "none" as const };
+      const openai = completionBody(request({ ...options, deployment: cloudGlm }), false);
+      const openrouter = openRouterBody(request({ ...options, deployment: frontier }), false);
+      const gufo = gufoBody(
+        request({ ...options, deployment: { ...localQwen, transport: "gufo" } }),
+        false,
+      );
+      const llama = llamaCppBody(request({ ...options, deployment: localQwen }), false);
+      const halogen = halogenBody(request({ ...options, deployment: localQwen }), false);
+      assert.equal(openai.parallel_tool_calls, enabled);
+      assert.equal(openrouter.parallel_tool_calls, enabled);
+      for (const body of [openai, openrouter, gufo, llama, halogen]) {
+        assert.equal("store" in body, false);
+        assert.equal("metadata" in body, false);
+      }
+      for (const body of [gufo, llama, halogen]) {
+        assert.equal("parallel_tool_calls" in body, false);
+      }
+    }
+  });
+
   it("maps Halogen high to xhigh and sends a single token budget field", () => {
     assert.equal(halogenEffort("high"), "xhigh");
     const body = halogenBody(request({ deployment: localQwen, appliedEffort: "high" }), false);

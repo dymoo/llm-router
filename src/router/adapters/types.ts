@@ -10,6 +10,7 @@ export interface AdapterRequest {
   readonly deployment: Deployment;
   readonly messages: readonly ChatMessage[];
   readonly tools: unknown;
+  readonly parallelToolCalls?: boolean;
   readonly toolChoice: unknown;
   readonly responseFormat: unknown;
   readonly sampling?: SamplingOptions;
