@@ -17,6 +17,7 @@ const decodeModels = Schema.decodeUnknownEffect(Models);
 const GufoChunk = Schema.Struct({ model: Schema.String, choices: Schema.Array(Schema.Unknown) });
 const decodeGufoChunk = Schema.decodeUnknownSync(GufoChunk);
 const MAX_SSE_EVENT_BYTES = 256 * 1024;
+const GUFO_NO_QUEUE = { "X-Gufo-No-Queue": "1" };
 
 const NamedTool = Schema.Struct({
   type: Schema.Literals(["function"]),
@@ -46,15 +47,25 @@ const fetchGufoResponse = Effect.fn("Gufo.fetchResponse")(function* (
   });
   if (response.ok) return response;
   if (response.status === 429) {
-    const text = yield* readBoundedBody(response).pipe(Effect.catch(() => Effect.succeed(null)));
+    const zeroLength = response.headers.get("content-length") === "0";
+    const body = response.body;
+    const text =
+      body === null || zeroLength
+        ? ""
+        : yield* readBoundedBody(response, true).pipe(Effect.catch(() => Effect.succeed(null)));
+    if (zeroLength && body !== null) {
+      yield* Effect.promise(() => body.cancel().catch(() => undefined));
+    }
     if (text !== null) {
-      let queueRefusal = false;
-      try {
-        const parsed: unknown = JSON.parse(text);
-        decodeGufoQueueRefusal(parsed);
-        queueRefusal = true;
-      } catch {
-        // An ambiguous 429 is a provider failure, not proof that Gufo refused admission.
+      let queueRefusal = text === "" && new Headers(init.headers).get("X-Gufo-No-Queue") === "1";
+      if (!queueRefusal) {
+        try {
+          const parsed: unknown = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+          decodeGufoQueueRefusal(parsed);
+          queueRefusal = true;
+        } catch {
+          // An ambiguous 429 is a provider failure, not proof that Gufo refused admission.
+        }
       }
       if (queueRefusal) {
         const header = response.headers.get("retry-after")?.trim();
@@ -234,7 +245,7 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
       joinUrl(request.deployment.endpoint, "/v1/chat/completions"),
       {
         method: "POST",
-        headers: bearerHeaders(credential),
+        headers: bearerHeaders(credential, GUFO_NO_QUEUE),
         body,
       },
     );
@@ -263,7 +274,7 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
       joinUrl(request.deployment.endpoint, "/v1/chat/completions"),
       {
         method: "POST",
-        headers: bearerHeaders(credential),
+        headers: bearerHeaders(credential, GUFO_NO_QUEUE),
         body,
       },
     );

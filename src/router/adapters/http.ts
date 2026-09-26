@@ -89,10 +89,19 @@ export function readJsonCompletion(
   );
 }
 
-export function readBoundedBody(response: Response): Effect.Effect<string, ProviderFailure> {
+export function readBoundedBody(
+  response: Response,
+  preserveBom = false,
+): Effect.Effect<string, ProviderFailure> {
   return Effect.tryPromise({
     try: (signal) =>
-      readBytes(response, signal, UPSTREAM_RESPONSE_MAX_BYTES, UPSTREAM_JSON_TIMEOUT_MS),
+      readBytes(
+        response,
+        signal,
+        UPSTREAM_RESPONSE_MAX_BYTES,
+        UPSTREAM_JSON_TIMEOUT_MS,
+        preserveBom,
+      ),
     catch: (cause) =>
       new ProviderFailure({
         message:
@@ -108,6 +117,7 @@ async function readBytes(
   signal: AbortSignal,
   maxBytes: number,
   timeoutMs: number,
+  preserveBom: boolean,
 ): Promise<string> {
   if (response.body === null) throw new Error("provider response has no body");
   const reader = response.body.getReader();
@@ -121,7 +131,7 @@ async function readBytes(
   }, timeoutMs);
   signal.addEventListener("abort", abort, { once: true });
   try {
-    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: preserveBom });
     let bytes = 0;
     let text = "";
     for (;;) {

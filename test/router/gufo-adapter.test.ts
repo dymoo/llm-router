@@ -384,6 +384,61 @@ describe("Gufo ProviderAdapter", () => {
     }
   });
 
+  it("opts into Gufo fast rejection and reports empty-body 429 with Retry-After", async () => {
+    for (const operation of ["complete", "stream"] as const) {
+      const adapter = gufoAdapter(async (_url, init) => {
+        assert.equal(new Headers(init?.headers).get("X-Gufo-No-Queue"), "1");
+        return new Response(null, {
+          status: 429,
+          headers: { "content-length": "0", "retry-after": "301" },
+        });
+      });
+      const run =
+        operation === "complete"
+          ? Effect.runPromise(adapter.complete(request()))
+          : Effect.runPromise(adapter.stream(request()));
+      await assert.rejects(run, (error: unknown) => {
+        assert.ok(error instanceof LocalOverloaded);
+        assert.equal(error.retryAfterSeconds, 301);
+        return true;
+      });
+    }
+  });
+
+  it("reports empty Gufo 429 bodies without Retry-After as local overload", async () => {
+    for (const operation of ["complete", "stream"] as const) {
+      const adapter = gufoAdapter(async (_url, init) => {
+        assert.equal(new Headers(init?.headers).get("X-Gufo-No-Queue"), "1");
+        return new Response("", { status: 429 });
+      });
+      const run =
+        operation === "complete"
+          ? Effect.runPromise(adapter.complete(request()))
+          : Effect.runPromise(adapter.stream(request()));
+      await assert.rejects(run, (error: unknown) => {
+        assert.ok(error instanceof LocalOverloaded);
+        assert.equal(error.retryAfterSeconds, null);
+        return true;
+      });
+    }
+  });
+
+  it("does not infer fast rejection from a non-empty unknown 429 response", async () => {
+    for (const body of ["unknown upstream throttle", "\uFEFF"]) {
+      for (const operation of ["complete", "stream"] as const) {
+        const adapter = gufoAdapter(async (_url, init) => {
+          assert.equal(new Headers(init?.headers).get("X-Gufo-No-Queue"), "1");
+          return new Response(body, { status: 429 });
+        });
+        const run =
+          operation === "complete"
+            ? Effect.runPromise(adapter.complete(request()))
+            : Effect.runPromise(adapter.stream(request()));
+        await assert.rejects(run, failure(/HTTP 429/));
+      }
+    }
+  });
+
   it("keeps ambiguous HTTP 429/503 failures distinct from local overload", async () => {
     for (const [status, body, retryAfter] of [
       [429, { error: { code: "rate_limit" } }, "10"],
