@@ -1,11 +1,11 @@
 # LLM Router
 
-A self-hosted coding-agent inference gateway: it assesses a task, then reserves a model deployment and reasoning configuration through execution. It is not a model runtime.
+A self-hosted coding-agent inference gateway: it applies routing policy, optionally informed by semantic assessment, then reserves a model deployment and reasoning configuration through execution. It is not a model runtime.
 
 ## Product
 
 **Router**:
-The control plane that authenticates keys, assesses tasks, and holds a deployment reservation through generation.
+The control plane that authenticates keys, selects routes, and holds a deployment reservation through generation.
 _Avoid_: proxy, load balancer, classifier, Halogen, runtime, analytics warehouse
 
 **Key**:
@@ -39,7 +39,7 @@ Measured agreement between one Classifier backend revision and labelled judgment
 _Avoid_: confidence, readiness, self-claimed accuracy, benchmark as Task success
 
 **Classifier qualification**:
-The dated record pairing one Classifier backend revision and question schema with its measured Calibration and sourced token rates. Production routing fails closed without it; absent rates stay unknown.
+The dated record pairing one Classifier backend revision and question schema with its measured Calibration and sourced token rates. Assessment-based routing fails closed without it; absent rates stay unknown.
 _Avoid_: licence, certification, model card, readiness
 
 **Laya**:
@@ -63,6 +63,10 @@ The Classifier question text that consumes Laya or Jev context alongside the tas
 _Avoid_: generation tokens, prompt cache, unused 1k family window, mutable occupancy or price snapshots
 
 ## Routing
+
+**Rules mode**:
+An explicitly selected routing mode that uses deployment facts and Key policy without a semantic Assessment.
+_Avoid_: classifier, guessed difficulty, fallback assessment
 
 **Route**:
 A deployment and reasoning configuration reserved through execution, not a disconnected ranking result.
@@ -97,8 +101,8 @@ Independent per-key ranking weights in `[0, 1]`. They never relax a hard constra
 _Avoid_: locality bias, monthly budget, invoice cap
 
 **Effort**:
-The thinking control requested from the Assessment and mapped onto what the chosen deployment actually supports.
-_Avoid_: applied `on` as a graded `high`, no-thinking as the default for coding
+The thinking control chosen for a task and mapped onto what the selected Deployment supports. Assessment-based routing uses semantic effort; Rules mode has no difficulty signal.
+_Avoid_: applied `on` as a graded `high`, inferred task complexity
 
 ## Batch
 
@@ -121,7 +125,7 @@ _Avoid_: transcript archive, prompt store, results database, full capture
 ## Continuity
 
 **Session**:
-A key-namespaced client trajectory that reuses an Assessment, deployment, and effort until a safe boundary.
+A key-namespaced client trajectory that reuses a deployment, effort, and any Assessment until a safe boundary.
 _Avoid_: admin session, login, one session for every request on a Key
 
 **Session pin**:
@@ -129,11 +133,11 @@ The stored Route for a Session. Affinity is not a cache hit.
 _Avoid_: KV residency, prefix-cache evidence, provider restriction as a hit
 
 **Boundary**:
-The client declaration of `new-task` (assess and pin), `continue` (reuse the pin), or `checkpoint` (reassess when a switch is safe).
+The client declaration of `new-task` (select and pin), `continue` (reuse the pin), or `checkpoint` (reconsider when a switch is safe).
 _Avoid_: silent migrate, mid-tool switch, inferred shared session
 
 **Checkpoint**:
-A client-declared safe point where reclassification and a controlled deployment change are allowed.
+A client-declared safe point where route reconsideration and a controlled deployment change are allowed.
 _Avoid_: continue, crash recovery, automatic retry after dispatch
 
 ## Runtimes

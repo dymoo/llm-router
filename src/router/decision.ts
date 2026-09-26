@@ -14,6 +14,7 @@ import type { CandidateDenial, DenialCode } from "./select-route.ts";
 export type RouteDecisionReason = SelectionCode;
 
 export const ROUTE_DECISION_REASONS: readonly SelectionCode[] = [
+  "deterministic-rules",
   "pinned",
   "local-preference",
   "cloud-quality",
@@ -31,15 +32,15 @@ export interface RouteDecision {
   readonly selectionReason: SelectionReason;
   readonly exclusions: readonly CandidateExclusion[];
   readonly assessment: {
-    readonly task: Assessment["task"];
-    readonly difficulty: Assessment["difficulty"]["value"];
-    readonly difficultyConfidence: number;
+    readonly task: Assessment["task"] | null;
+    readonly difficulty: Assessment["difficulty"]["value"] | null;
+    readonly difficultyConfidence: number | null;
     readonly requestedEffort: RequestedEffort | null;
     readonly appliedEffort: AppliedEffort | null;
-    readonly localSufficiency: number;
-    readonly freshFacts: number;
-    readonly trivialChat: number;
-    readonly effortConfidence: number;
+    readonly localSufficiency: number | null;
+    readonly freshFacts: number | null;
+    readonly trivialChat: number | null;
+    readonly effortConfidence: number | null;
   };
   readonly keyPolicyVersion: number | null;
   readonly catalogueVersion: string;
@@ -66,6 +67,7 @@ const EXCLUSION_BY_DENIAL: Record<DenialCode, ExclusionCode> = {
   "impossible-limits": "context",
   cost: "cost",
   health: "health",
+  credential: "health",
   placeholder: "placeholder",
   quality: "quality",
   "retrieval-required": "quality",

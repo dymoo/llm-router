@@ -345,7 +345,7 @@ export const SessionPin = Schema.Struct({
   requestedEffort: RequestedEffort,
   appliedEffort: AppliedEffort,
   continuityKey: Schema.NonEmptyString,
-  assessment: Assessment,
+  assessment: Schema.NullOr(Assessment),
   createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 });
 export type SessionPin = typeof SessionPin.Type;
@@ -547,7 +547,7 @@ export const RequestAccounting = Schema.Struct({
   source: Schema.NullOr(ClassifierSource),
   classifierInputTokens: UnknownCount,
   classifierElapsedMs: UnknownCount,
-  reuse: ClassificationReuse,
+  reuse: Schema.NullOr(ClassificationReuse),
   promptTokens: UnknownCount,
   completionTokens: UnknownCount,
   reasoningTokens: UnknownCount,
@@ -764,6 +764,7 @@ export const GenerationUsage = Schema.Struct({
 export type GenerationUsage = typeof GenerationUsage.Type;
 
 export const SelectionCode = Schema.Literals([
+  "deterministic-rules",
   "pinned",
   "local-preference",
   "cloud-quality",

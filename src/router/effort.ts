@@ -76,6 +76,14 @@ export function pinRequestedEffort(requested: RequestedEffort): RequestedEffort 
   return requested === "none" ? "low" : requested;
 }
 
+export function lowestSupportedEffort(deployment: Deployment): RequestedEffort {
+  if (deployment.reasoning.kind === "mandatory") return "low";
+  if (deployment.reasoning.kind === "graded") {
+    return EFFORT_ORDER.find((effort) => deployment.reasoning.levels?.includes(effort)) ?? "none";
+  }
+  return "none";
+}
+
 export function mapAppliedEffort(
   requested: RequestedEffort,
   deployment: Deployment,

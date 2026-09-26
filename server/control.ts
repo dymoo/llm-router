@@ -264,7 +264,7 @@ export function getAdminDeps(): AdminDeps {
   return {
     appOrigin: env.APP_ORIGIN,
     basicAuth: env.ADMIN_BASIC_AUTH,
-    classifierQualifications: loadClassifierQualifications(),
+    classifierQualifications: env.CLASSIFIER_MODE === "rules" ? [] : loadClassifierQualifications(),
     keys,
   };
 }

@@ -97,7 +97,7 @@ Then:
 
 1. Drain the gateway: `node scripts/drain.mjs --compose`.
 2. Stop the old GPU runtime. For a Compose runtime: `docker compose stop llamacpp` or `docker compose stop halogen`. Stop a native generator explicitly on its host. Wait for GPU memory to be released before loading the other full-size model.
-3. Set `MODEL_CATALOG_FILE=./catalog.halogen.json` (or the llama.cpp file) and set **one** GPU profile in `COMPOSE_PROFILES`. Preserve any deliberately enabled `npu,webui` profiles.
+3. Set `MODEL_CATALOG_FILE=./catalog.halogen.json` (or the llama.cpp file) and set **one** GPU profile in `COMPOSE_PROFILES`. Preserve any deliberately enabled `laya,npu,webui` profiles; `laya` is needed only for explicitly selected Laya mode.
 4. Start the selected runtime and gateway with `docker compose up -d --build`.
 5. Verify its discovery output, `/health/ready`, and one real generation. Existing sessions need a new task/checkpoint after the gateway restart; no live tool trajectory is silently moved between engines.
 

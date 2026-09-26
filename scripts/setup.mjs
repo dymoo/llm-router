@@ -62,7 +62,9 @@ const config = runtimeConfiguration(
   parseEnv(body),
   values.native,
 );
-setValue("COMPOSE_PROFILES", config.profile);
+const classifierMode = parseEnv(body).CLASSIFIER_MODE;
+const profiles = [config.profile, ...(classifierMode === "laya" ? ["laya"] : [])].filter(Boolean);
+setValue("COMPOSE_PROFILES", profiles.join(","));
 setValue("MODEL_CATALOG_FILE", `./${catalogName}`);
 let createdEnv = false;
 try {
@@ -79,7 +81,7 @@ try {
   throw error;
 }
 mkdirSync(path.join(root, "data"), { recursive: true, mode: 0o700 });
-if (values.native) {
+if (values.native && classifierMode === "laya") {
   mkdirSync(path.join(root, "data/laya-cache/onnx"), { recursive: true, mode: 0o700 });
   mkdirSync(path.join(root, "data/laya-cache/ep-context"), { recursive: true, mode: 0o700 });
 }
@@ -102,8 +104,14 @@ if (values.runtime === "llamacpp-native")
 console.log(
   values.native
     ? "Start the native gateway with this environment file; runtime endpoints must be reachable from the host."
-    : "Start with docker compose up -d --build. Never enable both GPU runtime profiles on the same full-size-model host.",
+    : profiles.length === 0
+      ? "Start with docker compose up -d --build gateway. Rules/Jev mode does not start Laya."
+      : "Start with docker compose up -d --build. Never enable both GPU runtime profiles on the same full-size-model host.",
 );
+if (classifierMode === "rules")
+  console.log(
+    "Rules routing needs no classifier. To opt into Laya, set CLASSIFIER_MODE=laya and add laya to COMPOSE_PROFILES; qualifying evidence is required.",
+  );
 console.log(
   "Quality/latency entries are editable bootstrap priors, not measurements. Configure local accounting rates and verify runtime limits before production use.",
 );

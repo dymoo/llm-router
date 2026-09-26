@@ -88,7 +88,7 @@ Success is `202 Accepted` with the batch object:
 
 `id` is `batch_` + uuid. `created_at`/`finalized_at`/`local_wait_until`/`deadline_at` are Unix seconds. `endpoint` is always `/v1/chat/completions` (chat only). `completion_window` is always `"24h"` — the only value upstream accepts, and it is the **provider's** window measured from *upstream* submission, not from our POST. Two gateway-owned clocks make that explicit:
 
-- **`local_wait_until`** = `spillAt` — the end of the local-only window (see [spill rule](#spill-rule)); before this instant no item may leave for the provider.
+- **`local_wait_until`** = `spillAt` — the end of the local-first window (see [spill rule](#spill-rule)); before this instant only the explicit hard-ineligibility or opted-in overload exceptions below can leave for the provider.
 - **`deadline_at`** = `spillAt + completionWindowMs` (= `spillAt + 24h` for this single window) — our completion deadline for the job: local-first window plus provider window, so wall-clock from our POST can reach **~48 h**. The scheduler never expires a remote attempt at `created_at + 24h` while the provider legitimately still runs inside its own window.
 
 Expiry (`expired` status) is judged against `deadline_at`. Result retention is a **separate** 24 h clock that starts only once the job reaches a terminal status — it is not this deadline and not the provider's 30-day upstream retention.
@@ -264,10 +264,11 @@ $$\texttt{spillAt} = \texttt{createdAt} + \operatorname{clamp}\big(24\text{h} \t
 | `0.5` | 12 h |
 | `1` — local-until-saturated | 23 h 55 min (ceiling) |
 
-- **Before `spillAt`**: only local deployments are eligible. `localityBias` is a preference, never a privacy lock, but the floor guarantees every job gets a local-first window and the ceiling guarantees every job becomes spill-eligible inside 24 h.
+- **Before `spillAt`**: local deployments are preferred; only the explicit hard-ineligibility and opted-in overload exceptions below can accelerate remote work. The floor gives ordinary work a local-first window and the ceiling makes every job deadline-spill-eligible inside 24 h.
 - **At/after `spillAt`**: *undispatched* items may route to the pinned OpenRouter Batch path. Spill fans out **one upstream batch per compatibility group** (model + response_format/reasoning config — upstream allows one shape per batch), so a job can carry **several** remote batch ids, one per group; each group's items stay bound to that group's proven id. Already-dispatched items are unaffected.
 - **Hard-constraint local ineligibility** (quality, context, allowlist): the item spills **immediately** when a cloud batch candidate remains; if none does, the item fails with `no_eligible_model`. Hard constraints are never relaxed to invent a candidate.
-- **Provider pinning**: the selected deployment's `providerRestriction` is preserved as upstream `provider.only` — never silently dropped to gain availability. A pin no `:batch` endpoint satisfies fails clearly instead.
+- **Local downtime / definitive pre-enqueue overload**: before `spillAt`, only a Key with `overloadAction=failover` plus a configured spill port may enter remote batch planning. This uses the batch-only catalogue, not synchronous cloud dispatch. All Key/deployment allowlist, capability, context, credentials and spend constraints still pass through the real router planner and deferred key recheck; planning failure never makes a provider call. Report-only local work records the local overload instead of silently paying for cloud. Deadline-triggered spill remains a separate, unchanged batch authorization. A local-to-remote handoff keeps one request/admission and finalizes accounting once.
+- **Provider pinning**: the selected deployment’s `providerRestriction` is preserved as upstream `provider.only` — never silently dropped to gain availability. A pin no `:batch` endpoint satisfies fails clearly instead.
 - `maxEstimatedUsd` ceilings behave exactly as on interactive traffic: **fail closed on unknown pricing** — unknown price is not a low price.
 
 ### Spill deployment

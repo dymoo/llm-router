@@ -73,7 +73,7 @@ function hangingFetch(): typeof fetch {
   }) as typeof fetch;
 }
 
-function classifyAs(assessment: Classification["assessment"]) {
+function classifyAs(assessment: NonNullable<Classification["assessment"]>) {
   return {
     assessment,
     usage: { input_tokens: 11, output_tokens: 0 },
@@ -104,6 +104,237 @@ function batchWork(partial: Partial<RouterWork> & Pick<RouterWork, "routing">): 
   return work(partial);
 }
 describe("ModelRouter", () => {
+  it("rules selects local without a classifier or invented judgments, and preserves thinking-off on continue", async () => {
+    const layer = modelRouterLayer({
+      mode: "rules",
+      catalogue: [
+        {
+          ...localQwen,
+          prices: {
+            ...localQwen.prices,
+            provenance: { ...localQwen.prices.provenance, source: "unknown" },
+          },
+        },
+        cloudGlm,
+      ],
+      catalogueVersion: "rules-test",
+      fetch: fakeFetch(),
+    });
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const router = yield* ModelRouter;
+        const first = yield* router.complete(
+          work({ routing: { sessionId: "rules", boundary: "new-task" } }),
+        );
+        const second = yield* router.complete(
+          work({ routing: { sessionId: "rules", boundary: "continue" } }),
+        );
+        return { first, second };
+      }).pipe(Effect.provide(layer)),
+    );
+    assert.equal(result.first.headers.deploymentId, localQwen.id);
+    assert.equal(result.first.headers.appliedEffort, "none");
+    assert.equal(result.first.accounting.classifierBackend, null);
+    assert.equal(result.first.accounting.reuse, null);
+    assert.equal(result.first.decision.reason, "deterministic-rules");
+    assert.equal(result.first.decision.assessment.task, null);
+    assert.equal(result.first.decision.assessment.difficulty, null);
+    assert.equal(result.second.headers.deploymentId, localQwen.id);
+    assert.equal(result.second.headers.appliedEffort, "none");
+    assert.equal(result.second.accounting.reuse, "session");
+  });
+  it("rules routes requests local cannot fit or support to cloud, and otherwise returns NoEligibleModel", async () => {
+    for (const scenario of [
+      { inputTokens: 40_000, capabilities: { tools: false, json: false, vision: false } },
+      { inputTokens: 40, capabilities: { tools: false, json: true, vision: false } },
+    ]) {
+      const local = { ...localQwen, capabilities: { tools: true, json: false, vision: false } };
+      for (const cloud of [true, false]) {
+        for (const localDown of [false, true]) {
+          const layer = modelRouterLayer({
+            mode: "rules",
+            catalogue: cloud ? [local, { ...cloudGlm, contextLimitTokens: 100_000 }] : [local],
+            catalogueVersion: "rules-test",
+            fetch: fakeFetch(),
+            unavailable: localDown ? new Set([local.id]) : undefined,
+          });
+          const result = await Effect.runPromise(
+            ModelRouter.use((router) =>
+              router.complete(
+                work({
+                  ...scenario,
+                  policy: {
+                    ...balancedPolicy,
+                    localityBias: 1,
+                    contextLimitTokens: 100_000,
+                    maxWaitMs: 0,
+                  },
+                  routing: { sessionId: "rules-fit", boundary: "new-task" },
+                }),
+              ),
+            ).pipe(Effect.result, Effect.provide(layer)),
+          );
+          if (cloud) {
+            assert.equal(result._tag, "Success");
+            if (result._tag === "Success")
+              assert.equal(result.success.headers.deploymentId, cloudGlm.id);
+          } else {
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") assert.equal(result.failure._tag, "NoEligibleModel");
+          }
+        }
+      }
+    }
+  });
+  it("rules respects the locality preference boundary and lowest supported effort without a quality signal", async () => {
+    for (const [localityBias, expected] of [
+      [0.49, cloudGlm.id],
+      [0.5, localQwen.id],
+    ] as const) {
+      const layer = modelRouterLayer({
+        mode: "rules",
+        catalogue: [localQwen, cloudGlm],
+        catalogueVersion: "bias",
+        fetch: fakeFetch(),
+      });
+      const result = await Effect.runPromise(
+        ModelRouter.use((router) =>
+          router.complete(
+            work({
+              policy: {
+                ...balancedPolicy,
+                localityBias,
+                bias: { quality: 1, cost: 0, latency: 0 },
+              },
+              routing: { sessionId: "bias", boundary: "new-task", qualityOverride: "highest" },
+            }),
+          ),
+        ).pipe(Effect.provide(layer)),
+      );
+      assert.equal(result.headers.deploymentId, expected);
+    }
+    for (const [reasoning, expected] of [
+      [{ kind: "graded", levels: ["high", "low", "medium"] }, "low"],
+      [{ kind: "mandatory" }, "on"],
+      [{ kind: "none" }, "none"],
+    ] as const) {
+      const layer = modelRouterLayer({
+        mode: "rules",
+        catalogue: [{ ...localQwen, reasoning }],
+        catalogueVersion: "effort",
+        fetch: fakeFetch(),
+      });
+      const result = await Effect.runPromise(
+        ModelRouter.use((router) =>
+          router.complete(
+            work({
+              routing: { sessionId: "effort", boundary: "new-task" },
+            }),
+          ),
+        ).pipe(Effect.provide(layer)),
+      );
+      assert.equal(result.headers.appliedEffort, expected);
+    }
+  });
+  it("rules treats missing local credentials as hard ineligibility, not downtime", async () => {
+    for (const cloudAllowed of [true, false]) {
+      const contacts: string[] = [];
+      const layer = modelRouterLayer({
+        mode: "rules",
+        catalogue: [
+          { ...localQwen, transport: "gufo", credentialEnvVar: "MISSING_GUFO_KEY" },
+          cloudGlm,
+        ],
+        catalogueVersion: "rules-credentials",
+        credentials: () => undefined,
+        fetch: async (url, init) => {
+          contacts.push(String(url));
+          return fakeFetch()(url, init);
+        },
+      });
+      const result = await Effect.runPromise(
+        ModelRouter.use((router) =>
+          router.complete(
+            work({
+              policy: {
+                ...balancedPolicy,
+                overloadAction: "report",
+                allowedModels: cloudAllowed ? null : [localQwen.id],
+              },
+              routing: { sessionId: "missing-credential", boundary: "new-task" },
+            }),
+          ),
+        ).pipe(Effect.result, Effect.provide(layer)),
+      );
+      if (cloudAllowed) {
+        assert.equal(result._tag, "Success");
+        if (result._tag === "Success")
+          assert.equal(result.success.headers.deploymentId, cloudGlm.id);
+        assert.deepEqual(contacts, [cloudGlm.endpoint + "/v1/chat/completions"]);
+      } else {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") assert.equal(result.failure._tag, "NoEligibleModel");
+        assert.deepEqual(contacts, []);
+      }
+    }
+  });
+  it("rules treats unhealthy Gufo as local overload without waiting or silently charging report keys", async () => {
+    for (const { overloadAction, localityBias, allowedModels } of [
+      { overloadAction: "report", localityBias: 0.65, allowedModels: null },
+      { overloadAction: "failover", localityBias: 0.65, allowedModels: null },
+      { overloadAction: "report", localityBias: 0.1, allowedModels: [localQwen.id] },
+    ] as const) {
+      const calls: string[] = [];
+      let queues = 0;
+      const layer = modelRouterLayer({
+        mode: "rules",
+        catalogue: [
+          { ...localQwen, transport: "gufo", credentialEnvVar: "GUFO_TEST_KEY" },
+          cloudGlm,
+        ],
+        credentials: () => "fixture-key",
+        catalogueVersion: "rules-down",
+        onQueue: () => {
+          queues++;
+        },
+        fetch: async (url, init) => {
+          if (String(url).includes(localQwen.id)) {
+            assert.equal(init?.method, "GET");
+            return new Response(null, { status: 503 });
+          }
+          if (init?.method === "POST") calls.push(String(url));
+          return Response.json(completionBody);
+        },
+      });
+      const result = await Effect.runPromise(
+        ModelRouter.use((router) =>
+          router.complete(
+            work({
+              policy: {
+                ...balancedPolicy,
+                overloadAction,
+                localityBias,
+                allowedModels,
+                maxWaitMs: 30_000,
+              },
+              routing: { sessionId: "down", boundary: "new-task" },
+            }),
+          ),
+        ).pipe(Effect.result, Effect.provide(layer)),
+      );
+      assert.equal(queues, 0);
+      if (overloadAction === "report") {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") assert.equal(result.failure._tag, "LocalOverloaded");
+        assert.deepEqual(calls, []);
+      } else {
+        assert.equal(result._tag, "Success");
+        if (result._tag === "Success")
+          assert.equal(result.success.headers.deploymentId, cloudGlm.id);
+        assert.deepEqual(calls, [cloudGlm.endpoint + "/v1/chat/completions"]);
+      }
+    }
+  });
   it("pins continuations to the same deployment and effort", async () => {
     const layer = modelRouterLayer({
       catalogue: [localQwen, cloudGlm],
@@ -427,139 +658,147 @@ it("never sends prompts to a cloud deployment with missing required credentials"
     false,
   );
 });
-it("reports local overload after the key wait budget without dispatching to cloud", async () => {
-  const contacted: string[] = [];
-  const reasons: string[] = [];
-  const queueStates: Array<{ queued: boolean; waitedMs: number }> = [];
-  const layer = modelRouterLayer({
-    catalogue: [
-      { ...localQwen, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } },
-      cloudGlm,
-    ],
-    catalogueVersion: "overload-report",
-    classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
-    onDecision: (decision) => {
-      reasons.push(decision.reason);
-      queueStates.push(decision.queue);
-    },
-    fetch: async (url, init) => {
-      const address = String(url);
-      if (address.includes("/slots")) return Response.json([{ is_processing: false }]);
-      if (address.includes("/health")) return Response.json({ status: "ok" });
-      contacted.push(address);
-      if (JSON.parse(String(init?.body)).stream) {
-        return new Response(
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue(
-                new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
-              );
-            },
-          }),
-        );
-      }
-      return Response.json(completionBody);
-    },
-  });
-  await Effect.runPromise(
-    ModelRouter.use((router) =>
-      Effect.gen(function* () {
-        const held = yield* router.stream(
-          work({ stream: true, routing: { sessionId: "held", boundary: "new-task" } }),
-        );
-        try {
-          const started = Date.now();
-          const outcome = yield* router
-            .complete(
-              work({
-                policy: {
-                  ...balancedPolicy,
-                  overloadAction: "report",
-                  localityBias: 1,
-                  maxWaitMs: 35,
+for (const mode of ["classifier", "rules"] as const) {
+  describe(`${mode} capacity policy`, () => {
+    it("reports local overload after the key wait budget without dispatching to cloud", async () => {
+      const contacted: string[] = [];
+      const reasons: string[] = [];
+      const queueStates: Array<{ queued: boolean; waitedMs: number }> = [];
+      const layer = modelRouterLayer({
+        catalogue: [
+          { ...localQwen, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } },
+          cloudGlm,
+        ],
+        catalogueVersion: "overload-report",
+        ...(mode === "rules"
+          ? { mode }
+          : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+        onDecision: (decision) => {
+          reasons.push(decision.reason);
+          queueStates.push(decision.queue);
+        },
+        fetch: async (url, init) => {
+          const address = String(url);
+          if (address.includes("/slots")) return Response.json([{ is_processing: false }]);
+          if (address.includes("/health")) return Response.json({ status: "ok" });
+          contacted.push(address);
+          if (JSON.parse(String(init?.body)).stream) {
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue(
+                    new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
+                  );
                 },
-                routing: { sessionId: "waiting", boundary: "new-task" },
               }),
-            )
-            .pipe(Effect.result);
-          assert.equal(outcome._tag, "Failure");
-          if (outcome._tag === "Failure") assert.equal(outcome.failure._tag, "LocalOverloaded");
-          assert.ok(Date.now() - started >= 25, "report must honor the wait budget");
-          assert.equal(contacted.length, 1, "only the held local request reaches a provider");
-          assert.equal(reasons.at(-1), "local-overloaded");
-          assert.equal(queueStates.at(-1)?.queued, true);
-          assert.ok((queueStates.at(-1)?.waitedMs ?? 0) >= 25);
-        } finally {
-          yield* Effect.promise(() => held.body.cancel());
-        }
-      }),
-    ).pipe(Effect.provide(layer)),
-  );
-});
-it("fails over immediately to eligible cloud when no local permit is available", async () => {
-  const generations: string[] = [];
-  const layer = modelRouterLayer({
-    catalogue: [
-      { ...localQwen, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } },
-      cloudGlm,
-    ],
-    catalogueVersion: "overload-failover",
-    classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
-    fetch: async (url, init) => {
-      const address = String(url);
-      if (address.includes("/slots")) return Response.json([{ is_processing: false }]);
-      if (address.includes("/health")) return Response.json({ status: "ok" });
-      generations.push(address);
-      if (JSON.parse(String(init?.body)).stream) {
-        return new Response(
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue(
-                new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
-              );
-            },
+            );
+          }
+          return Response.json(completionBody);
+        },
+      });
+      await Effect.runPromise(
+        ModelRouter.use((router) =>
+          Effect.gen(function* () {
+            const held = yield* router.stream(
+              work({ stream: true, routing: { sessionId: "held", boundary: "new-task" } }),
+            );
+            try {
+              const started = Date.now();
+              const outcome = yield* router
+                .complete(
+                  work({
+                    policy: {
+                      ...balancedPolicy,
+                      overloadAction: "report",
+                      localityBias: 1,
+                      maxWaitMs: 35,
+                    },
+                    routing: { sessionId: "waiting", boundary: "new-task" },
+                  }),
+                )
+                .pipe(Effect.result);
+              assert.equal(outcome._tag, "Failure");
+              if (outcome._tag === "Failure") assert.equal(outcome.failure._tag, "LocalOverloaded");
+              assert.ok(Date.now() - started >= 25, "report must honor the wait budget");
+              assert.equal(contacted.length, 1, "only the held local request reaches a provider");
+              assert.equal(reasons.at(-1), "local-overloaded");
+              assert.equal(queueStates.at(-1)?.queued, true);
+              assert.ok((queueStates.at(-1)?.waitedMs ?? 0) >= 25);
+            } finally {
+              yield* Effect.promise(() => held.body.cancel());
+            }
           }),
-        );
-      }
-      return Response.json(completionBody);
-    },
+        ).pipe(Effect.provide(layer)),
+      );
+    });
+    it("fails over immediately to eligible cloud when no local permit is available", async () => {
+      const generations: string[] = [];
+      const layer = modelRouterLayer({
+        catalogue: [
+          { ...localQwen, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } },
+          cloudGlm,
+        ],
+        catalogueVersion: "overload-failover",
+        ...(mode === "rules"
+          ? { mode }
+          : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+        fetch: async (url, init) => {
+          const address = String(url);
+          if (address.includes("/slots")) return Response.json([{ is_processing: false }]);
+          if (address.includes("/health")) return Response.json({ status: "ok" });
+          generations.push(address);
+          if (JSON.parse(String(init?.body)).stream) {
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue(
+                    new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
+                  );
+                },
+              }),
+            );
+          }
+          return Response.json(completionBody);
+        },
+      });
+      await Effect.runPromise(
+        ModelRouter.use((router) =>
+          Effect.gen(function* () {
+            const held = yield* router.stream(
+              work({ stream: true, routing: { sessionId: "held", boundary: "new-task" } }),
+            );
+            try {
+              const started = Date.now();
+              const result = yield* router.complete(
+                work({
+                  policy: {
+                    ...balancedPolicy,
+                    overloadAction: "failover",
+                    localityBias: 1,
+                    maxWaitMs: 1_000,
+                  },
+                  routing: { sessionId: "fallback", boundary: "new-task" },
+                }),
+              );
+              assert.equal(result.headers.deploymentId, cloudGlm.id);
+              assert.equal(result.headers.queued, false);
+              assert.equal(result.accounting.localComputeEstimatedUsd, null);
+              assert.equal(result.decision.selectionReason.detail, "local-overload-failover");
+              assert.equal(result.decision.reason, "local-overload-failover");
+              assert.ok(Date.now() - started < 900, "failover must not wait for the local slot");
+              assert.deepEqual(
+                generations.map((address) => (address.includes(cloudGlm.id) ? "cloud" : "local")),
+                ["local", "cloud"],
+              );
+            } finally {
+              yield* Effect.promise(() => held.body.cancel());
+            }
+          }),
+        ).pipe(Effect.provide(layer)),
+      );
+    });
   });
-  await Effect.runPromise(
-    ModelRouter.use((router) =>
-      Effect.gen(function* () {
-        const held = yield* router.stream(
-          work({ stream: true, routing: { sessionId: "held", boundary: "new-task" } }),
-        );
-        try {
-          const started = Date.now();
-          const result = yield* router.complete(
-            work({
-              policy: {
-                ...balancedPolicy,
-                overloadAction: "failover",
-                localityBias: 1,
-                maxWaitMs: 1_000,
-              },
-              routing: { sessionId: "fallback", boundary: "new-task" },
-            }),
-          );
-          assert.equal(result.headers.deploymentId, cloudGlm.id);
-          assert.equal(result.headers.queued, false);
-          assert.equal(result.accounting.localComputeEstimatedUsd, null);
-          assert.equal(result.decision.selectionReason.detail, "local-overload-failover");
-          assert.equal(result.decision.reason, "local-overload-failover");
-          assert.ok(Date.now() - started < 900, "failover must not wait for the local slot");
-          assert.deepEqual(
-            generations.map((address) => (address.includes(cloudGlm.id) ? "cloud" : "local")),
-            ["local", "cloud"],
-          );
-        } finally {
-          yield* Effect.promise(() => held.body.cancel());
-        }
-      }),
-    ).pipe(Effect.provide(layer)),
-  );
-});
+}
 it("tries every eligible local permit before escalating to cloud", async () => {
   const primary = {
     ...localQwen,
@@ -628,292 +867,375 @@ it("tries every eligible local permit before escalating to cloud", async () => {
     ).pipe(Effect.provide(layer)),
   );
 });
-it("handles Gufo pre-enqueue overload per key action and releases its permit", async () => {
-  const local = {
-    ...localQwen,
-    transport: "gufo" as const,
-    credentialEnvVar: "GUFO_KEY",
-    modelId: "gufo-local",
-  };
-  const contacts: string[] = [];
-  const layer = modelRouterLayer({
-    catalogue: [{ ...local, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } }, cloudGlm],
-    catalogueVersion: "gufo-overload",
-    classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
-    credentials: () => "fixture-key",
-    fetch: async (url) => {
-      const address = String(url);
-      if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
-      contacts.push(address);
-      if (
-        address.includes(local.id) &&
-        contacts.filter((entry) => entry.includes(local.id)).length !== 2
-      )
-        return Response.json(
-          { error: { code: "queue_full" } },
-          { status: 429, headers: { "retry-after": "7" } },
-        );
-      return Response.json({ ...completionBody, model: local.modelId });
-    },
-  });
-  await Effect.runPromise(
-    ModelRouter.use((router) =>
-      Effect.gen(function* () {
-        const fallback = yield* router.complete(
-          work({
-            policy: {
-              ...balancedPolicy,
-              overloadAction: "failover",
-              localityBias: 1,
-              maxWaitMs: 1_000,
-            },
-            routing: { sessionId: "rejected", boundary: "new-task" },
-          }),
-        );
-        assert.equal(fallback.headers.deploymentId, cloudGlm.id);
-        assert.equal(fallback.decision.selectionReason.detail, "local-overload-failover");
-        assert.equal(fallback.decision.reason, "local-overload-failover");
-        const recovered = yield* router.complete(
-          work({
-            requestId: "recovered",
-            policy: { ...balancedPolicy, overloadAction: "report", localityBias: 1, maxWaitMs: 0 },
-            routing: { sessionId: "recovered", boundary: "new-task" },
-          }),
-        );
-        assert.equal(recovered.headers.deploymentId, local.id);
-        const reported = yield* router
-          .complete(
-            work({
-              requestId: "reported",
-              policy: {
-                ...balancedPolicy,
-                overloadAction: "report",
-                localityBias: 1,
-                maxWaitMs: 0,
-              },
-              routing: { sessionId: "reported", boundary: "new-task" },
-            }),
+for (const mode of ["classifier", "rules"] as const) {
+  describe(`${mode} Gufo admission safety`, () => {
+    it("handles Gufo pre-enqueue overload per key action and releases its permit", async () => {
+      const local = {
+        ...localQwen,
+        transport: "gufo" as const,
+        credentialEnvVar: "GUFO_KEY",
+        modelId: "gufo-local",
+      };
+      const contacts: string[] = [];
+      const layer = modelRouterLayer({
+        catalogue: [
+          { ...local, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } },
+          cloudGlm,
+        ],
+        catalogueVersion: "gufo-overload",
+        ...(mode === "rules"
+          ? { mode }
+          : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+        credentials: () => "fixture-key",
+        fetch: async (url) => {
+          const address = String(url);
+          if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
+          contacts.push(address);
+          if (
+            address.includes(local.id) &&
+            contacts.filter((entry) => entry.includes(local.id)).length !== 2
           )
-          .pipe(Effect.result);
-        assert.equal(reported._tag, "Failure");
-        if (reported._tag === "Failure") {
-          assert.equal(reported.failure._tag, "LocalOverloaded");
-          if (reported.failure._tag === "LocalOverloaded")
-            assert.equal(reported.failure.retryAfterSeconds, 7);
-        }
-        assert.deepEqual(
-          contacts.map((address) => (address.includes(local.id) ? "local" : "cloud")),
-          ["local", "cloud", "local", "local"],
+            return Response.json(
+              { error: { code: "queue_full" } },
+              { status: 429, headers: { "retry-after": "7" } },
+            );
+          return Response.json({ ...completionBody, model: local.modelId });
+        },
+      });
+      await Effect.runPromise(
+        ModelRouter.use((router) =>
+          Effect.gen(function* () {
+            const fallback = yield* router.complete(
+              work({
+                policy: {
+                  ...balancedPolicy,
+                  overloadAction: "failover",
+                  localityBias: 1,
+                  maxWaitMs: 1_000,
+                },
+                routing: { sessionId: "rejected", boundary: "new-task" },
+              }),
+            );
+            assert.equal(fallback.headers.deploymentId, cloudGlm.id);
+            assert.equal(fallback.decision.selectionReason.detail, "local-overload-failover");
+            assert.equal(fallback.decision.reason, "local-overload-failover");
+            const recovered = yield* router.complete(
+              work({
+                requestId: "recovered",
+                policy: {
+                  ...balancedPolicy,
+                  overloadAction: "report",
+                  localityBias: 1,
+                  maxWaitMs: 0,
+                },
+                routing: { sessionId: "recovered", boundary: "new-task" },
+              }),
+            );
+            assert.equal(recovered.headers.deploymentId, local.id);
+            const reported = yield* router
+              .complete(
+                work({
+                  requestId: "reported",
+                  policy: {
+                    ...balancedPolicy,
+                    overloadAction: "report",
+                    localityBias: 1,
+                    maxWaitMs: 0,
+                  },
+                  routing: { sessionId: "reported", boundary: "new-task" },
+                }),
+              )
+              .pipe(Effect.result);
+            assert.equal(reported._tag, "Failure");
+            if (reported._tag === "Failure") {
+              assert.equal(reported.failure._tag, "LocalOverloaded");
+              if (reported.failure._tag === "LocalOverloaded")
+                assert.equal(reported.failure.retryAfterSeconds, 7);
+            }
+            assert.deepEqual(
+              contacts.map((address) => (address.includes(local.id) ? "local" : "cloud")),
+              ["local", "cloud", "local", "local"],
+            );
+          }),
+        ).pipe(Effect.provide(layer)),
+      );
+    });
+    it("reports overload rather than bypassing cloud authorization or hard constraints", async () => {
+      const local = {
+        ...localQwen,
+        transport: "gufo" as const,
+        credentialEnvVar: "GUFO_KEY",
+        modelId: "gufo-local",
+      };
+      const cases: Array<{
+        name: string;
+        policy?: Partial<RouterWork["policy"]>;
+        cloud?: Partial<typeof cloudGlm>;
+        capabilities?: RouterWork["capabilities"];
+      }> = [
+        { name: "allowlist", policy: { allowedModels: [local.id] } },
+        { name: "credential", cloud: { credentialEnvVar: "CLOUD_KEY" } },
+        { name: "spend ceiling", policy: { maxEstimatedUsd: 0 } },
+        {
+          name: "unknown pricing",
+          policy: { maxEstimatedUsd: 1 },
+          cloud: {
+            prices: {
+              ...cloudGlm.prices,
+              provenance: { ...cloudGlm.prices.provenance, source: "unknown" },
+            },
+          },
+        },
+        {
+          name: "capabilities",
+          cloud: { capabilities: { tools: false, json: true, vision: false } },
+          capabilities: { tools: true, json: false, vision: false },
+        },
+        { name: "context", cloud: { contextLimitTokens: 8_192 } },
+        { name: "output", cloud: { maxOutputTokens: 8_000 } },
+      ];
+      for (const testCase of cases) {
+        const contacted: string[] = [];
+        const reasons: string[] = [];
+        const layer = modelRouterLayer({
+          catalogue: [local, { ...cloudGlm, ...testCase.cloud }],
+          catalogueVersion: "constraints-" + testCase.name,
+          ...(mode === "rules"
+            ? { mode }
+            : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+          onDecision: (decision) => {
+            reasons.push(decision.reason);
+          },
+          credentials: (envVar) => (envVar === "GUFO_KEY" ? "fixture-key" : undefined),
+          fetch: async (url) => {
+            const address = String(url);
+            if (address.includes("/models"))
+              return Response.json({ data: [{ id: local.modelId }] });
+            contacted.push(address);
+            if (address.includes(local.id))
+              return Response.json({ error: { code: "client_queue_full" } }, { status: 429 });
+            throw new Error("ineligible cloud was contacted");
+          },
+        });
+        const outcome = await Effect.runPromise(
+          ModelRouter.use((router) =>
+            router
+              .complete(
+                work({
+                  policy: {
+                    ...balancedPolicy,
+                    overloadAction: "failover",
+                    localityBias: 1,
+                    ...testCase.policy,
+                  },
+                  capabilities: testCase.capabilities ?? {
+                    tools: false,
+                    json: false,
+                    vision: false,
+                  },
+                  routing: { sessionId: "constraint", boundary: "new-task" },
+                }),
+              )
+              .pipe(Effect.result),
+          ).pipe(Effect.provide(layer)),
         );
-      }),
-    ).pipe(Effect.provide(layer)),
-  );
-});
-it("reports overload rather than bypassing cloud authorization or hard constraints", async () => {
-  const local = {
-    ...localQwen,
-    transport: "gufo" as const,
-    credentialEnvVar: "GUFO_KEY",
-    modelId: "gufo-local",
-  };
-  const cases: Array<{
-    name: string;
-    policy?: Partial<RouterWork["policy"]>;
-    cloud?: Partial<typeof cloudGlm>;
-    capabilities?: RouterWork["capabilities"];
-  }> = [
-    { name: "allowlist", policy: { allowedModels: [local.id] } },
-    { name: "credential", cloud: { credentialEnvVar: "CLOUD_KEY" } },
-    { name: "spend ceiling", policy: { maxEstimatedUsd: 0 } },
-    {
-      name: "capabilities",
-      cloud: { capabilities: { tools: false, json: true, vision: false } },
-      capabilities: { tools: true, json: false, vision: false },
-    },
-    { name: "context", cloud: { contextLimitTokens: 8_192 } },
-    { name: "output", cloud: { maxOutputTokens: 8_000 } },
-  ];
-  for (const testCase of cases) {
-    const contacted: string[] = [];
-    const reasons: string[] = [];
+        assert.equal(outcome._tag, "Failure", testCase.name);
+        if (outcome._tag === "Failure")
+          assert.equal(outcome.failure._tag, "LocalOverloaded", testCase.name);
+        assert.equal(reasons.at(-1), "local-overloaded", testCase.name);
+        assert.deepEqual(contacted, [local.endpoint + "/v1/chat/completions"], testCase.name);
+      }
+    });
+    it("never treats a generic provider failure as a pre-enqueue overload", async () => {
+      const local = {
+        ...localQwen,
+        transport: "gufo" as const,
+        credentialEnvVar: "GUFO_KEY",
+        modelId: "gufo-local",
+      };
+      const contacted: string[] = [];
+      const layer = modelRouterLayer({
+        catalogue: [local, cloudGlm],
+        catalogueVersion: "no-replay",
+        ...(mode === "rules"
+          ? { mode }
+          : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+        credentials: () => "fixture-key",
+        fetch: async (url) => {
+          const address = String(url);
+          if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
+          contacted.push(address);
+          return Response.json({ error: { code: "other_failure" } }, { status: 503 });
+        },
+      });
+      const outcome = await Effect.runPromise(
+        ModelRouter.use((router) =>
+          router
+            .complete(
+              work({
+                policy: { ...balancedPolicy, overloadAction: "failover", localityBias: 1 },
+                routing: { sessionId: "failed", boundary: "new-task" },
+              }),
+            )
+            .pipe(Effect.result),
+        ).pipe(Effect.provide(layer)),
+      );
+      assert.equal(outcome._tag, "Failure");
+      if (outcome._tag === "Failure") assert.equal(outcome.failure._tag, "ProviderFailure");
+      assert.deepEqual(contacted, [local.endpoint + "/v1/chat/completions"]);
+    });
+    it("streams from cloud after Gufo rejects before enqueue and pins that route", async () => {
+      const local = {
+        ...localQwen,
+        transport: "gufo" as const,
+        credentialEnvVar: "GUFO_KEY",
+        modelId: "gufo-local",
+      };
+      const contacts: string[] = [];
+      const layer = modelRouterLayer({
+        catalogue: [
+          { ...local, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } },
+          cloudGlm,
+        ],
+        catalogueVersion: "stream-failover",
+        ...(mode === "rules"
+          ? { mode }
+          : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+        credentials: () => "fixture-key",
+        fetch: async (url, init) => {
+          const address = String(url);
+          if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
+          contacts.push(address.includes(local.id) ? "local" : "cloud");
+          if (address.includes(local.id))
+            return Response.json({ error: { code: "queue_full" } }, { status: 429 });
+          if (JSON.parse(String(init?.body)).stream)
+            return new Response(
+              'data: {"choices":[{"delta":{"content":"cloud"}}]}\n\ndata: [DONE]\n\n',
+              { headers: { "content-type": "text/event-stream" } },
+            );
+          return Response.json(completionBody);
+        },
+      });
+      await Effect.runPromise(
+        ModelRouter.use((router) =>
+          Effect.gen(function* () {
+            const policy = {
+              ...balancedPolicy,
+              overloadAction: "failover" as const,
+              localityBias: 1,
+            };
+            const streamed = yield* router.stream(
+              work({
+                stream: true,
+                policy,
+                routing: { sessionId: "stream-fallback", boundary: "new-task" },
+              }),
+            );
+            assert.equal(streamed.headers.deploymentId, cloudGlm.id);
+            assert.equal(streamed.decision.selectionReason.detail, "local-overload-failover");
+            assert.equal(streamed.decision.reason, "local-overload-failover");
+            assert.match(yield* Effect.promise(() => new Response(streamed.body).text()), /cloud/);
+            const continued = yield* router.complete(
+              work({
+                requestId: "continued",
+                policy,
+                routing: { sessionId: "stream-fallback", boundary: "continue" },
+              }),
+            );
+            assert.equal(continued.headers.deploymentId, cloudGlm.id);
+            assert.deepEqual(contacts, ["local", "cloud", "cloud"]);
+          }),
+        ).pipe(Effect.provide(layer)),
+      );
+    });
+    it("keeps a continued local session pinned when Gufo rejects before enqueue", async () => {
+      const local = {
+        ...localQwen,
+        transport: "gufo" as const,
+        credentialEnvVar: "GUFO_KEY",
+        modelId: "gufo-local",
+      };
+      const contacts: string[] = [];
+      const layer = modelRouterLayer({
+        catalogue: [local, cloudGlm],
+        catalogueVersion: "continued-overload",
+        ...(mode === "rules"
+          ? { mode }
+          : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+        credentials: () => "fixture-key",
+        fetch: async (url) => {
+          const address = String(url);
+          if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
+          contacts.push(address.includes(local.id) ? "local" : "cloud");
+          if (contacts.length === 1)
+            return Response.json({ ...completionBody, model: local.modelId });
+          return Response.json({ error: { code: "queue_full" } }, { status: 429 });
+        },
+      });
+      await Effect.runPromise(
+        ModelRouter.use((router) =>
+          Effect.gen(function* () {
+            const policy = {
+              ...balancedPolicy,
+              overloadAction: "failover" as const,
+              localityBias: 1,
+            };
+            yield* router.complete(
+              work({ policy, routing: { sessionId: "pinned-local", boundary: "new-task" } }),
+            );
+            const continued = yield* router
+              .complete(
+                work({
+                  requestId: "continue",
+                  policy,
+                  routing: { sessionId: "pinned-local", boundary: "continue" },
+                }),
+              )
+              .pipe(Effect.result);
+            assert.equal(continued._tag, "Failure");
+            if (continued._tag === "Failure")
+              assert.equal(continued.failure._tag, "LocalOverloaded");
+            assert.deepEqual(contacts, ["local", "local"]);
+          }),
+        ).pipe(Effect.provide(layer)),
+      );
+    });
+  });
+}
+describe("ModelRouter batch seam", () => {
+  it("rules completes local batch work and plans cloud spill without assessment or provider submission", async () => {
+    let generations = 0;
     const layer = modelRouterLayer({
-      catalogue: [local, { ...cloudGlm, ...testCase.cloud }],
-      catalogueVersion: "constraints-" + testCase.name,
-      classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
-      onDecision: (decision) => {
-        reasons.push(decision.reason);
-      },
-      credentials: (envVar) => (envVar === "GUFO_KEY" ? "fixture-key" : undefined),
-      fetch: async (url) => {
-        const address = String(url);
-        if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
-        contacted.push(address);
-        if (address.includes(local.id))
-          return Response.json({ error: { code: "client_queue_full" } }, { status: 429 });
-        throw new Error("ineligible cloud was contacted");
+      mode: "rules",
+      catalogue: [localQwen, cloudGlm],
+      catalogueVersion: "rules-batch",
+      fetch: async (url, init) => {
+        if (init?.method === "POST") generations++;
+        return fakeFetch()(url, init);
       },
     });
-    const outcome = await Effect.runPromise(
-      ModelRouter.use((router) =>
-        router
-          .complete(
-            work({
-              policy: {
-                ...balancedPolicy,
-                overloadAction: "failover",
-                localityBias: 1,
-                ...testCase.policy,
-              },
-              capabilities: testCase.capabilities ?? { tools: false, json: false, vision: false },
-              routing: { sessionId: "constraint", boundary: "new-task" },
-            }),
-          )
-          .pipe(Effect.result),
-      ).pipe(Effect.provide(layer)),
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const router = yield* ModelRouter;
+        const local = yield* router.completeBatch(
+          work({ routing: { sessionId: "batch-rules", boundary: "new-task" } }),
+          "auto",
+        );
+        const spill = yield* router.planBatchSpill(
+          work({ routing: { sessionId: "spill-rules", boundary: "new-task" } }),
+          [frontier],
+          "auto",
+        );
+        return { local, spill };
+      }).pipe(Effect.provide(layer)),
     );
-    assert.equal(outcome._tag, "Failure", testCase.name);
-    if (outcome._tag === "Failure")
-      assert.equal(outcome.failure._tag, "LocalOverloaded", testCase.name);
-    assert.equal(reasons.at(-1), "local-overloaded", testCase.name);
-    assert.deepEqual(contacted, [local.endpoint + "/v1/chat/completions"], testCase.name);
-  }
-});
-it("never treats a generic provider failure as a pre-enqueue overload", async () => {
-  const local = {
-    ...localQwen,
-    transport: "gufo" as const,
-    credentialEnvVar: "GUFO_KEY",
-    modelId: "gufo-local",
-  };
-  const contacted: string[] = [];
-  const layer = modelRouterLayer({
-    catalogue: [local, cloudGlm],
-    catalogueVersion: "no-replay",
-    classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
-    credentials: () => "fixture-key",
-    fetch: async (url) => {
-      const address = String(url);
-      if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
-      contacted.push(address);
-      return Response.json({ error: { code: "other_failure" } }, { status: 503 });
-    },
+    assert.equal(result.local.headers.deploymentId, localQwen.id);
+    assert.equal(result.local.accounting.classifierBackend, null);
+    assert.equal(result.spill.deployment.id, frontier.id);
+    assert.equal(result.spill.metadata.classifierBackend, null);
+    assert.equal(result.spill.metadata.selectionReasonCode, "deterministic-rules");
+    assert.equal(generations, 1);
   });
-  const outcome = await Effect.runPromise(
-    ModelRouter.use((router) =>
-      router
-        .complete(
-          work({
-            policy: { ...balancedPolicy, overloadAction: "failover", localityBias: 1 },
-            routing: { sessionId: "failed", boundary: "new-task" },
-          }),
-        )
-        .pipe(Effect.result),
-    ).pipe(Effect.provide(layer)),
-  );
-  assert.equal(outcome._tag, "Failure");
-  if (outcome._tag === "Failure") assert.equal(outcome.failure._tag, "ProviderFailure");
-  assert.deepEqual(contacted, [local.endpoint + "/v1/chat/completions"]);
-});
-it("streams from cloud after Gufo rejects before enqueue and pins that route", async () => {
-  const local = {
-    ...localQwen,
-    transport: "gufo" as const,
-    credentialEnvVar: "GUFO_KEY",
-    modelId: "gufo-local",
-  };
-  const contacts: string[] = [];
-  const layer = modelRouterLayer({
-    catalogue: [{ ...local, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } }, cloudGlm],
-    catalogueVersion: "stream-failover",
-    classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
-    credentials: () => "fixture-key",
-    fetch: async (url, init) => {
-      const address = String(url);
-      if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
-      contacts.push(address.includes(local.id) ? "local" : "cloud");
-      if (address.includes(local.id))
-        return Response.json({ error: { code: "queue_full" } }, { status: 429 });
-      if (JSON.parse(String(init?.body)).stream)
-        return new Response(
-          'data: {"choices":[{"delta":{"content":"cloud"}}]}\n\ndata: [DONE]\n\n',
-          { headers: { "content-type": "text/event-stream" } },
-        );
-      return Response.json(completionBody);
-    },
-  });
-  await Effect.runPromise(
-    ModelRouter.use((router) =>
-      Effect.gen(function* () {
-        const policy = { ...balancedPolicy, overloadAction: "failover" as const, localityBias: 1 };
-        const streamed = yield* router.stream(
-          work({
-            stream: true,
-            policy,
-            routing: { sessionId: "stream-fallback", boundary: "new-task" },
-          }),
-        );
-        assert.equal(streamed.headers.deploymentId, cloudGlm.id);
-        assert.equal(streamed.decision.selectionReason.detail, "local-overload-failover");
-        assert.equal(streamed.decision.reason, "local-overload-failover");
-        assert.match(yield* Effect.promise(() => new Response(streamed.body).text()), /cloud/);
-        const continued = yield* router.complete(
-          work({
-            requestId: "continued",
-            policy,
-            routing: { sessionId: "stream-fallback", boundary: "continue" },
-          }),
-        );
-        assert.equal(continued.headers.deploymentId, cloudGlm.id);
-        assert.deepEqual(contacts, ["local", "cloud", "cloud"]);
-      }),
-    ).pipe(Effect.provide(layer)),
-  );
-});
-it("keeps a continued local session pinned when Gufo rejects before enqueue", async () => {
-  const local = {
-    ...localQwen,
-    transport: "gufo" as const,
-    credentialEnvVar: "GUFO_KEY",
-    modelId: "gufo-local",
-  };
-  const contacts: string[] = [];
-  const layer = modelRouterLayer({
-    catalogue: [local, cloudGlm],
-    catalogueVersion: "continued-overload",
-    classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
-    credentials: () => "fixture-key",
-    fetch: async (url) => {
-      const address = String(url);
-      if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
-      contacts.push(address.includes(local.id) ? "local" : "cloud");
-      if (contacts.length === 1) return Response.json({ ...completionBody, model: local.modelId });
-      return Response.json({ error: { code: "queue_full" } }, { status: 429 });
-    },
-  });
-  await Effect.runPromise(
-    ModelRouter.use((router) =>
-      Effect.gen(function* () {
-        const policy = { ...balancedPolicy, overloadAction: "failover" as const, localityBias: 1 };
-        yield* router.complete(
-          work({ policy, routing: { sessionId: "pinned-local", boundary: "new-task" } }),
-        );
-        const continued = yield* router
-          .complete(
-            work({
-              requestId: "continue",
-              policy,
-              routing: { sessionId: "pinned-local", boundary: "continue" },
-            }),
-          )
-          .pipe(Effect.result);
-        assert.equal(continued._tag, "Failure");
-        if (continued._tag === "Failure") assert.equal(continued.failure._tag, "LocalOverloaded");
-        assert.deepEqual(contacts, ["local", "local"]);
-      }),
-    ).pipe(Effect.provide(layer)),
-  );
-});
-describe("ModelRouter batch seam", () => {
   it("keeps batch completion local even when sync cloud is configured", async () => {
     const contacted: string[] = [];
     const layer = modelRouterLayer({

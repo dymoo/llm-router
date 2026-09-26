@@ -77,7 +77,7 @@ const deployment = (value: unknown) =>
     : bounded(value, processState.metricDeployments);
 const priority = (value: unknown) => bounded(value, ["high", "medium", "low"]);
 const location = (value: unknown) => bounded(value, ["local", "cloud"]);
-const backend = (value: unknown) => bounded(value, ["laya", "jev"]);
+const backend = (value: unknown) => bounded(value, ["rules", "laya", "jev"]);
 const errorTags = [
   "AuthFailed",
   "KeyRevoked",
@@ -329,13 +329,16 @@ export function observeHealth(snapshot: HealthSnapshot): void {
   );
   const b = backend(snapshot.classifier.backend);
   gauge("classifier_ready", Number(snapshot.classifier.ready), { backend: b });
-  gauge(
-    "classifier_qualified",
-    Number(
-      snapshot.classifier.evidence !== "unqualified" && snapshot.classifier.evidence !== undefined,
-    ),
-    { backend: b },
-  );
+  if (snapshot.classifier.backend !== "rules") {
+    gauge(
+      "classifier_qualified",
+      Number(
+        snapshot.classifier.evidence !== "unqualified" &&
+          snapshot.classifier.evidence !== undefined,
+      ),
+      { backend: b },
+    );
+  }
   for (const item of snapshot.deployments)
     gauge("deployment_ready", Number(item.ready), {
       deployment: deployment(item.id),

@@ -72,7 +72,7 @@ import {
 import { decideReason, exclusionsOf, type RouteDecision } from "./decision.ts";
 
 export interface Classification {
-  readonly assessment: Assessment;
+  readonly assessment: Assessment | null;
   readonly usage: {
     readonly input_tokens: number | null;
     readonly output_tokens: number | null;
@@ -165,10 +165,21 @@ export type RouterFailure =
   | KeyLifecycleError
   | InvalidInput;
 
-export interface RouterOptions {
+export type RouterOptions = RouterCommonOptions &
+  (
+    | { readonly mode: "rules" }
+    | {
+        readonly mode?: "classifier";
+        readonly classify: (
+          input: ClassifyInput,
+        ) => Effect.Effect<ClassifiedAssessment, ClassifierError>;
+      }
+  );
+
+interface RouterCommonOptions {
   readonly catalogue: readonly Deployment[];
   readonly catalogueVersion: string;
-  readonly classify: (input: ClassifyInput) => Effect.Effect<ClassifiedAssessment, ClassifierError>;
+
   readonly fetch?: FetchImpl;
   readonly credentials?: (envVar: string) => string | undefined;
   readonly unavailable?: ReadonlySet<string>;
@@ -413,13 +424,16 @@ function executeLocked(
       work.maxCompletionTokens ?? work.policy.maxCompletionTokens,
       work.policy.maxCompletionTokens,
     );
-    yield* checkFeasibility({
-      policy: work.policy,
-      catalogue,
-      estimatedInputTokens: work.inputTokens,
-      requestedCompletionTokens: generationAllowance,
-      capabilities: work.capabilities,
-    });
+    // Rules uses the selection seam's complete hard filters, without assessment prechecks.
+    if (options.mode !== "rules") {
+      yield* checkFeasibility({
+        policy: work.policy,
+        catalogue,
+        estimatedInputTokens: work.inputTokens,
+        requestedCompletionTokens: generationAllowance,
+        capabilities: work.capabilities,
+      });
+    }
 
     const now = yield* Clock.currentTimeMillis;
     const key = continuityKey({
@@ -450,11 +464,11 @@ function executeLocked(
 
     const classified = yield* classifyIfNeeded(work, options, configuredCatalogue, pin);
     options.onClassified?.(work, classified);
-    let unavailable: ReadonlySet<string>;
+    let availability: DeploymentAvailability;
     if (mode.kind === "batch-spill") {
-      unavailable = unavailableWithoutProviderProbe(catalogue, credentials, options.unavailable);
+      availability = unavailableWithoutProviderProbe(catalogue, credentials, options.unavailable);
     } else {
-      unavailable = yield* probeUnavailable(catalogue, adapters, credentials, options.unavailable);
+      availability = yield* probeUnavailable(catalogue, adapters, credentials, options.unavailable);
     }
     const selected = selectRoute({
       assessment: classified.assessment,
@@ -467,19 +481,70 @@ function executeLocked(
       vision: work.capabilities.vision,
       boundary: work.routing.boundary,
       freshFactsAvailable: work.freshFactsAvailable,
-      unavailable,
+      unavailable: availability.unavailable,
+      missingCredentials: availability.missingCredentials,
       cacheEvidence: work.cacheEvidence,
       qualityOverride: work.routing.qualityOverride,
       preferredLocation: preferredLocationFromBias(work.policy.localityBias),
       pinRequestedEffort:
         work.routing.boundary === "continue"
-          ? pinRequestedEffort(pin?.requestedEffort ?? "low")
+          ? options.mode === "rules"
+            ? pin?.requestedEffort
+            : pinRequestedEffort(pin?.requestedEffort ?? "low")
           : undefined,
     });
+    // In Rules, a health denial means the other hard constraints already passed.
+    const localUnavailable =
+      options.mode === "rules" &&
+      mode.kind !== "batch-spill" &&
+      selected.denials.some(
+        (denial) =>
+          denial.code === "health" &&
+          catalogue.some(
+            (deployment) =>
+              deployment.id === denial.deploymentId &&
+              deployment.location === "local" &&
+              (work.routing.boundary === "continue"
+                ? deployment.id === pin?.deploymentId
+                : work.policy.localityBias >= 0.5 || selected._tag === "Denied"),
+          ),
+      ) &&
+      (work.routing.boundary === "continue" ||
+        selected._tag === "Denied" ||
+        !selected.ranked.some((entry) => entry.deployment.location === "local"));
+    if (
+      localUnavailable &&
+      (work.policy.overloadAction === "report" ||
+        work.routing.boundary === "continue" ||
+        selected._tag === "Denied")
+    ) {
+      const failed = denialDecision(work, options, classified, {
+        _tag: "Denied",
+        code: "health",
+        detail: "Local deployment unavailable",
+        denials: selected.denials,
+      });
+      options.onDecision?.(
+        {
+          ...failed,
+          reason: "local-overloaded",
+          selectionReason: { code: "local-overloaded", detail: "local-unavailable" },
+        },
+        work,
+      );
+      return yield* new LocalOverloaded({
+        message: "Local deployment unavailable",
+        retryAfterSeconds: null,
+      });
+    }
     if (selected._tag === "Denied") {
       const denied = denialDecision(work, options, classified, selected);
       options.onDecision?.(denied, work);
-      return yield* Effect.fail(toDenialError(selected));
+      return yield* Effect.fail(
+        options.mode === "rules" && selected.denials.length > 0
+          ? new NoEligibleModel({ message: selected.detail })
+          : toDenialError(selected),
+      );
     }
 
     const chosen = chooseCandidate(work, pin, selected);
@@ -499,7 +564,14 @@ function executeLocked(
     }
     const spill =
       mode.kind === "interactive" &&
-      cloudSpillPermitted(work.policy, classified.assessment, saturation, work.routing.boundary);
+      (classified.assessment === null
+        ? chosen.candidates[0]?.deployment.location === "cloud"
+        : cloudSpillPermitted(
+            work.policy,
+            classified.assessment,
+            saturation,
+            work.routing.boundary,
+          ));
     let rankedDeployments = chosen.candidates.map((candidate) => candidate.deployment);
     if (work.routing.boundary === "continue" && pin !== undefined) {
       rankedDeployments = rankedDeployments.filter(
@@ -647,23 +719,26 @@ function executeLocked(
       queued,
       waitedMs,
     };
-    const overloadedToCloud = overloadFailover && candidate.deployment.location === "cloud";
+    const overloadedToCloud =
+      (overloadFailover || localUnavailable) && candidate.deployment.location === "cloud";
     const reason = overloadedToCloud
       ? "local-overload-failover"
-      : decideReason({
-          pinned: work.routing.boundary === "continue",
-          qualityOverride: work.routing.qualityOverride === "highest",
-          queued,
-          selectedLocation: candidate.deployment.location,
-          spilledForSaturation:
-            saturation.verified &&
-            saturation.saturated &&
-            candidate.deployment.location === "cloud",
-          spilledForComplexity:
-            candidate.deployment.location === "cloud" &&
-            (classified.assessment.difficulty.value === "hard" ||
-              classified.assessment.localSufficiency < 0.8),
-        });
+      : classified.assessment === null
+        ? "deterministic-rules"
+        : decideReason({
+            pinned: work.routing.boundary === "continue",
+            qualityOverride: work.routing.qualityOverride === "highest",
+            queued,
+            selectedLocation: candidate.deployment.location,
+            spilledForSaturation:
+              saturation.verified &&
+              saturation.saturated &&
+              candidate.deployment.location === "cloud",
+            spilledForComplexity:
+              candidate.deployment.location === "cloud" &&
+              (classified.assessment.difficulty.value === "hard" ||
+                classified.assessment.localSufficiency < 0.8),
+          });
     const decision: RouteDecision = {
       reason,
       selectionReason: { code: reason, detail: reason },
@@ -680,13 +755,13 @@ function executeLocked(
           ]
         : exclusionsOf(selected.denials),
       assessment: {
-        task: classified.assessment.task,
-        difficulty: classified.assessment.difficulty.value,
-        difficultyConfidence: classified.assessment.difficulty.confidence,
-        localSufficiency: classified.assessment.localSufficiency,
-        freshFacts: classified.assessment.freshFacts,
-        trivialChat: classified.assessment.trivialChat,
-        effortConfidence: classified.assessment.effort.confidence,
+        task: classified.assessment?.task ?? null,
+        difficulty: classified.assessment?.difficulty.value ?? null,
+        difficultyConfidence: classified.assessment?.difficulty.confidence ?? null,
+        localSufficiency: classified.assessment?.localSufficiency ?? null,
+        freshFacts: classified.assessment?.freshFacts ?? null,
+        trivialChat: classified.assessment?.trivialChat ?? null,
+        effortConfidence: classified.assessment?.effort.confidence ?? null,
         requestedEffort: candidate.requestedEffort,
         appliedEffort: candidate.appliedEffort,
       },
@@ -877,6 +952,18 @@ function classifyIfNeeded(
       source: null,
     });
   }
+  if (options.mode === "rules") {
+    return Effect.succeed({
+      assessment: null,
+      usage: { input_tokens: null, output_tokens: null },
+      backend: null,
+      modelRevision: null,
+      cacheHit: false,
+      elapsedMs: null,
+      reuse: null,
+      source: null,
+    });
+  }
   const source = work.routing.taskBrief !== undefined ? "caller-brief" : "full-input";
   const state = work.routing.taskBrief ?? serializeMessages(work.messages);
   const localDeployments: LocalDeploymentBrief[] = catalogue
@@ -931,14 +1018,20 @@ function classifyIfNeeded(
     );
 }
 
+interface DeploymentAvailability {
+  readonly unavailable: ReadonlySet<string>;
+  readonly missingCredentials: ReadonlySet<string>;
+}
+
 function probeUnavailable(
   catalogue: readonly Deployment[],
   adapters: Record<Deployment["transport"], ProviderAdapter>,
   credentials: (envVar: string) => string | undefined,
   extra?: ReadonlySet<string>,
-): Effect.Effect<ReadonlySet<string>> {
+): Effect.Effect<DeploymentAvailability> {
   return Effect.gen(function* () {
     const unavailable = new Set<string>(extra ?? []);
+    const missingCredentials = new Set<string>();
     for (const deployment of catalogue) {
       const credential =
         deployment.credentialEnvVar === null ? undefined : credentials(deployment.credentialEnvVar);
@@ -947,6 +1040,7 @@ function probeUnavailable(
         (credential === undefined || credential.length === 0)
       ) {
         unavailable.add(deployment.id);
+        missingCredentials.add(deployment.id);
         continue;
       }
       const down = yield* adapters[deployment.transport].probeUnavailable(deployment, credential);
@@ -954,7 +1048,7 @@ function probeUnavailable(
         unavailable.add(deployment.id);
       }
     }
-    return unavailable;
+    return { unavailable, missingCredentials };
   });
 }
 
@@ -962,17 +1056,19 @@ function unavailableWithoutProviderProbe(
   catalogue: readonly Deployment[],
   credentials: (envVar: string) => string | undefined,
   extra?: ReadonlySet<string>,
-): ReadonlySet<string> {
+): DeploymentAvailability {
   const unavailable = new Set<string>(extra ?? []);
+  const missingCredentials = new Set<string>();
   for (const deployment of catalogue) {
     if (
       deployment.credentialEnvVar !== null &&
       (credentials(deployment.credentialEnvVar) ?? "").length === 0
     ) {
       unavailable.add(deployment.id);
+      missingCredentials.add(deployment.id);
     }
   }
-  return unavailable;
+  return { unavailable, missingCredentials };
 }
 
 function chooseCandidate(
@@ -1189,13 +1285,17 @@ function persistPin(
   sessions: SessionStore,
   work: RouterWork,
   candidate: RankedCandidate,
-  assessment: Assessment,
+  assessment: Assessment | null,
   nowMs: number,
 ): void {
   sessions.set(work.keyId, work.routing.sessionId, {
     deploymentId: candidate.deployment.id,
-    requestedEffort: pinRequestedEffort(candidate.requestedEffort),
-    appliedEffort: candidate.appliedEffort === "none" ? "low" : candidate.appliedEffort,
+    requestedEffort:
+      assessment === null
+        ? candidate.requestedEffort
+        : pinRequestedEffort(candidate.requestedEffort),
+    appliedEffort:
+      assessment === null || candidate.appliedEffort !== "none" ? candidate.appliedEffort : "low",
     continuityKey: continuityKey({
       messages: work.messages,
       tools: work.tools,
@@ -1276,13 +1376,13 @@ function denialDecision(
     selectionReason: { code: "no-eligible", detail: selected.detail },
     exclusions: exclusionsOf(selected.denials),
     assessment: {
-      task: classified.assessment.task,
-      difficulty: classified.assessment.difficulty.value,
-      difficultyConfidence: classified.assessment.difficulty.confidence,
-      localSufficiency: classified.assessment.localSufficiency,
-      freshFacts: classified.assessment.freshFacts,
-      trivialChat: classified.assessment.trivialChat,
-      effortConfidence: classified.assessment.effort.confidence,
+      task: classified.assessment?.task ?? null,
+      difficulty: classified.assessment?.difficulty.value ?? null,
+      difficultyConfidence: classified.assessment?.difficulty.confidence ?? null,
+      localSufficiency: classified.assessment?.localSufficiency ?? null,
+      freshFacts: classified.assessment?.freshFacts ?? null,
+      trivialChat: classified.assessment?.trivialChat ?? null,
+      effortConfidence: classified.assessment?.effort.confidence ?? null,
       requestedEffort: null,
       appliedEffort: null,
     },

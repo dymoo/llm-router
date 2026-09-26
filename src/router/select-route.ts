@@ -10,6 +10,7 @@ import {
   type TaskKind,
 } from "../domain.ts";
 import {
+  lowestSupportedEffort,
   mapAppliedEffort,
   pinRequestedEffort,
   resolveRequestedEffort,
@@ -19,6 +20,7 @@ import {
 export type DenialCode =
   | "allowlist"
   | "health"
+  | "credential"
   | "capability"
   | "context"
   | "output"
@@ -37,7 +39,8 @@ export interface CacheEvidence {
 }
 
 export interface SelectRouteInput {
-  readonly assessment: Assessment;
+  /** Null is explicit Rules mode, not a fabricated semantic assessment. */
+  readonly assessment: Assessment | null;
   readonly deployments: readonly Deployment[];
   readonly policy: KeyPolicy;
   readonly inputTokens: number;
@@ -48,6 +51,7 @@ export interface SelectRouteInput {
   readonly boundary: SessionBoundary;
   readonly freshFactsAvailable: boolean;
   readonly unavailable?: ReadonlySet<string>;
+  readonly missingCredentials?: ReadonlySet<string>;
   readonly cacheEvidence?: CacheEvidence;
   readonly qualityOverride?: "highest";
   readonly preferredLocation?: "local" | "cloud" | null;
@@ -117,6 +121,7 @@ export function pricesAreUnknown(deployment: Deployment): boolean {
 export function selectRoute(input: SelectRouteInput): SelectRouteResult {
   const denials: CandidateDenial[] = [];
   if (
+    input.assessment !== null &&
     input.assessment.freshFacts >= FRESH_FACTS_RETRIEVAL_THRESHOLD &&
     !input.freshFactsAvailable
   ) {
@@ -154,26 +159,34 @@ export function selectRoute(input: SelectRouteInput): SelectRouteResult {
     };
   }
 
-  const requestedEffort = resolveRequestedEffort({
-    assessment: input.assessment,
-    qualityBias: input.policy.bias.quality,
-    tools: input.tools,
-    json: input.json,
-    vision: input.vision,
-    boundary: input.boundary,
-    pinRequestedEffort: input.pinRequestedEffort,
-  });
-  const pinEffort = pinRequestedEffort(requestedEffort);
-  const qualityFloor = minimumTaskQuality(input.assessment);
+  const requestedEffort =
+    input.assessment === null
+      ? (input.pinRequestedEffort ?? "none")
+      : resolveRequestedEffort({
+          assessment: input.assessment,
+          qualityBias: input.policy.bias.quality,
+          tools: input.tools,
+          json: input.json,
+          vision: input.vision,
+          boundary: input.boundary,
+          pinRequestedEffort: input.pinRequestedEffort,
+        });
+  const pinEffort =
+    input.assessment === null ? requestedEffort : pinRequestedEffort(requestedEffort);
+  const qualityFloor = input.assessment === null ? 0 : minimumTaskQuality(input.assessment);
   const ranked: RankedCandidate[] = [];
 
   for (const deployment of input.deployments) {
-    const denial = denyDeployment(input, deployment, requestedEffort, qualityFloor);
+    const candidateEffort =
+      input.assessment === null
+        ? (input.pinRequestedEffort ?? lowestSupportedEffort(deployment))
+        : requestedEffort;
+    const denial = denyDeployment(input, deployment, candidateEffort, qualityFloor);
     if (denial !== undefined) {
       denials.push(denial);
       continue;
     }
-    const appliedEffort = mapAppliedEffort(requestedEffort, deployment);
+    const appliedEffort = mapAppliedEffort(candidateEffort, deployment);
     if (appliedEffort === undefined) {
       denials.push({
         deploymentId: deployment.id,
@@ -182,7 +195,7 @@ export function selectRoute(input: SelectRouteInput): SelectRouteResult {
       });
       continue;
     }
-    const estimate = estimateCandidate(input, deployment, requestedEffort);
+    const estimate = estimateCandidate(input, deployment, candidateEffort);
     if (input.policy.maxEstimatedUsd !== null) {
       if (estimate.pricing === "unknown" || estimate.coldCacheUsd === null) {
         denials.push({
@@ -201,15 +214,37 @@ export function selectRoute(input: SelectRouteInput): SelectRouteResult {
         continue;
       }
     }
+    if (input.assessment === null && input.unavailable?.has(deployment.id)) {
+      denials.push({
+        deploymentId: deployment.id,
+        code: "health",
+        detail: "deployment marked unavailable",
+      });
+      continue;
+    }
     ranked.push({
       deployment,
-      requestedEffort,
+      requestedEffort: candidateEffort,
       appliedEffort,
       ...estimate,
     });
   }
 
-  ranked.sort(compareCandidates(input.assessment.task));
+  ranked.sort(
+    input.assessment === null
+      ? (left, right) => {
+          const preferred = input.preferredLocation ?? "local";
+          const locality =
+            Number(right.deployment.location === preferred) -
+            Number(left.deployment.location === preferred);
+          return (
+            locality ||
+            right.score - left.score ||
+            left.deployment.id.localeCompare(right.deployment.id)
+          );
+        }
+      : compareCandidates(input.assessment.task),
+  );
 
   if (ranked.length === 0) {
     return {
@@ -249,8 +284,15 @@ function denyDeployment(
       detail: "unverified placeholder catalogue entry",
     };
   }
-  if (input.unavailable?.has(deployment.id)) {
+  if (input.assessment !== null && input.unavailable?.has(deployment.id)) {
     return { deploymentId: deployment.id, code: "health", detail: "deployment marked unavailable" };
+  }
+  if (input.missingCredentials?.has(deployment.id)) {
+    return {
+      deploymentId: deployment.id,
+      code: "credential",
+      detail: "required credential missing",
+    };
   }
   if (input.tools && !deployment.capabilities.tools) {
     return { deploymentId: deployment.id, code: "capability", detail: "tools required" };
@@ -279,7 +321,7 @@ function denyDeployment(
       detail: "input plus generation allowance exceeds context limit",
     };
   }
-  const taskQuality = deployment.quality[input.assessment.task];
+  const taskQuality = input.assessment === null ? 0 : deployment.quality[input.assessment.task];
   if (taskQuality < qualityFloor) {
     return {
       deploymentId: deployment.id,
@@ -289,6 +331,7 @@ function denyDeployment(
   }
   if (
     deployment.location === "local" &&
+    input.assessment !== null &&
     input.assessment.localSufficiency < LOCAL_SUFFICIENCY_THRESHOLD
   ) {
     return {
@@ -315,10 +358,10 @@ function estimateCandidate(
   RankedCandidate,
   "score" | "estimatedUsd" | "coldCacheUsd" | "estimatedMs" | "estimatedOutputTokens" | "pricing"
 > {
-  const visible = Math.min(
-    VISIBLE_OUTPUT_TOKENS[input.assessment.expectedLength],
-    input.generationAllowance,
-  );
+  const visible =
+    input.assessment === null
+      ? input.generationAllowance
+      : Math.min(VISIBLE_OUTPUT_TOKENS[input.assessment.expectedLength], input.generationAllowance);
   const reasoningEstimate = Math.min(
     deployment.reasoningTokenEstimates[requestedEffort === "none" ? "none" : requestedEffort],
     Math.max(0, input.generationAllowance - visible),
@@ -346,11 +389,13 @@ function estimateCandidate(
   const estimatedMs =
     deployment.latency.initialMs + (estimatedOutputTokens / tokensPerSecond) * 1000;
   const bias =
-    input.qualityOverride === "highest" ? qualityOnlyBias(input.policy) : input.policy.bias;
-  const quality = deployment.quality[input.assessment.task];
+    input.assessment !== null && input.qualityOverride === "highest"
+      ? qualityOnlyBias(input.policy)
+      : input.policy.bias;
+  const quality = input.assessment === null ? 0 : deployment.quality[input.assessment.task];
   const costTerm = estimatedUsd === null ? 1 : estimatedUsd / (estimatedUsd + COST_ANCHOR_USD);
   const localityTerm =
-    input.qualityOverride === "highest"
+    input.assessment !== null && input.qualityOverride === "highest"
       ? 0
       : (deployment.location === "local"
           ? input.policy.localityBias

@@ -84,7 +84,12 @@ export type ClassifierHealth = {
   ready: boolean;
   backend: string;
   local: boolean;
-  evidence?: "runtime-probe" | "configuration-only" | "unavailable" | "unqualified";
+  evidence?:
+    | "runtime-probe"
+    | "configuration-only"
+    | "unavailable"
+    | "unqualified"
+    | "deterministic-rules";
 };
 
 export interface ClassifierLayerOptions {

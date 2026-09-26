@@ -4,7 +4,7 @@ A self-hosted, key-controlled inference gateway for coding agents and internal c
 
 ## What it does
 
-- Assesses tasks using explicitly selected local **Laya** or **TypeSafe Jev**, then applies deterministic capability, context, quality, budget and locality policy.
+- Routes with explicit classifier-free **Rules** mode, or qualified local **Laya** / **TypeSafe Jev** assessment, using the same deterministic capability, context, budget and locality policy.
 - Routes chat to **llama.cpp or Halogen** and **OpenRouter `z-ai/glm-5.3-flash`**. Both local runtimes have supported adapters and selectable Compose configurations.
 - Keeps task sessions pinned through tool turns and holds capacity/session ownership until streaming finishes or is cancelled.
 - Provides per-key priority and locality/cost/quality/latency controls, bounded non-preemptive queues, API-key rotation/revocation and optional admin HTTP Basic authentication.
@@ -30,7 +30,7 @@ node scripts/setup.mjs --runtime halogen   # or llamacpp / llamacpp-native
 docker compose up -d --build
 ```
 
-Choose `halogen`, containerized `llamacpp`, or the optimized native `llamacpp-native` path. CPU Laya and the gateway remain separate from the generator. Optional `npu` and `webui` profiles extend the hub. See [runtime selection and safe switching](docs/runtime-selection.md), [setup](docs/setup.md), and [AI hub services](docs/ai-hub.md). Full-size GPU profiles are alternatives; do not load both simultaneously.
+Choose `halogen`, containerized `llamacpp`, or the optimized native `llamacpp-native` path. The gateway defaults to Rules routing without a classifier. CPU Laya is an explicit `laya` Compose profile, separate from the generator; select `CLASSIFIER_MODE=laya` and qualifying evidence when opting in. Optional `npu` and `webui` profiles extend the hub. See [runtime selection and safe switching](docs/runtime-selection.md), [setup](docs/setup.md), and [AI hub services](docs/ai-hub.md). Full-size GPU profiles are alternatives; do not load both simultaneously.
 
 For an explicitly cloud-only fresh installation, use `--runtime cloud` and configure `OPENROUTER_API_KEY`. Ranking priors are not measured success probabilities. No paid fallback or paid readiness probe is performed.
 
@@ -66,9 +66,9 @@ Tests cover public HTTP contracts, real SQLite migrations/admission/analytics, c
 
 The AMD machine has not arrived. Live gfx1151 generation, physical NPU execution, SSD-table performance and hardware concurrency remain on-box acceptance gates. Public OpenRouter model metadata was inspected; no paid inference benchmark was run.
 
-**Classifier quality gate:** real CPU Laya smoke tests exposed misclassification and low local-sufficiency judgments for simple tasks with deployment metadata. Policy remains fail-closed; it was not weakened to hide this. [Diagnostic findings and the production decision](docs/research/laya-routing-validation.md) are recorded separately. Use an explicitly selected/authorized Jev backend or calibrate Laya before trusting production routing.
+**Classifier quality gate:** real CPU Laya smoke tests exposed misclassification and low local-sufficiency judgments for simple tasks with deployment metadata. The assessment gate remains fail-closed; it was not weakened to hide this. [Diagnostic findings](docs/research/laya-routing-validation.md) are recorded separately. Use explicit [Rules mode](docs/routing-policy.md#rules-mode) without semantic assessment for now, or qualify Laya/Jev before choosing an assessed mode.
 
-**Classifier qualification gate:** Assessment use now requires a qualification record with measured per-question Calibration and sourced token rates for the exact backend revision and question schema ([operations](docs/operations.md#classifier-qualification)). Missing or unqualified evidence fails closed — readiness reports `unqualified` and chat returns `503 classifier_unqualified` — so uncalibrated backends cannot silently route production work. The [assumptions audit](docs/research/classifier-economics-and-gates.md) records what is measured versus assumed.
+**Classifier qualification gate:** Laya/Jev assessment use requires a qualification record with measured per-question Calibration and sourced token rates for the exact backend revision and question schema ([operations](docs/operations.md#classifier-qualification)). Missing or unqualified evidence keeps those modes unready and chat returns `503 classifier_unqualified`. Rules mode constructs no classifier and ignores qualification records; readiness requires persistence and a ready chat deployment. The [assumptions audit](docs/research/classifier-economics-and-gates.md) remains background for assessed modes.
 
 ## Read next
 

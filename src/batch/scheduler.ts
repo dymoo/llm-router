@@ -928,7 +928,12 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
         RETRY_CODES.has(code) &&
         latest !== undefined &&
         dispatchable(latest.status);
-      const spillable = LOCAL_SPILL_CODES.has(code) && deps.spill !== undefined;
+      // Local overload is not hard ineligibility: only an opted-in key may
+      // accelerate remote batch planning before spillAt. Planning still enforces
+      // the batch catalogue, current key policy, credentials and spend ceiling.
+      const overloadSpill =
+        code === "LocalOverloaded" && activeAdmission.policy.overloadAction === "failover";
+      const spillable = deps.spill !== undefined && (LOCAL_SPILL_CODES.has(code) || overloadSpill);
       if (spillable) {
         trackRemote(() => runRemoteGroup(job, [item], new Map([[item.id, activeAdmission]])));
         return;

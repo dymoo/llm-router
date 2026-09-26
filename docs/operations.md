@@ -6,7 +6,7 @@ Run **one gateway process** with local SQLite. Session pins, model permits and p
 
 The gateway's resource registry is process-owned so Next instrumentation and route bundles share admission leases, capacity pools, session routing, health state and disposal. A production HTTP regression holds a generation open while SIGTERM arrives, rejects new work, and checks that the admitted response and SQLite finalization complete before exit. Restart the process after server-code or catalogue changes rather than hot-swapping live ownership.
 
-Compose always provides `gateway` and CPU `laya`; choose either `llamacpp` or `halogen` as the GPU profile, or run optimized native llama.cpp through `host.docker.internal`. Optional profiles are `npu` (FastFlowLM) and `webui`. Only gateway and WebUI publish ports, both loopback by default. See [runtime selection](runtime-selection.md) before changing engines.
+Compose defaults to `gateway` with Rules routing. CPU `laya` is behind the opt-in `laya` profile and is not built or started for Rules/Jev. Choose either `llamacpp` or `halogen` as the GPU profile, or run optimized native llama.cpp through `host.docker.internal`. Optional profiles also include `npu` (FastFlowLM) and `webui`. Only gateway and WebUI publish ports, both loopback by default. See [runtime selection](runtime-selection.md) before changing engines.
 
 ## Storage and privacy
 
@@ -63,7 +63,7 @@ Infra contract for `dymoo/dylans-infra`:
 ## Health
 
 - `/health/live`: 200 while the HTTP process is alive. No inference, classifier or provider call.
-- `/health/ready`: cached readiness; 200 only when persistence, the selected classifier, and at least one non-optional chat deployment are ready. Otherwise 503.
+- `/health/ready`: cached readiness; 200 only when persistence, the selected routing mode, and at least one non-optional chat deployment are ready. Otherwise 503. Rules itself is always ready; Laya/Jev require classifier readiness and qualification.
 - `/api/health`: the same detailed snapshot with HTTP 200 for the console, including degraded optional deployments.
 
 Probe rounds are coalesced and cached for five seconds. Runtime HTTP probes have bounded deadlines. The Classifier module owns backend readiness: Laya readiness and uncached classification both require HTTP `200`, `ok: true`, `ready: true`, and a model revision matching the configured pin. The readiness probe has a separate two-second budget that includes reading the response body. Readiness probes do not populate the Assessment exact cache.
@@ -102,6 +102,14 @@ panel stays empty until an explicit provider-reported USD amount is available.
 Only a validated UUID `key_id` labels per-key request, token and cost series; `key_info` exposes the active key name (truncated to 64 characters) alongside its policy limits. Never use API key prefixes, digests, secrets, prompts, completions, session/request/correlation/job/item IDs or free-text details as labels or metric values. Unknown enum/catalogue labels collapse to `other`, and unrouted requests use deployment and location `none`. Restrict access to this port because active key names and UUIDs are operational metadata.
 
 The Grafana dashboard JSON lives at `deploy/grafana/llm-router.json` and uses the `prometheus` datasource UID.
+
+## Routing mode configuration
+
+Set `CLASSIFIER_MODE=rules` to route without a classifier (the example configuration now selects it). Neither `LAYA_URL`, `TYPESAFE_API_KEY` nor `CLASSIFIER_QUALIFICATION` is required or consulted for routing in Rules mode. A mounted qualification file may remain in Compose, but the gateway does not read it. Existing installations retain their explicitly configured mode until the operator changes it and restarts the gateway; no live configuration is changed by this release.
+
+Both health endpoints preserve the classifier-shaped section as `{backend:"rules", ready:true, local:true, evidence:"deterministic-rules"}`. Here `local` describes in-process routing, not the selected generator. The console displays **Routing mode Rules**. Readiness still requires persistence and a ready non-optional chat deployment; optional auxiliaries cannot make chat ready. Metrics use bounded backend `rules` and decision `deterministic-rules`, emit no classifier-call metrics, and do not claim classifier qualification for Rules.
+
+Rules applies the lowest supported deployment effort, no semantic difficulty estimate. Review Key locality/overload policies before enabling: down locals immediately report `local_overloaded` for report Keys, while failover Keys may use eligible paid cloud before dispatch. Oversize/missing-capability requests can use cloud even for report Keys. See [routing-policy.md](routing-policy.md#rules-mode) for the full distinction and [clients.md](clients.md) for wire behavior. Planned Gufo downtime needs no automatic classifier or model replay.
 
 ## Classifier qualification
 

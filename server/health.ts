@@ -31,6 +31,9 @@ const adapters = adaptersFor(fetch);
 
 async function classifier(): Promise<ClassifierHealth> {
   const env = getEnv();
+  if (env.CLASSIFIER_MODE === "rules") {
+    return { backend: "rules", ready: true, local: true, evidence: "deterministic-rules" };
+  }
   return Effect.runPromise(
     RouterClassifier.readiness({
       mode: env.CLASSIFIER_MODE,

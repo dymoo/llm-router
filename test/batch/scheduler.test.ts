@@ -3,8 +3,10 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, after, type TestContext } from "node:test";
+import { Effect, ManagedRuntime } from "effect";
 import type { Deployment } from "../../src/domain.ts";
-import { frontier } from "../router/fixtures.ts";
+import { frontier, localQwen } from "../router/fixtures.ts";
+import { ModelRouter, modelRouterLayer } from "../../src/router/model-router.ts";
 import { openControlPlaneSqlite, type SqliteDatabase } from "../../src/db/sqlite.ts";
 import { createBatchLedger, type BatchLedger } from "../../src/batch/ledger.ts";
 import {
@@ -80,12 +82,12 @@ function tempResults(): string {
   return directory;
 }
 
-function insertKey(opened: SqliteDatabase["Service"]): void {
+function insertKey(opened: SqliteDatabase["Service"], keyPolicy: KeyPolicy = policy): void {
   opened.sqlite
     .prepare(
       "INSERT INTO api_keys (id, prefix, digest, name, policy_json, created_at, expires_at, revoked_at, last_used_at, version) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 1)",
     )
-    .run("key-1", "jrv_test", "digest-test", "test", JSON.stringify(policy), NOW);
+    .run("key-1", "jrv_test", "digest-test", "test", JSON.stringify(keyPolicy), NOW);
 }
 
 class TestKeys implements BatchKeysPort {
@@ -100,7 +102,10 @@ class TestKeys implements BatchKeysPort {
   concurrentLimit = policy.maxConcurrent;
   private sequence = 0;
 
-  constructor(private readonly opened: SqliteDatabase["Service"]) {}
+  constructor(
+    private readonly opened: SqliteDatabase["Service"],
+    private readonly keyPolicy: KeyPolicy = policy,
+  ) {}
 
   async admitByKeyId(keyId: string): Promise<Admission> {
     if (this.enforceConcurrentLimit) {
@@ -118,7 +123,7 @@ class TestKeys implements BatchKeysPort {
       keyId,
       prefix: "jrv_test",
       name: "test",
-      policy,
+      policy: this.keyPolicy,
       version: 1,
       leaseExpiresAt: NOW + 10 * 60_000,
       admittedAt: NOW,
@@ -213,6 +218,7 @@ class TestInference implements BatchInferencePort {
       work: BatchRoutedWork,
     ) => BatchDispatchResult | Promise<BatchDispatchResult> = (work) =>
       localCompletion(work.requestId),
+    private readonly planner?: BatchInferencePort["prepareSpill"],
   ) {}
 
   interactiveIdle(): boolean {
@@ -224,12 +230,17 @@ class TestInference implements BatchInferencePort {
     return Promise.resolve().then(() => this.completion(work));
   }
 
-  prepareSpill(work: BatchRoutedWork): Promise<{
+  prepareSpill(
+    work: BatchRoutedWork,
+    catalogue: readonly Deployment[],
+    signal?: AbortSignal,
+  ): Promise<{
     deployment: Deployment;
     body: Record<string, unknown>;
     metadata: Omit<FinalizeOutcome, "status">;
   }> {
     this.spillPlans.push(work);
+    if (this.planner !== undefined) return this.planner(work, catalogue, signal);
     return Promise.resolve({
       deployment: batchDeployment,
       body: { model: batchDeployment.modelId, messages: work.messages },
@@ -361,12 +372,15 @@ function harness(
     itemCount?: number;
     batchCatalogue?: readonly Deployment[];
     completion?: (work: BatchRoutedWork) => BatchDispatchResult | Promise<BatchDispatchResult>;
+    prepareSpill?: BatchInferencePort["prepareSpill"];
+    keyPolicy?: KeyPolicy;
+    body?: (id: string) => Readonly<Record<string, unknown>>;
     intervalMs?: number;
     onTickError?: () => void;
   } = {},
 ): Harness {
   const opened = openControlPlaneSqlite(":memory:");
-  insertKey(opened);
+  insertKey(opened, options.keyPolicy);
   const now = { value: NOW };
   const ledger = createBatchLedger(opened.db, { now: () => now.value });
   const created = ledger.create({
@@ -394,10 +408,13 @@ function harness(
   results.saveInputs(
     created.job.id,
     created.job.keyId,
-    created.items.map((item) => ({ itemId: item.id, body: requestBody(item.customId) })),
+    created.items.map((item) => ({
+      itemId: item.id,
+      body: (options.body ?? requestBody)(item.customId),
+    })),
   );
-  const keys = new TestKeys(opened);
-  const inference = new TestInference(options.completion);
+  const keys = new TestKeys(opened, options.keyPolicy);
+  const inference = new TestInference(options.completion, options.prepareSpill);
   const spill = new TestSpill(ledger);
   const scheduler = createBatchScheduler({
     ledger,
@@ -489,6 +506,99 @@ test("claims local work only while interactive runtime is idle", { timeout: 5_00
   assert.equal(h.ledger.items(h.jobId)[0]?.status, "completed");
   assert.equal(h.inference.localCalls.length, 1);
 });
+
+test(
+  "rules Gufo downtime spills authorized batch items only, with one accounting finalization",
+  { timeout: 5_000 },
+  async (t) => {
+    const local: Deployment = { ...localQwen, transport: "gufo", credentialEnvVar: "GUFO_KEY" };
+    const scenarios: Array<{
+      name: string;
+      policy?: Partial<KeyPolicy>;
+      cloud?: Partial<Deployment>;
+      withSpill?: boolean;
+      expected: string;
+    }> = [
+      { name: "authorized", expected: "completed" },
+      { name: "report", policy: { overloadAction: "report" }, expected: "LocalOverloaded" },
+      { name: "no batch spill port", withSpill: false, expected: "LocalOverloaded" },
+      { name: "allowlist", policy: { allowedModels: [local.id] }, expected: "no_eligible_model" },
+      { name: "budget", policy: { maxEstimatedUsd: 0 }, expected: "no_eligible_model" },
+      {
+        name: "capability",
+        cloud: { capabilities: { tools: false, json: true, vision: false } },
+        expected: "no_eligible_model",
+      },
+      {
+        name: "credentials",
+        cloud: { credentialEnvVar: "MISSING_KEY" },
+        expected: "no_eligible_model",
+      },
+    ];
+    for (const scenario of scenarios) {
+      const runtime = ManagedRuntime.make(
+        modelRouterLayer({
+          mode: "rules",
+          catalogue: [local],
+          catalogueVersion: "batch-down",
+          credentials: (name) => (name === "GUFO_KEY" ? "fixture-key" : undefined),
+          fetch: async (_url, init) => {
+            assert.equal(init?.method, "GET", "down Gufo must never receive generation");
+            return new Response(null, { status: 503 });
+          },
+        }),
+      );
+      t.after(() => runtime.dispose());
+      const h = harness(t, {
+        keyPolicy: { ...policy, overloadAction: "failover", ...scenario.policy },
+        withSpill: scenario.withSpill,
+        batchCatalogue: [{ ...batchDeployment, ...scenario.cloud }],
+        body: (id) => ({
+          ...requestBody(id),
+          tools: [{ type: "function", function: { name: "read", parameters: { type: "object" } } }],
+        }),
+        completion: async (work) => {
+          const result = await runtime.runPromise(
+            ModelRouter.use((router) => router.completeBatch(work, work.requestedModel)),
+          );
+          return {
+            body: result.body,
+            deploymentId: result.headers.deploymentId,
+            metadata: () => result.accounting,
+          };
+        },
+        prepareSpill: (work, catalogue) =>
+          runtime.runPromise(
+            ModelRouter.use((router) =>
+              router.planBatchSpill(work, catalogue, work.requestedModel),
+            ),
+          ),
+      });
+      await settle(h);
+      await waitFor(
+        () => ["completed", "failed"].includes(h.ledger.items(h.jobId)[0]?.status ?? ""),
+        scenario.name + " did not settle",
+      );
+      if (scenario.expected === "completed") {
+        assert.equal(h.ledger.items(h.jobId)[0]?.status, "completed", scenario.name);
+        assert.equal(h.results.rows(h.jobId)[0]?.response?.status_code, 200);
+        assert.equal(h.spill.posts.length, 1);
+        assert.equal(h.keys.deferred.length, 1);
+      } else {
+        assert.equal(resultErrorCode(h.results.rows(h.jobId)[0]), scenario.expected, scenario.name);
+        assert.equal(h.spill.posts.length, 0, scenario.name);
+      }
+      await settle(h);
+      assert.equal(h.keys.admitted.length, 1, scenario.name);
+      assert.equal(h.keys.finalized.length, 1, scenario.name);
+      assert.equal(
+        h.keys.finalized[0]?.outcome.status,
+        scenario.expected === "completed" ? "success" : "error",
+        scenario.name,
+      );
+    }
+  },
+);
 
 test("remote preparation waits until spillAt", { timeout: 5_000 }, async (t) => {
   const h = harness(t, { spillAt: NOW + 100 });

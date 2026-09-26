@@ -31,7 +31,7 @@ const loadEnv = () =>
       AUXILIARY_CATALOG: z.string().min(1).optional(),
       BATCH_CATALOG: z.string().min(1).optional(),
       BATCH_RESULTS_DIR: z.string().min(1).optional(),
-      CLASSIFIER_MODE: z.enum(["laya", "jev"]),
+      CLASSIFIER_MODE: z.enum(["rules", "laya", "jev"]),
       CLASSIFIER_QUALIFICATION: z.string().min(1).optional(),
       LAYA_URL: z.string().url().optional(),
       LAYA_MODEL_REVISION: z.string().min(1).default("1c5edc17a7acd8701df6fc341c0d179f1c62c982"),
@@ -73,7 +73,7 @@ export interface Env {
   AUXILIARY_CATALOG?: string;
   BATCH_CATALOG?: string;
   BATCH_RESULTS_DIR?: string;
-  CLASSIFIER_MODE: "laya" | "jev";
+  CLASSIFIER_MODE: "rules" | "laya" | "jev";
   CLASSIFIER_QUALIFICATION?: string;
   LAYA_URL?: string;
   LAYA_MODEL_REVISION: string;

@@ -14,7 +14,7 @@ import type {
 } from "../src/http/contracts.ts";
 import type { BatchInferencePort } from "../src/batch/scheduler.ts";
 import { ModelRouter, modelRouterLayer, type RouterWork } from "../src/router/index.ts";
-import type { RoutedCompletion, RoutedStream } from "../src/router/model-router.ts";
+import type { RoutedCompletion, RoutedStream, RouterOptions } from "../src/router/model-router.ts";
 import { createOpenRouterPinVerifier } from "../src/router/adapters/openrouter.ts";
 import { disposeControlPlane, keys, recheckLease } from "./control.ts";
 import { loadClassifierQualifications } from "./qualification.ts";
@@ -49,15 +49,7 @@ function makeInferenceRuntime(): InferenceRuntime {
   const loaded = loadCatalogue(env.MODEL_CATALOG);
   registerDeployments(loaded.catalogue.map((item) => item.id));
   for (const item of loaded.catalogue) processState.metricTransports.set(item.id, item.transport);
-  const classifierLayer = RouterClassifier.layer({
-    mode: env.CLASSIFIER_MODE,
-    layaUrl: env.LAYA_URL,
-    layaModelRevision: env.LAYA_MODEL_REVISION,
-    jevModel: env.TYPESAFE_MODEL,
-    jevApiKey: env.TYPESAFE_API_KEY,
-    jevBaseUrl: env.TYPESAFE_BASE_URL,
-    qualifications: loadClassifierQualifications(),
-  });
+
   const credentials = getProviderCredentials(
     loaded.catalogue.flatMap((deployment) =>
       deployment.credentialEnvVar === null ? [] : [deployment.credentialEnvVar],
@@ -70,76 +62,91 @@ function makeInferenceRuntime(): InferenceRuntime {
     stopping: () => processState.stopping,
     onVerified: observeOpenRouterCompleted,
   });
-  const routerLayer = Layer.unwrap(
-    Effect.map(RouterClassifier, (classifier) =>
-      modelRouterLayer({
-        catalogue: loaded.catalogue,
-        catalogueVersion: loaded.catalogueVersion,
-        classify: (input) => classifier.classify(input),
-        onOpenRouterCompleted: verifyOpenRouterPin,
-        onCapacityPool: (pool) => {
-          processState.routerCapacity = pool;
-        },
-        onBeforeDispatch: (work, reservation) => {
-          const deployment = loaded.catalogue.find((item) => item.id === reservation.deploymentId)!;
-          observed.set(work.requestId, {
-            ...observed.get(work.requestId),
-            deploymentId: deployment.id,
-            location: deployment.location,
-            transport: deployment.transport,
-          });
-          return recheckLease(work.requestId).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                queueHooks
-                  .get(work.requestId)
-                  ?.onDispatched(observed.get(work.requestId)?.queueWaitMs ?? 0);
-              }),
-            ),
-          );
-        },
-        onClassified: (work, classified) => {
-          observed.set(work.requestId, {
-            classifierBackend: classified.backend,
-            modelRevision: classified.modelRevision,
-            source: classified.source,
-            classifierInputTokens:
-              classified.reuse === "classified" ? classified.usage.input_tokens : 0,
-            classifierElapsedMs: classified.elapsedMs,
-            reuse: classified.reuse,
-          });
-        },
-        onDecision: (decision, work) => {
-          observed.set(work.requestId, {
-            ...observed.get(work.requestId),
-            boundary: work.routing.boundary,
-            decisionReason: decision.reason,
-            selectionReasonCode: decision.selectionReason.code,
-            selectionReasonDetail: decision.selectionReason.detail,
-            exclusionJson: JSON.stringify(decision.exclusions),
-            taskKind: decision.assessment.task,
-            difficulty: decision.assessment.difficulty,
-            requestedEffort: decision.assessment.requestedEffort,
-            queueWaitMs: decision.queue.waitedMs,
-            saturation: decision.saturation.verified && decision.saturation.saturated,
-            decisionTraceJson: JSON.stringify(decision),
-          });
-        },
-        onQueueOutcome: observeQueueEvent,
-        onQueue: (event) => {
-          observeQueueEvent(event.state, event.priority);
-          const hooks = queueHooks.get(event.requestId);
-          if (hooks === undefined) {
-            return;
-          }
-          if (event.state === "queued") {
-            hooks.onQueued(event.waitedMs);
-            return;
-          }
-        },
-      }),
-    ),
-  ).pipe(Layer.provide(classifierLayer));
+  const routerOptions: Omit<RouterOptions, "mode" | "classify"> = {
+    catalogue: loaded.catalogue,
+    catalogueVersion: loaded.catalogueVersion,
+    onOpenRouterCompleted: verifyOpenRouterPin,
+    onCapacityPool: (pool) => {
+      processState.routerCapacity = pool;
+    },
+    onBeforeDispatch: (work, reservation) => {
+      const deployment = loaded.catalogue.find((item) => item.id === reservation.deploymentId)!;
+      observed.set(work.requestId, {
+        ...observed.get(work.requestId),
+        deploymentId: deployment.id,
+        location: deployment.location,
+        transport: deployment.transport,
+      });
+      return recheckLease(work.requestId).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            queueHooks
+              .get(work.requestId)
+              ?.onDispatched(observed.get(work.requestId)?.queueWaitMs ?? 0);
+          }),
+        ),
+      );
+    },
+    onClassified: (work, classified) => {
+      observed.set(work.requestId, {
+        classifierBackend: classified.backend,
+        modelRevision: classified.modelRevision,
+        source: classified.source,
+        classifierInputTokens:
+          classified.reuse === "classified" ? classified.usage.input_tokens : 0,
+        classifierElapsedMs: classified.elapsedMs,
+        reuse: classified.reuse,
+      });
+    },
+    onDecision: (decision, work) => {
+      observed.set(work.requestId, {
+        ...observed.get(work.requestId),
+        boundary: work.routing.boundary,
+        decisionReason: decision.reason,
+        selectionReasonCode: decision.selectionReason.code,
+        selectionReasonDetail: decision.selectionReason.detail,
+        exclusionJson: JSON.stringify(decision.exclusions),
+        taskKind: decision.assessment.task,
+        difficulty: decision.assessment.difficulty,
+        requestedEffort: decision.assessment.requestedEffort,
+        queueWaitMs: decision.queue.waitedMs,
+        saturation: decision.saturation.verified && decision.saturation.saturated,
+        decisionTraceJson: JSON.stringify(decision),
+      });
+    },
+    onQueueOutcome: observeQueueEvent,
+    onQueue: (event) => {
+      observeQueueEvent(event.state, event.priority);
+      const hooks = queueHooks.get(event.requestId);
+      if (hooks === undefined) {
+        return;
+      }
+      if (event.state === "queued") {
+        hooks.onQueued(event.waitedMs);
+        return;
+      }
+    },
+  };
+  const routerLayer =
+    env.CLASSIFIER_MODE === "rules"
+      ? modelRouterLayer({ ...routerOptions, mode: "rules" })
+      : Layer.unwrap(
+          Effect.map(RouterClassifier, (classifier) =>
+            modelRouterLayer({ ...routerOptions, classify: (input) => classifier.classify(input) }),
+          ),
+        ).pipe(
+          Layer.provide(
+            RouterClassifier.layer({
+              mode: env.CLASSIFIER_MODE,
+              layaUrl: env.LAYA_URL,
+              layaModelRevision: env.LAYA_MODEL_REVISION,
+              jevModel: env.TYPESAFE_MODEL,
+              jevApiKey: env.TYPESAFE_API_KEY,
+              jevBaseUrl: env.TYPESAFE_BASE_URL,
+              qualifications: loadClassifierQualifications(),
+            }),
+          ),
+        );
   return {
     runtime: ManagedRuntime.make(routerLayer),
     catalogue: loaded.catalogue,
