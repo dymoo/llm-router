@@ -1,7 +1,13 @@
 import { getEnv } from "./env.ts";
 
 export async function register() {
-  if (process.env.NEXT_RUNTIME === "nodejs") getEnv();
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const config = getEnv();
+    if (config.METRICS_PORT !== undefined) {
+      const { startMetricsListener } = await import("./server/metrics-listener.ts");
+      await startMetricsListener(config.METRICS_PORT);
+    }
+  }
   if (
     process.env.NEXT_RUNTIME === "nodejs" &&
     process.env.NODE_ENV === "production" &&

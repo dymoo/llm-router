@@ -40,6 +40,7 @@ const loadEnv = () =>
       TYPESAFE_BASE_URL: z.string().url().default("https://api.typesafe.ai"),
       OPENROUTER_API_KEY: z.string().min(1).optional(),
       ADMIN_BASIC_AUTH: adminBasicAuth,
+      METRICS_PORT: z.coerce.number().int().min(1).max(65535).optional(),
     },
     client: {},
     runtimeEnv: {
@@ -59,6 +60,7 @@ const loadEnv = () =>
       TYPESAFE_BASE_URL: process.env.TYPESAFE_BASE_URL,
       OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
       ADMIN_BASIC_AUTH: process.env.ADMIN_BASIC_AUTH,
+      METRICS_PORT: process.env.METRICS_PORT,
     },
     emptyStringAsUndefined: true,
   });
@@ -80,6 +82,7 @@ export interface Env {
   TYPESAFE_BASE_URL: string;
   OPENROUTER_API_KEY?: string;
   ADMIN_BASIC_AUTH?: { username: string; password: string };
+  METRICS_PORT?: number;
 }
 
 let loaded: Env | undefined;
@@ -87,7 +90,13 @@ let loaded: Env | undefined;
 /** Parse and cache env at first runtime use. Importing this module does not read secrets. */
 export const getEnv = (): Env => {
   if (loaded === undefined) {
-    loaded = loadEnv();
+    const parsed = loadEnv();
+    if (
+      parsed.METRICS_PORT !== undefined &&
+      parsed.METRICS_PORT === Number(process.env.PORT ?? 3000)
+    )
+      throw new Error("METRICS_PORT must differ from the application PORT");
+    loaded = parsed;
   }
   return loaded;
 };

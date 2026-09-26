@@ -40,6 +40,7 @@ export async function handleChatCompletions(
   let correlationId = "";
   let admission: Admission | undefined;
   let claimed = false;
+  let admissionAttempted = false;
   let finalization: Promise<void> | undefined;
   const cancellation = new AbortController();
   const signal = AbortSignal.any([
@@ -87,6 +88,7 @@ export async function handleChatCompletions(
     const capabilities = requestCapabilities(decoded);
     const inputTokens = estimateInputTokens(decoded);
     signal.throwIfAborted();
+    admissionAttempted = true;
     admission = await deps.keys.admit(rawKey);
     deps.status.claim({
       id: admission.requestId,
@@ -147,6 +149,12 @@ export async function handleChatCompletions(
       }),
     );
   } catch (error) {
+    if (!admissionAttempted) {
+      const code = toHttpFailure(error).code;
+      deps.onAdmissionRejected?.(
+        code === "unauthorized" ? "unauthorized" : code === "invalid" ? "invalid" : "other",
+      );
+    }
     try {
       await finalize(
         {
@@ -236,6 +244,7 @@ function streamCompletion(
       await writes;
       await finalize({ ...result.metadata(), status: "success" }, "completed");
       await writer.close();
+      deps.onStream?.("completed");
     } catch (error) {
       await reader?.cancel(error).catch(() => undefined);
       try {
@@ -251,6 +260,9 @@ function streamCompletion(
         // No prompt, credential, or provider response is logged on a persistence failure.
         console.error("Request accounting could not be persisted", admission.requestId);
       }
+      deps.onStream?.(
+        signal.aborted ? "cancelled" : result === undefined ? "terminal_error" : "aborted",
+      );
       const publicFailure = toHttpFailure(error);
       // The 200 SSE response is committed before routing. Until a provider stream is established,
       // close with a public terminal event; after that, abort so a truncated or unaccounted stream

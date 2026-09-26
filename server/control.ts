@@ -10,12 +10,19 @@ import type { FinalizeOutcome, ListedKey } from "../src/keys/types.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
 import { loadClassifierQualifications } from "./qualification.ts";
 import { processState } from "./state.ts";
+import {
+  observeAdmission,
+  observeAdmissionFailure,
+  observeFinalized,
+  observeInFlight,
+} from "./metrics.ts";
 
 function makeControlRuntime() {
   const env = getEnv();
-  const repository = keyRepositoryLayer({ pepper: env.API_KEY_PEPPER }).pipe(
-    Layer.provide(sqliteDatabaseLayer(env.SQLITE_PATH)),
-  );
+  const repository = keyRepositoryLayer({
+    pepper: env.API_KEY_PEPPER,
+    onFinalized: observeFinalized,
+  }).pipe(Layer.provide(sqliteDatabaseLayer(env.SQLITE_PATH)));
   return ManagedRuntime.make(apiKeysLayer.pipe(Layer.provideMerge(repository)));
 }
 
@@ -41,7 +48,8 @@ const leases = processState.leases;
 const batchItemLeases = new Map<string, string>();
 
 function forgetBatchRequest(requestId: string): void {
-  leases.delete(requestId);
+  if (leases.delete(requestId))
+    observeInFlight(processState.batchLeases.has(requestId) ? "batch" : "interactive", -1);
   processState.batchLeases.delete(requestId);
   for (const [itemId, linkedRequestId] of batchItemLeases) {
     if (linkedRequestId === requestId) batchItemLeases.delete(itemId);
@@ -118,7 +126,12 @@ export const keys: KeyService = {
     try {
       const admission = await run(ApiKeys.use((api) => api.admit(rawKey)));
       leases.set(admission.requestId, admission);
+      observeAdmission("admitted");
+      observeInFlight("interactive", 1);
       return admission;
+    } catch (error) {
+      observeAdmissionFailure(error);
+      throw error;
     } finally {
       processState.admissionsStarting--;
     }
@@ -132,7 +145,7 @@ export const keys: KeyService = {
     try {
       await run(ApiKeys.use((api) => api.finalize(admission, outcome)));
     } finally {
-      leases.delete(admission.requestId);
+      if (leases.delete(admission.requestId)) observeInFlight("interactive", -1);
     }
   },
   authenticate: async (rawKey) => {
@@ -166,7 +179,12 @@ export const batchKeys = {
       const admission = await run(ApiKeys.use((api) => api.admitByKeyId(keyId)));
       leases.set(admission.requestId, admission);
       processState.batchLeases.add(admission.requestId);
+      observeAdmission("admitted");
+      observeInFlight("batch", 1);
       return admission;
+    } catch (error) {
+      observeAdmissionFailure(error);
+      throw error;
     } finally {
       processState.admissionsStarting--;
     }
@@ -194,7 +212,7 @@ export const batchKeys = {
     deadlineAt: number,
   ): Promise<void> => {
     await run(ApiKeys.use((api) => api.defer(admission, itemId, metadata, deadlineAt)));
-    leases.delete(admission.requestId);
+    if (leases.delete(admission.requestId)) observeInFlight("batch", -1);
     processState.batchLeases.delete(admission.requestId);
   },
   finalize: async (admission: Admission, outcome: FinalizeOutcome): Promise<void> => {

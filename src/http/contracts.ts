@@ -290,6 +290,8 @@ export type InferenceDeps = {
   status: RequestStatusStore;
   now?: () => number;
   newId?: () => string;
+  onStream?: (outcome: "completed" | "terminal_error" | "aborted" | "cancelled") => void;
+  onAdmissionRejected?: (result: "unauthorized" | "invalid" | "other") => void;
 };
 
 export type HealthDeps = {

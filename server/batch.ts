@@ -26,6 +26,7 @@ import { batchKeyService, batchKeys } from "./control.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
 import { batchInferencePort } from "./runtime.ts";
 import { processState } from "./state.ts";
+import { observeBatchDispatch, registerDeployments } from "./metrics.ts";
 
 /** BATCH_CATALOG is deliberately separate from MODEL_CATALOG. It may contain only operator-
  * approved batch deployments, and every item carries the selected id through defer/recovery. */
@@ -149,7 +150,13 @@ function makeSpillPort(
       const results: BatchSpillResult[] = [];
       for (const group of groups.values()) {
         const deployment = deploymentFor(group);
-        results.push(await adapterFor(deployment, group[0]!.jobId).spill(group, signal));
+        try {
+          results.push(await adapterFor(deployment, group[0]!.jobId).spill(group, signal));
+          observeBatchDispatch("remote", "completed");
+        } catch (error) {
+          observeBatchDispatch("remote", "failed");
+          throw error;
+        }
       }
       return {
         rows: results.flatMap((result) => result.rows),
@@ -186,6 +193,8 @@ function ensureBatch(): { scheduler: BatchScheduler; deps: BatchDeps } {
     const opened = database;
     const batchCatalogue =
       env.BATCH_CATALOG === undefined ? [] : loadBatchCatalogue(env.BATCH_CATALOG);
+    registerDeployments(batchCatalogue.map((item) => item.id));
+    for (const item of batchCatalogue) processState.metricTransports.set(item.id, item.transport);
     const results = createBatchResultStore({
       directory: env.BATCH_RESULTS_DIR ?? join(dirname(env.SQLITE_PATH), "batch-content"),
       jobInfo: (jobId) => {

@@ -62,6 +62,7 @@ export interface CapacityPool {
       readonly waitMs: number;
       readonly spill: boolean;
       readonly onQueue?: (event: QueueEvent) => void;
+      readonly onOutcome?: (event: "timeout" | "full", priority: WorkPriority) => void;
     },
   ) => Effect.Effect<Permit, CapacityBusy | QueueFull>;
 }
@@ -257,6 +258,7 @@ export function createCapacityPool(options?: { readonly queueSlots?: number }): 
             return yield* Effect.fail(busyError(ranked));
           }
           if (waiters.length >= queueSlots) {
+            options.onOutcome?.("full", priority);
             return yield* Effect.fail(
               new QueueFull({ waiting: waiters.length, limit: queueSlots }),
             );
@@ -285,7 +287,13 @@ export function createCapacityPool(options?: { readonly queueSlots?: number }): 
             restore(
               Effect.raceFirst(
                 Deferred.await(deferred),
-                Effect.andThen(Effect.sleep(`${waitMs} millis`), Effect.fail(busyError(ranked))),
+                Effect.andThen(
+                  Effect.sleep(`${waitMs} millis`),
+                  Effect.sync(() => {
+                    options.onOutcome?.("timeout", priority);
+                    return busyError(ranked);
+                  }).pipe(Effect.flatMap(Effect.fail)),
+                ),
               ),
             ),
             (exit) =>

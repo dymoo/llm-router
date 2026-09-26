@@ -66,7 +66,7 @@ jobs:
           export DOCKER_CONFIG="$RUNNER_TEMP/llm-router-docker-config"
           install -m 700 -d "$DOCKER_CONFIG"
           image="ghcr.io/dymoo/llm-router:$SOURCE_SHA"
-          docker buildx build --platform linux/amd64 --load -t "$image" .
+          docker buildx build --platform linux/amd64 --build-arg "SOURCE_COMMIT=$SOURCE_SHA" --load -t "$image" .
           scripts/audit-image.sh "$image"
           printf "%s" "$GHCR_PAT" | docker login ghcr.io -u dymoo --password-stdin
           push_output=$(docker push "$image")
@@ -118,7 +118,7 @@ jobs:
             exit 1
           fi
 
-      - name: Pin the digest and write the source commit to infra
+      - name: Pin the digest, source commit, and dashboard in infra
         id: writeback
         env:
           SOURCE_SHA: ${{ steps.target.outputs.sha }}
@@ -162,6 +162,13 @@ jobs:
               lines.insert(0, f"# source-commit: {os.environ['SOURCE_SHA']}\n")
           path.write_text(''.join(lines))
           PY
+          dashboard="$RUNNER_TEMP/infra/k8s/apps/llm-router/grafana-dashboard.json"
+          if [[ -f "$dashboard" ]]; then
+            cp deploy/grafana/llm-router.json "$dashboard"
+            git -C "$RUNNER_TEMP/infra" add k8s/apps/llm-router/grafana-dashboard.json
+          else
+            echo "::notice::Infra overlay has no grafana-dashboard.json; skipping dashboard sync"
+          fi
           git -C "$RUNNER_TEMP/infra" diff --check
           git -C "$RUNNER_TEMP/infra" config user.name 'github-actions[bot]'
           git -C "$RUNNER_TEMP/infra" config user.email '41898282+github-actions[bot]@users.noreply.github.com'

@@ -75,6 +75,12 @@ export type RepoError =
   | RateLimited
   | ConcurrentLimit
   | PepperMismatch;
+type TerminalObservation = {
+  keyId: string;
+  startedAt: number;
+  priority: string | null;
+  outcome: FinalizeOutcome;
+};
 
 type KeyPolicyUpdate = Omit<KeyPolicyType, "overloadAction"> &
   Partial<Pick<KeyPolicyType, "overloadAction">>;
@@ -246,17 +252,27 @@ function assertActive(row: typeof apiKeys.$inferSelect, now: number): void {
   }
 }
 
-function recoverStale(tx: ControlPlaneSession, now: number): void {
-  tx.update(requests)
-    .set({ status: "abandoned", finishedAt: now })
-    .where(
-      and(
-        eq(requests.status, "running"),
-        eq(requests.deferred, 0),
-        lte(requests.leaseExpiresAt, now),
-      ),
-    )
-    .run();
+function recoverStale(
+  tx: ControlPlaneSession,
+  now: number,
+  observed?: TerminalObservation[],
+): void {
+  const stale = and(
+    eq(requests.status, "running"),
+    eq(requests.deferred, 0),
+    lte(requests.leaseExpiresAt, now),
+  );
+  if (observed !== undefined) {
+    for (const lease of tx.select().from(requests).where(stale).all()) {
+      observed.push({
+        keyId: lease.keyId,
+        startedAt: lease.startedAt,
+        priority: lease.priority,
+        outcome: observedOutcome(requestOutcomeFields(lease, {}), "abandoned"),
+      });
+    }
+  }
+  tx.update(requests).set({ status: "abandoned", finishedAt: now }).where(stale).run();
 }
 
 /** The accounting columns shared by ordinary finalization and remote-deferred
@@ -305,6 +321,26 @@ function requestOutcomeFields(
     costSource: outcome.costSource ?? lease.costSource,
     decisionTraceJson: outcome.decisionTraceJson ?? lease.decisionTraceJson,
   };
+}
+
+/** Terminal observers take `FinalizeOutcome` field names; map the renamed
+ * accounting columns back so classifier source/reuse/revision are not lost. */
+function observedOutcome(
+  fields: ReturnType<typeof requestOutcomeFields>,
+  status: FinalizeOutcome["status"],
+  errorCode?: string,
+): FinalizeOutcome {
+  const { classifierModelRevision, classifierSource, classifierReuse, saturation, ...rest } =
+    fields;
+  return {
+    ...rest,
+    modelRevision: classifierModelRevision,
+    source: classifierSource as ClassifierSource | null,
+    reuse: classifierReuse as ClassificationReuse | null,
+    saturation: saturation === null ? undefined : saturation === 1,
+    status,
+    ...(errorCode === undefined ? {} : { errorCode }),
+  } as FinalizeOutcome;
 }
 
 /** Remote generation has not happened at defer time. Keep planned deployment
@@ -471,6 +507,7 @@ function ensurePepperSync(db: ControlPlaneSession, pepper: string): void {
 
 export const keyRepositoryLayer = (options: {
   pepper: string;
+  onFinalized?: (input: TerminalObservation) => void;
 }): Layer.Layer<KeyRepository, RepoError, SqliteDatabase> =>
   Layer.effect(
     KeyRepository,
@@ -516,12 +553,13 @@ export const keyRepositoryLayer = (options: {
         limit?: number;
       }) {
         const now = yield* Clock.currentTimeMillis;
-        return yield* Effect.try({
+        const recovered: TerminalObservation[] = [];
+        const result = yield* Effect.try({
           try: () =>
             db.transaction(
               (tx) => {
                 maybeMaintain(tx, now);
-                recoverStale(tx, now);
+                recoverStale(tx, now, options.onFinalized === undefined ? undefined : recovered);
                 const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
                 const cursor =
                   input.cursor === undefined || input.cursor === null || input.cursor.length === 0
@@ -566,6 +604,8 @@ export const keyRepositoryLayer = (options: {
             ),
           catch: mapRepoError,
         });
+        for (const item of recovered) options.onFinalized?.(item);
+        return result;
       });
 
       const updateKey = Effect.fn("KeyRepository.updateKey")(function* (input: {
@@ -698,12 +738,13 @@ export const keyRepositoryLayer = (options: {
 
       const admit = Effect.fn("KeyRepository.admit")(function* (rawKey: string) {
         const now = yield* Clock.currentTimeMillis;
-        return yield* Effect.try({
+        const recovered: TerminalObservation[] = [];
+        const result = yield* Effect.try({
           try: () =>
             db.transaction(
               (tx) => {
                 maybeMaintain(tx, now);
-                recoverStale(tx, now);
+                recoverStale(tx, now, options.onFinalized === undefined ? undefined : recovered);
                 const row = authenticatePrefix(tx, pepper, rawKey, now);
                 return admitRow(tx, row, now);
               },
@@ -711,6 +752,8 @@ export const keyRepositoryLayer = (options: {
             ),
           catch: mapRepoError,
         });
+        for (const item of recovered) options.onFinalized?.(item);
+        return result;
       });
 
       /** The admission transaction body shared by `admit` and `admitByKeyId`: policy decode,
@@ -794,12 +837,13 @@ export const keyRepositoryLayer = (options: {
         // same revocation/expiry/rate/concurrency/policy validation as `admit`, addressed
         // by key id because batch clients hand us no raw key. Never reachable from a route.
         const now = yield* Clock.currentTimeMillis;
-        return yield* Effect.try({
+        const recovered: TerminalObservation[] = [];
+        const result = yield* Effect.try({
           try: () =>
             db.transaction(
               (tx) => {
                 maybeMaintain(tx, now);
-                recoverStale(tx, now);
+                recoverStale(tx, now, options.onFinalized === undefined ? undefined : recovered);
                 const row = tx.select().from(apiKeys).where(eq(apiKeys.id, keyId)).get();
                 if (row === undefined) {
                   throw new AuthFailed({ message: "invalid api key" });
@@ -811,15 +855,18 @@ export const keyRepositoryLayer = (options: {
             ),
           catch: mapRepoError,
         });
+        for (const item of recovered) options.onFinalized?.(item);
+        return result;
       });
 
       const recheck = Effect.fn("KeyRepository.recheck")(function* (admission: Admission) {
         const now = yield* Clock.currentTimeMillis;
-        return yield* Effect.try({
+        const recovered: TerminalObservation[] = [];
+        const result = yield* Effect.try({
           try: () =>
             db.transaction(
               (tx) => {
-                recoverStale(tx, now);
+                recoverStale(tx, now, options.onFinalized === undefined ? undefined : recovered);
                 const row = tx.select().from(apiKeys).where(eq(apiKeys.id, admission.keyId)).get();
                 if (row === undefined) {
                   throw new KeyNotFound({ message: "key not found" });
@@ -855,6 +902,8 @@ export const keyRepositoryLayer = (options: {
             ),
           catch: mapRepoError,
         });
+        for (const item of recovered) options.onFinalized?.(item);
+        return result;
       });
 
       /** Return the metadata-only item/job binding used by attach, defer and
@@ -1072,7 +1121,7 @@ export const keyRepositoryLayer = (options: {
         outcome: FinalizeOutcome,
       ) {
         const now = yield* Clock.currentTimeMillis;
-        return yield* Effect.try({
+        const committed = yield* Effect.try({
           try: () =>
             db.transaction(
               (tx) => {
@@ -1100,20 +1149,23 @@ export const keyRepositoryLayer = (options: {
                 if (lease.deferred !== 1) {
                   throw new Conflict({ message: "request is not deferred" });
                 }
+                const fields = requestOutcomeFields(lease, outcome);
                 tx.update(requests)
-                  .set({
-                    status: outcome.status,
-                    finishedAt: now,
-                    deferred: 0,
-                    ...requestOutcomeFields(lease, outcome),
-                  })
+                  .set({ status: outcome.status, finishedAt: now, deferred: 0, ...fields })
                   .where(eq(requests.id, requestId))
                   .run();
+                return {
+                  keyId: lease.keyId,
+                  startedAt: lease.startedAt,
+                  priority: lease.priority,
+                  outcome: observedOutcome(fields, outcome.status),
+                };
               },
               { behavior: "immediate" },
             ),
           catch: mapRepoError,
         });
+        if (committed !== undefined) options.onFinalized?.(committed);
       });
 
       /** Settle a request whose batch item was interrupted during recovery.
@@ -1124,7 +1176,7 @@ export const keyRepositoryLayer = (options: {
         itemId: string,
       ) {
         const now = yield* Clock.currentTimeMillis;
-        return yield* Effect.try({
+        const committed = yield* Effect.try({
           try: () =>
             db.transaction(
               (tx) => {
@@ -1170,11 +1222,22 @@ export const keyRepositoryLayer = (options: {
                   })
                   .where(eq(requests.id, requestId))
                   .run();
+                return {
+                  keyId: lease.keyId,
+                  startedAt: lease.startedAt,
+                  priority: lease.priority,
+                  outcome: observedOutcome(
+                    requestOutcomeFields(lease, {}),
+                    "abandoned",
+                    "batch_interrupted",
+                  ),
+                };
               },
               { behavior: "immediate" },
             ),
           catch: mapRepoError,
         });
+        if (committed !== undefined) options.onFinalized?.(committed);
       });
 
       const finalize = Effect.fn("KeyRepository.finalize")(function* (
@@ -1182,7 +1245,7 @@ export const keyRepositoryLayer = (options: {
         outcome: FinalizeOutcome,
       ) {
         const now = yield* Clock.currentTimeMillis;
-        return yield* Effect.try({
+        const committed = yield* Effect.try({
           try: () =>
             db.transaction(
               (tx) => {
@@ -1196,22 +1259,25 @@ export const keyRepositoryLayer = (options: {
                   lease.keyId !== admission.keyId ||
                   lease.status !== "running" ||
                   lease.deferred !== 0
-                ) {
-                  return;
-                }
+                )
+                  return undefined;
+                const fields = requestOutcomeFields(lease, outcome);
                 tx.update(requests)
-                  .set({
-                    status: outcome.status,
-                    finishedAt: now,
-                    ...requestOutcomeFields(lease, outcome),
-                  })
+                  .set({ status: outcome.status, finishedAt: now, ...fields })
                   .where(eq(requests.id, admission.requestId))
                   .run();
+                return {
+                  keyId: lease.keyId,
+                  startedAt: lease.startedAt,
+                  priority: lease.priority,
+                  outcome: observedOutcome(fields, outcome.status),
+                };
               },
               { behavior: "immediate" },
             ),
           catch: mapRepoError,
         });
+        if (committed !== undefined) options.onFinalized?.(committed);
       });
 
       const usageSummary = Effect.fn("KeyRepository.usageSummary")(function* (input: {

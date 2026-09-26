@@ -177,8 +177,10 @@ export interface RouterOptions {
     reservation: Reservation,
   ) => Effect.Effect<void, KeyLifecycleError | InvalidInput>;
   readonly onQueue?: (event: QueueEvent) => void;
+  readonly onQueueOutcome?: (event: "timeout" | "full", priority: Priority) => void;
   readonly onDecision?: (decision: RouteDecision, work: RouterWork) => void;
   readonly onClassified?: (work: RouterWork, classified: Classification) => void;
+  readonly onCapacityPool?: (pool: CapacityPool) => void;
   readonly lockWaitMs?: number;
   readonly sessionTtlMs?: number;
   readonly sessionCapacity?: number;
@@ -242,6 +244,7 @@ export const modelRouterLayer = (options: RouterOptions) =>
         ttlMs: options.sessionTtlMs,
       });
       const pool = createCapacityPool({ queueSlots: options.queueSlots });
+      options.onCapacityPool?.(pool);
       const adapters = adaptersFor(options.fetch ?? fetch);
       const credentials = options.credentials ?? ((envVar: string) => process.env[envVar]);
       const lockWaitMs = options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS;
@@ -576,6 +579,7 @@ function executeLocked(
             waitedMs = event.waitedMs;
             options.onQueue?.(event);
           },
+          onOutcome: options.onQueueOutcome,
         })
         .pipe(
           Effect.mapError((error) =>

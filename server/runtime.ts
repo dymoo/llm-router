@@ -20,6 +20,13 @@ import { loadClassifierQualifications } from "./qualification.ts";
 import { GatewayFailure } from "../src/http/gateway-failure.ts";
 import { processState, type InferenceRuntime } from "./state.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
+import {
+  observeAdmission,
+  observeBatchDispatch,
+  observeQueueEvent,
+  observeStream,
+  registerDeployments,
+} from "./metrics.ts";
 
 const { queueHooks, observed } = processState;
 export const statusStore = processState.status;
@@ -38,6 +45,8 @@ function loadCatalogue(path: string): {
 function makeInferenceRuntime(): InferenceRuntime {
   const env = getEnv();
   const loaded = loadCatalogue(env.MODEL_CATALOG);
+  registerDeployments(loaded.catalogue.map((item) => item.id));
+  for (const item of loaded.catalogue) processState.metricTransports.set(item.id, item.transport);
   const classifierLayer = RouterClassifier.layer({
     mode: env.CLASSIFIER_MODE,
     layaUrl: env.LAYA_URL,
@@ -58,6 +67,9 @@ function makeInferenceRuntime(): InferenceRuntime {
         catalogue: loaded.catalogue,
         catalogueVersion: loaded.catalogueVersion,
         classify: (input) => classifier.classify(input),
+        onCapacityPool: (pool) => {
+          processState.routerCapacity = pool;
+        },
         onBeforeDispatch: (work, reservation) => {
           const deployment = loaded.catalogue.find((item) => item.id === reservation.deploymentId)!;
           observed.set(work.requestId, {
@@ -103,7 +115,9 @@ function makeInferenceRuntime(): InferenceRuntime {
             decisionTraceJson: JSON.stringify(decision),
           });
         },
+        onQueueOutcome: observeQueueEvent,
         onQueue: (event) => {
+          observeQueueEvent(event.state, event.priority);
           const hooks = queueHooks.get(event.requestId);
           if (hooks === undefined) {
             return;
@@ -152,11 +166,15 @@ export function batchInferencePort(): BatchInferencePort {
           ModelRouter.use((router) => router.completeBatch(routerWork, work.requestedModel)),
           signal,
         );
+        observeBatchDispatch("local", "completed");
         return {
           body: result.body,
           deploymentId: result.headers.deploymentId,
           metadata: () => resultMetadata(work, result),
         };
+      } catch (error) {
+        observeBatchDispatch("local", "failed");
+        throw error;
       } finally {
         cleanup(work.requestId);
       }
@@ -325,6 +343,8 @@ export function getInferenceDeps(): InferenceDeps {
   return {
     keys,
     gateway,
+    onAdmissionRejected: observeAdmission,
+    onStream: observeStream,
     status: statusStore,
   };
 }

@@ -1,5 +1,7 @@
 import "server-only";
 import type { ManagedRuntime } from "effect";
+import type { Metric } from "effect";
+import type { Server } from "node:http";
 import type { Deployment } from "../src/domain.ts";
 import type { AuxiliaryDeployment } from "../src/auxiliary.ts";
 import type { ClassifierUnavailable, SchemaVersionMismatch } from "../src/errors.ts";
@@ -32,6 +34,7 @@ interface ProcessState {
   queueHooks: Map<string, QueueHooks>;
   observed: Map<string, Omit<FinalizeOutcome, "status">>;
   status: RequestStatusStore;
+  routerCapacity?: CapacityPool;
   auxiliary?: readonly AuxiliaryDeployment[];
   auxiliaryPool: CapacityPool;
   health?: HealthMonitor;
@@ -39,6 +42,13 @@ interface ProcessState {
   stopping: boolean;
   shutdown?: Promise<void>;
   signalsRegistered: boolean;
+  metricRegistry: Map<string, Metric.Metric.Metadata<any, any>>;
+  metricDeployments: Set<string>;
+  metricTransports: Map<string, string>;
+  metricInflightWorkloads: Set<string>;
+  metricsServer?: Server;
+  metricsStarting?: Promise<Server>;
+  previousMetricsScrapeSeconds: number;
 }
 
 declare global {
@@ -59,4 +69,9 @@ export const processState: ProcessState = (globalThis.__dymooLlmRouterProcess ??
   auxiliaryPool: createCapacityPool(),
   stopping: false,
   signalsRegistered: false,
+  metricRegistry: new Map(),
+  metricDeployments: new Set(),
+  metricTransports: new Map(),
+  metricInflightWorkloads: new Set(),
+  previousMetricsScrapeSeconds: 0,
 });
