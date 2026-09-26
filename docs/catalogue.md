@@ -47,6 +47,27 @@ The example pins `sail-research/fp8` with fallbacks disabled and `require_parame
 
 Source: [OpenRouter endpoint catalogue](https://openrouter.ai/api/v1/models/z-ai/glm-5.3-flash/endpoints). Prices and endpoint availability can change; refresh them before relying on a spend estimate. No paid completion was used to verify these facts.
 
+The k3s `cloud-glm` deployment instead pins **`inference-net` (fp4)**, matching the
+first provider in the workstation OMP routing preference. On 2026-09-26, its
+endpoint metadata advertised context **1,048,576**, maximum completion **128,000**,
+and USD per million tokens: input **0.045**, cached input **0.01**, output **0.14**.
+It advertised tools, tool choice, JSON/structured output and reasoning controls.
+The same catalogue listed `deepinfra` (fp4) at input **0.075**, cached input
+**0.015**, output **0.25**, with maximum completion **131,072**. These are advertised
+rates, not a cache-hit guarantee or a paid request measurement. The synchronous
+router adapter encodes `providerRestriction` as exactly one provider in `only`
+and disables OpenRouter fallbacks; it cannot reproduce OMP's ordered
+InferenceNet → DeepInfra backup within one deployment. The pinned cloud entry
+therefore fails closed rather than silently routing to another priced provider.
+Its `maxParallel: 4` is a conservative router admission cap, not a measured
+provider concurrency guarantee. Public metadata does not prove the
+provider-specific chat adapter behavior; no paid inference was performed.
+
+The current OpenRouter health check uses authenticated `GET /api/v1/auth/key`,
+not `/models`. A ready cloud deployment confirms the credential and network
+path, not that InferenceNet is presently serving this model. The provider
+metadata above comes from a separate public endpoints-catalogue request.
+
 Reasoning is configured as binary thinking-on/off, because exact graded backend semantics were not independently established. The gateway reports applied `on`, not an invented high/xhigh execution level. Reasoning-token counts in the catalogue are estimates for ranking, not measured usage.
 
 Cloud quality and latency numbers are explicitly labelled **operator bootstrap priors**, not benchmarks or calibrated success probabilities. `node scripts/setup.mjs --runtime cloud` selects that cloud entry on a fresh installation; it never overwrites an existing catalogue.
