@@ -59,6 +59,29 @@ router adapter encodes `providerRestriction` as exactly one provider in `only`
 and disables OpenRouter fallbacks; it cannot reproduce OMP's ordered
 InferenceNet → DeepInfra backup within one deployment. The pinned cloud entry
 therefore fails closed rather than silently routing to another priced provider.
+
+Pinning one provider is intentional for cache locality: switching serving endpoints
+can turn a warm prompt prefix into a paid cache miss. OpenRouter documents its
+[sticky routing](https://openrouter.ai/docs/guides/best-practices/prompt-caching),
+but it can fall back when a sticky provider becomes unavailable; this deployment
+instead sends a single `provider.only` entry with `allow_fallbacks: false`.
+
+The [Chat Completions success schema](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion)
+does not guarantee a top-level serving-provider field. After a completed generation,
+the gateway asynchronously reads the documented
+[`GET /api/v1/generation?id=…` metadata](https://openrouter.ai/docs/api/api-reference/generations/get-request-&-usage-metadata-for-a-generation)
+`data.provider_name` to verify the provider identity (the slug before any `/`
+variant). For example, `sail-research/fp8` matches `Sail Research`; the `/fp8`
+or `/us` variant itself cannot be verified from generation metadata. The gateway
+logs a mismatch once and raises a bounded metric without failing the served
+request. A failed or missing metadata lookup is unknown, not a match; shutdown
+skips lookups. Deployments without a cloud provider restriction are not checked.
+
+[OpenRouter usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting)
+returns `usage.prompt_tokens_details.cached_tokens` by default when available,
+including in the terminal stream chunk. `usage.include` and
+`stream_options.include_usage` are deprecated no-ops; neither is required.
+
 Its `maxParallel: 4` is a conservative router admission cap, not a measured
 provider concurrency guarantee. Public metadata does not prove the
 provider-specific chat adapter behavior; no paid inference was performed.

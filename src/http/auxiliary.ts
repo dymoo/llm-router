@@ -1,5 +1,6 @@
 import { Cause, Effect, Exit, Predicate } from "effect";
 import type { AuxiliaryDeployment } from "../auxiliary.ts";
+import { createDeadline } from "../deadline.ts";
 import { createCapacityPool, type CapacityPool } from "../router/capacity.ts";
 import { readBoundedBody, readJsonObject } from "./body.ts";
 import type { Admission, FinalizeOutcome, KeyService } from "./contracts.ts";
@@ -147,7 +148,8 @@ export async function handleAuxiliary(
   let persisted = false;
   let correlationId = "";
   let metadata: Omit<FinalizeOutcome, "status"> = {};
-  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(11 * 60_000)]);
+  const deadline = createDeadline(11 * 60_000, [request.signal]);
+  const signal = deadline.signal;
   try {
     correlationId = parseCorrelationId(request.headers.get("x-request-id")) ?? crypto.randomUUID();
     const rawKey = bearerToken(request);
@@ -242,33 +244,38 @@ export async function handleAuxiliary(
             const path = modality === "embeddings" ? "embeddings" : "audio/transcriptions";
             // FLM v1.0.6 ASR does not observe cancellation. Retain its permit until the response/deadline,
             // rather than admitting another NPU task while the disconnected request is still executing.
-            const upstreamSignal = AbortSignal.timeout(10 * 60_000);
+            const upstreamDeadline = createDeadline(10 * 60_000);
             const generatedAt = Date.now();
-            const response = await (deps.fetch ?? fetch)(`${base}/${path}`, {
-              method: "POST",
-              redirect: "error",
-              signal: upstreamSignal,
-              headers:
-                input.upstream instanceof FormData
-                  ? undefined
-                  : { "content-type": "application/json" },
-              body:
-                input.upstream instanceof FormData
-                  ? input.upstream
-                  : JSON.stringify(input.upstream),
-            });
-            if (!response.ok) {
-              await response.body?.cancel();
-              throw new HttpFailure(502, "provider_failure", "NPU runtime rejected the request");
-            }
-            const bytes = await readBoundedBody(
-              new Request("http://response.local", {
+            let bytes: Uint8Array;
+            try {
+              const response = await (deps.fetch ?? fetch)(`${base}/${path}`, {
                 method: "POST",
-                body: response.body,
-                duplex: "half",
-              } as RequestInit),
-              { maxBytes: 16 * 1024 * 1024, timeoutMs: 60_000 },
-            );
+                redirect: "error",
+                signal: upstreamDeadline.signal,
+                headers:
+                  input.upstream instanceof FormData
+                    ? undefined
+                    : { "content-type": "application/json" },
+                body:
+                  input.upstream instanceof FormData
+                    ? input.upstream
+                    : JSON.stringify(input.upstream),
+              });
+              if (!response.ok) {
+                await response.body?.cancel();
+                throw new HttpFailure(502, "provider_failure", "NPU runtime rejected the request");
+              }
+              bytes = await readBoundedBody(
+                new Request("http://response.local", {
+                  method: "POST",
+                  body: response.body,
+                  duplex: "half",
+                } as RequestInit),
+                { maxBytes: 16 * 1024 * 1024, timeoutMs: 60_000 },
+              );
+            } finally {
+              upstreamDeadline.clear();
+            }
             let body: unknown;
             try {
               body = JSON.parse(new TextDecoder().decode(bytes));
@@ -370,5 +377,7 @@ export async function handleAuxiliary(
     return signal.aborted
       ? failureResponse(new HttpFailure(400, "cancelled", "Request cancelled"))
       : failureResponse(error);
+  } finally {
+    deadline.clear();
   }
 }

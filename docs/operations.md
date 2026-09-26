@@ -78,6 +78,27 @@ Set `METRICS_PORT` to an integer from 1–65535, different from the application 
 
 The `llm_router_` families export build/process and scrape timing; cached readiness and qualification; terminal admissions, request duration and concurrency; queue/capacity and routing decisions; stream outcomes; classifier latency/usage; known token and separate cost categories; cache observations; and read-only SQLite counts for key and batch state. Histograms use fixed buckets and seconds; counters end in `_total`. Missing usage from a dispatched request increments `usage_unknown_total` rather than fabricating a zero token count. The current Gufo adapter does not decode draft acceptance counts, so no draft-token metric is emitted.
 
+For OpenRouter, `llm_router_provider_pin_total{deployment,result="match|mismatch|unknown"}`
+counts post-completion generation-metadata checks only for cloud deployments
+with a provider restriction; unpinned and non-cloud requests do not emit this metric. A single delayed, bounded
+`GET /api/v1/generation?id=…` reads the documented `data.provider_name`; no
+extra inference is purchased and client responses never wait on the check.
+Alert when mismatch increases; investigate unknown lookups separately. Lookups
+are skipped during shutdown. Provider names are never metric labels.
+Cache request counts remain
+`llm_router_cache_observations_total{deployment,result="hit|miss|unknown"}`.
+`llm_router_cache_eligible_prompt_tokens_total{deployment}` counts prompt tokens
+only when the same request has known cached-token usage. The token-weighted hit
+fraction, under the deployment selection, is
+`sum by(deployment)(rate(llm_router_tokens_total{kind="cached",deployment=~"${deployment:regex}"}[$__rate_interval])) / sum by(deployment)(rate(llm_router_cache_eligible_prompt_tokens_total{deployment=~"${deployment:regex}"}[$__rate_interval]))`.
+Known zero cached tokens publish a zero-valued cached-token series (0%); requests
+with missing cached-token usage are excluded from the denominator, not counted
+as misses. No cloud
+`llm_router_cost_usd_total{kind="cache_savings"}` series is fabricated:
+OpenRouter's `cache_discount` does not explicitly document a USD unit, and
+rate-card estimates are not provider-reported savings. The dashboard savings
+panel stays empty until an explicit provider-reported USD amount is available.
+
 Only a validated UUID `key_id` labels per-key request, token and cost series; `key_info` exposes the active key name (truncated to 64 characters) alongside its policy limits. Never use API key prefixes, digests, secrets, prompts, completions, session/request/correlation/job/item IDs or free-text details as labels or metric values. Unknown enum/catalogue labels collapse to `other`, and unrouted requests use deployment and location `none`. Restrict access to this port because active key names and UUIDs are operational metadata.
 
 The Grafana dashboard JSON lives at `deploy/grafana/llm-router.json` and uses the `prometheus` datasource UID.
@@ -110,7 +131,7 @@ Gateway-only upgrades do not restart the native generator, Laya, FastFlowLM, or 
 | Overall inference deadline | 11 minutes |
 | Durable request lease | 12 minutes |
 
-There is no lease heartbeat or crash-resume of generation. FastFlowLM's pinned ASR handler ignores cancellation during execution; its resource permit is retained through response/deadline instead of pretending the NPU is immediately idle.
+The overall chat deadline applies through the end of a streamed response, not merely until its headers are sent. Its timer is cancelled once chat work settles, including completed, failed, and cancelled requests; a completed request does not retain an eleven-minute timer. There is no lease heartbeat or crash-resume of generation. FastFlowLM's pinned ASR handler ignores cancellation during execution; its resource permit is retained through response/deadline instead of pretending the NPU is immediately idle.
 
 ## Accounting and analytics
 

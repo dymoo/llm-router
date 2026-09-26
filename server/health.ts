@@ -1,6 +1,7 @@
 import "server-only";
 import { Effect, Predicate } from "effect";
 import { getEnv, getProviderCredentials } from "../env.ts";
+import { createDeadline } from "../src/deadline.ts";
 import { RouterClassifier, type ClassifierHealth } from "../src/classifier.ts";
 import { deploymentIsPlaceholder } from "../src/domain.ts";
 import { createHealthMonitor } from "../src/health.ts";
@@ -12,12 +13,19 @@ import { loadClassifierQualifications } from "./qualification.ts";
 import { configuredChatDeployments } from "./runtime.ts";
 import { processState } from "./state.ts";
 
-const boundedFetch: typeof fetch = (input, init) =>
-  fetch(input, {
-    ...init,
-    redirect: "error",
-    signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(2_000)]),
-  });
+async function boundedFetch(
+  input: string,
+  init: RequestInit | undefined,
+  consume: (response: Response) => Promise<boolean>,
+): Promise<boolean> {
+  const deadline = createDeadline(2_000, init?.signal ? [init.signal] : []);
+  try {
+    const response = await fetch(input, { ...init, redirect: "error", signal: deadline.signal });
+    return await consume(response);
+  } finally {
+    deadline.clear();
+  }
+}
 // Runtime adapters own their probe budgets; Halogen's documented PONG can take 30 seconds.
 const adapters = adaptersFor(fetch);
 
@@ -55,12 +63,17 @@ async function deployments(): Promise<DeploymentHealth[]> {
               adapters[deployment.transport].probeUnavailable(deployment, credential),
             ));
           else {
-            const response = await boundedFetch(
+            ready = await boundedFetch(
               `${deployment.endpoint.replace(/\/$/, "")}/${deployment.transport === "openrouter" ? "auth/key" : "models"}`,
               { headers: credential ? { authorization: `Bearer ${credential}` } : {} },
+              async (response) => {
+                try {
+                  return response.ok;
+                } finally {
+                  await response.body?.cancel();
+                }
+              },
             );
-            ready = response.ok;
-            await response.body?.cancel();
           }
         }
       } catch {
@@ -78,13 +91,19 @@ async function deployments(): Promise<DeploymentHealth[]> {
     configuredAuxiliaryDeployments().map(async (deployment): Promise<DeploymentHealth> => {
       let ready = false;
       try {
-        const response = await boundedFetch(`${deployment.endpoint.replace(/\/$/, "")}/models`);
-        const body: unknown = await response.json();
-        ready =
-          response.ok &&
-          Predicate.isObject(body) &&
-          Array.isArray(body.data) &&
-          body.data.some((item) => Predicate.isObject(item) && item.id === deployment.modelId);
+        ready = await boundedFetch(
+          `${deployment.endpoint.replace(/\/$/, "")}/models`,
+          undefined,
+          async (response) => {
+            const body: unknown = await response.json();
+            return (
+              response.ok &&
+              Predicate.isObject(body) &&
+              Array.isArray(body.data) &&
+              body.data.some((item) => Predicate.isObject(item) && item.id === deployment.modelId)
+            );
+          },
+        );
       } catch {
         ready = false;
       }

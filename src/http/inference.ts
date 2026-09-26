@@ -1,3 +1,4 @@
+import { createDeadline } from "../deadline.ts";
 import { GatewayFailure } from "./gateway-failure.ts";
 import { readJsonObject } from "./body.ts";
 import type {
@@ -43,11 +44,9 @@ export async function handleChatCompletions(
   let admissionAttempted = false;
   let finalization: Promise<void> | undefined;
   const cancellation = new AbortController();
-  const signal = AbortSignal.any([
-    request.signal,
-    cancellation.signal,
-    AbortSignal.timeout(GATEWAY_EFFECT_TIMEOUT_MS),
-  ]);
+  const deadline = createDeadline(GATEWAY_EFFECT_TIMEOUT_MS, [request.signal, cancellation.signal]);
+  const signal = deadline.signal;
+  let streaming = false;
   const finalize: Finalize = (outcome, state) => {
     if (admission === undefined) return Promise.resolve();
     if (finalization !== undefined) return finalization;
@@ -129,8 +128,20 @@ export async function handleChatCompletions(
       freshFactsAvailable: false,
       stream: decoded.stream,
     };
-    if (decoded.stream)
-      return streamCompletion(deps, work, admission, correlationId, finalize, cancellation, signal);
+    if (decoded.stream) {
+      const response = streamCompletion(
+        deps,
+        work,
+        admission,
+        correlationId,
+        finalize,
+        cancellation,
+        signal,
+        deadline.clear,
+      );
+      streaming = true;
+      return response;
+    }
     const hooks: QueueHooks = {
       onQueued: (waitedMs) =>
         deps.status.update(work.keyId, correlationId, { state: "queued", waitedMs }),
@@ -172,6 +183,8 @@ export async function handleChatCompletions(
       );
     }
     return failureResponse(error);
+  } finally {
+    if (!streaming) deadline.clear();
   }
 }
 
@@ -183,6 +196,7 @@ function streamCompletion(
   finalize: Finalize,
   cancellation: AbortController,
   signal: AbortSignal,
+  clearDeadline: () => void,
 ): Response {
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
@@ -292,6 +306,7 @@ function streamCompletion(
       clearInterval(keepalive);
       signal.removeEventListener("abort", abort);
       reader?.releaseLock();
+      clearDeadline();
     }
   };
   void pump();

@@ -15,6 +15,8 @@ import { keyRepositoryLayer } from "../src/keys/repository.ts";
 import {
   observeAdmission,
   observeFinalized,
+  observeOpenRouterCompleted,
+  registerDeployments,
   observeSqlMetrics,
   renderMetrics,
 } from "../server/metrics.ts";
@@ -361,4 +363,146 @@ it("counts a missing bearer as unauthorized before either admit or inference", a
     .reduce((count, row) => count + row.value, 0);
   assert.equal(after - before, 1);
   assert.equal(renderMetrics().includes("private prompt"), false);
+});
+it("counts provider pin results with bounded labels without estimated savings", () => {
+  const keyId = "12345678-1234-4234-8234-123456789abc";
+  registerDeployments(["cloud-glm"]);
+  observeFinalized({
+    keyId,
+    startedAt: Date.now(),
+    priority: "high",
+    outcome: {
+      status: "success",
+      deploymentId: "cloud-glm",
+      location: "cloud",
+      promptTokens: 120,
+      cachedInputTokens: 30,
+      cacheObservation: "observed-hit",
+      estimatedCacheSavingsUsd: 99,
+    },
+  });
+  observeFinalized({
+    keyId: "12345678-1234-4234-8234-123456789abd",
+    startedAt: Date.now(),
+    priority: "high",
+    outcome: {
+      status: "success",
+      deploymentId: "cloud-glm",
+      location: "cloud",
+      promptTokens: 50,
+      cachedInputTokens: 0,
+      cacheObservation: "observed-miss",
+    },
+  });
+  observeFinalized({
+    keyId: "12345678-1234-4234-8234-123456789abe",
+    startedAt: Date.now(),
+    priority: "high",
+    outcome: {
+      status: "success",
+      deploymentId: "cloud-glm",
+      location: "cloud",
+      promptTokens: 20,
+      cachedInputTokens: null,
+      cacheObservation: "unknown",
+    },
+  });
+  observeOpenRouterCompleted("cloud-glm", "match");
+  observeOpenRouterCompleted("cloud-glm", "mismatch");
+  observeOpenRouterCompleted("external-provider-secret", "unknown");
+  const output = renderMetrics();
+  assert.deepEqual(
+    samples(output, "llm_router_tokens_total")
+      .filter(
+        (row) =>
+          row.labels.key_id === keyId &&
+          (row.labels.kind === "prompt" || row.labels.kind === "cached"),
+      )
+      .map((row) => [row.labels.kind, row.value])
+      .sort(),
+    [
+      ["cached", 30],
+      ["prompt", 120],
+    ],
+  );
+  assert.deepEqual(
+    samples(output, "llm_router_provider_pin_total")
+      .filter((row) => row.labels.deployment === "cloud-glm")
+      .map((row) => [row.labels.result, row.value])
+      .sort(),
+    [
+      ["match", 1],
+      ["mismatch", 1],
+    ],
+  );
+  assert.deepEqual(
+    samples(output, "llm_router_cache_observations_total")
+      .filter((row) => row.labels.deployment === "cloud-glm")
+      .map((row) => [row.labels.result, row.value])
+      .sort(),
+    [
+      ["hit", 1],
+      ["miss", 1],
+      ["unknown", 1],
+    ],
+  );
+  assert.deepEqual(
+    samples(output, "llm_router_cost_usd_total")
+      .filter((row) => row.labels.kind === "cache_savings" && row.labels.key_id === keyId)
+      .map((row) => row.value),
+    [],
+  );
+  assert.equal(output.includes("external-provider-secret"), false);
+});
+it("weights cache ratio by prompts with known cache usage and retains zero-hit series", () => {
+  const eligible = "cache-ratio-fixture";
+  const zero = "cache-zero-fixture";
+  registerDeployments([eligible, zero]);
+  for (const [index, deploymentId, cachedInputTokens] of [
+    [0, eligible, 50],
+    [1, eligible, null],
+    [2, zero, 0],
+  ] as const) {
+    observeFinalized({
+      keyId: `12345678-1234-4234-8234-123456789ab${index}`,
+      startedAt: Date.now(),
+      priority: "high",
+      outcome: {
+        status: "success",
+        deploymentId,
+        location: "cloud",
+        promptTokens: 100,
+        cachedInputTokens,
+      },
+    });
+  }
+  const output = renderMetrics();
+  const byDeployment = (name: string, deployment: string) =>
+    samples(output, name).filter((row) => row.labels.deployment === deployment);
+  assert.deepEqual(
+    byDeployment("llm_router_tokens_total", eligible)
+      .filter((row) => row.labels.kind === "prompt" || row.labels.kind === "cached")
+      .reduce(
+        (totals, row) => ({
+          ...totals,
+          [row.labels.kind!]: (totals[row.labels.kind!] ?? 0) + row.value,
+        }),
+        {} as Record<string, number>,
+      ),
+    { prompt: 200, cached: 50 },
+  );
+  assert.deepEqual(
+    byDeployment("llm_router_cache_eligible_prompt_tokens_total", eligible).map((row) => row.value),
+    [100],
+  );
+  assert.deepEqual(
+    byDeployment("llm_router_cache_eligible_prompt_tokens_total", zero).map((row) => row.value),
+    [100],
+  );
+  assert.deepEqual(
+    byDeployment("llm_router_tokens_total", zero)
+      .filter((row) => row.labels.kind === "cached")
+      .map((row) => row.value),
+    [0],
+  );
 });

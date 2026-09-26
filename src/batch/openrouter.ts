@@ -77,6 +77,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as timerSleep } from "node:timers/promises";
 import { Option, Schema } from "effect";
 import type { BatchUsage } from "../domain.ts";
+import { createDeadline } from "../deadline.ts";
 import type { FetchImpl } from "../router/adapters/http.ts";
 import { BATCH_RESULT_JOB_BUDGET_BYTES, type BatchResultRow } from "./results.ts";
 import type {
@@ -588,12 +589,8 @@ export function openRouterBatchSpill(
   const pollWindow = options.pollWindowMs ?? DEFAULT_POLL_WINDOW_MS;
   const authHeaders = { authorization: `Bearer ${options.apiKey}` };
 
-  const callSignal = (signal: AbortSignal | undefined): AbortSignal =>
-    AbortSignal.any(
-      signal === undefined
-        ? [AbortSignal.timeout(requestTimeoutMs)]
-        : [signal, AbortSignal.timeout(requestTimeoutMs)],
-    );
+  const callDeadline = (signal: AbortSignal | undefined) =>
+    createDeadline(requestTimeoutMs, signal === undefined ? [] : [signal]);
 
   const parseText = (text: string): unknown => {
     try {
@@ -615,11 +612,11 @@ export function openRouterBatchSpill(
     // The composed per-request signal bounds BOTH the fetch and a stalled body read: aborting
     // cancels the reader, which settles any pending read — even when a custom fetch's body
     // ignores signals entirely.
-    const deadline = callSignal(signal);
+    const deadline = callDeadline(signal);
     const cancelReader = (): void => {
       void reader.cancel().catch(() => undefined);
     };
-    deadline.addEventListener("abort", cancelReader, { once: true });
+    deadline.signal.addEventListener("abort", cancelReader, { once: true });
     const chunks: Uint8Array[] = [];
     let total = 0;
     let exceeded = false;
@@ -639,11 +636,12 @@ export function openRouterBatchSpill(
     } catch {
       return null;
     } finally {
-      deadline.removeEventListener("abort", cancelReader);
+      deadline.signal.removeEventListener("abort", cancelReader);
+      deadline.clear();
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
     }
-    if (deadline.aborted) {
+    if (deadline.signal.aborted) {
       return null;
     }
     return { text: exceeded ? "" : Buffer.concat(chunks).toString("utf8"), exceeded };
@@ -655,6 +653,7 @@ export function openRouterBatchSpill(
     signal: AbortSignal | undefined,
   ): Promise<PostOutcome> => {
     const payload = groupSubmitBody(model, items, options.providerOnly);
+    const deadline = callDeadline(signal);
     let response: Response;
     try {
       response = await fetchImpl(batchesUrl, {
@@ -662,7 +661,7 @@ export function openRouterBatchSpill(
         redirect: "error",
         headers: { ...authHeaders, "content-type": "application/json" },
         body: JSON.stringify(payload),
-        signal: callSignal(signal),
+        signal: deadline.signal,
       });
     } catch (error) {
       // Transport failure or per-request deadline: dispatch may or may not have happened —
@@ -671,6 +670,8 @@ export function openRouterBatchSpill(
         kind: "ambiguous",
         why: error instanceof Error ? error.message : "submit transport failure",
       };
+    } finally {
+      deadline.clear();
     }
     const body = await readBounded(response, signal);
     if (response.status >= 400 && response.status < 500) {
@@ -705,19 +706,22 @@ export function openRouterBatchSpill(
     id: string,
     signal: AbortSignal | undefined,
   ): Promise<RemoteBatch | null | "missing"> => {
+    const deadline = callDeadline(signal);
     let response: Response;
     try {
       response = await fetchImpl(`${batchesUrl}/${encodeURIComponent(id)}`, {
         method: "GET",
         redirect: "error",
         headers: authHeaders,
-        signal: callSignal(signal),
+        signal: deadline.signal,
       });
     } catch {
       if (signal?.aborted) {
         throw new BatchSpillAborted({ message: "spill aborted during batch GET" });
       }
       return null; // per-request deadline or transient transport failure
+    } finally {
+      deadline.clear();
     }
     if (response.status === 404 || response.status === 410) {
       await response.body?.cancel().catch(() => undefined);

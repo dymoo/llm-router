@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { createHook } from "node:async_hooks";
 import test from "node:test";
 import { GatewayFailure } from "../../src/http/gateway-failure.ts";
 import { handleChatCompletions } from "../../src/http/inference.ts";
+import { GATEWAY_EFFECT_TIMEOUT_MS } from "../../src/http/limits.ts";
 import { inferenceDeps, jsonRequest, memoryKeys, ORIGIN } from "./helpers.ts";
 
 const completion = {
@@ -9,6 +11,119 @@ const completion = {
   choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
 };
 
+test("chat requests release deadlines at terminal response or stream cancellation", async () => {
+  const outstanding = new Set<number>();
+  const hook = createHook({
+    init(id, type, _trigger, resource) {
+      if (
+        type === "Timeout" &&
+        (resource as { _idleTimeout?: number })._idleTimeout === GATEWAY_EFFECT_TIMEOUT_MS
+      )
+        outstanding.add(id);
+    },
+    destroy(id) {
+      outstanding.delete(id);
+    },
+  });
+  const keys = memoryKeys();
+  let keepStreamOpen = false;
+  const deps = inferenceDeps(keys, {
+    complete: async () => ({
+      headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+      body: completion,
+      metadata: () => ({ deploymentId: "d" }),
+    }),
+    stream: async () => ({
+      headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+      body: new ReadableStream({
+        start(controller) {
+          if (!keepStreamOpen) controller.close();
+        },
+      }),
+      metadata: () => ({ deploymentId: "d" }),
+    }),
+  });
+  hook.enable();
+  try {
+    for (const stream of [false, true]) {
+      for (let index = 0; index < 4; index++) {
+        const response = await handleChatCompletions(
+          jsonRequest(ORIGIN + "/v1/chat/completions", {
+            method: "POST",
+            headers: { authorization: "Bearer k" },
+            json: { model: "auto", stream, messages: [{ role: "user", content: "hi" }] },
+          }),
+          deps,
+        );
+        assert.equal(response.status, 200);
+        if (stream) await response.text();
+      }
+    }
+    // Node emits the async_hooks destroy notification for clearTimeout on the next turn.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(outstanding.size, 0, "finished responses must not hold eleven-minute deadlines");
+    keepStreamOpen = true;
+    const active = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: { model: "auto", stream: true, messages: [{ role: "user", content: "hi" }] },
+      }),
+      deps,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(outstanding.size, 1, "an open SSE response still needs its deadline");
+    await active.body?.cancel();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(keys.finalizes.at(-1)?.status, "abandoned");
+    assert.equal(outstanding.size, 0, "cancelling SSE must release its deadline");
+  } finally {
+    hook.disable();
+  }
+});
+
+test("gateway deadline aborts a hung inference and records abandonment", async (t) => {
+  const nativeSetTimeout = globalThis.setTimeout;
+  let expire: (() => void) | undefined;
+  t.mock.method(globalThis, "setTimeout", ((
+    callback: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    if (ms === GATEWAY_EFFECT_TIMEOUT_MS) expire = () => callback(...args);
+    return nativeSetTimeout(callback, ms, ...args);
+  }) as typeof setTimeout);
+  const keys = memoryKeys();
+  let dispatched!: () => void;
+  const started = new Promise<void>((resolve) => {
+    dispatched = resolve;
+  });
+  const pending = handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: { model: "auto", messages: [{ role: "user", content: "hi" }] },
+    }),
+    inferenceDeps(keys, {
+      complete: async (_work, _hooks, signal) => {
+        dispatched();
+        assert.ok(signal);
+        return await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    }),
+  );
+  await started;
+  assert.ok(expire, "an in-flight request must have an overall deadline");
+  expire();
+  await pending;
+  assert.equal(keys.finalizes[0]?.status, "abandoned");
+  assert.equal(keys.finalizes[0]?.errorCode, "Cancelled");
+});
 test("admits an OMP-shaped streamed request without sending client storage controls to routing", async () => {
   const keys = memoryKeys();
   let routed = false;

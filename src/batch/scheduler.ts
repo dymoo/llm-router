@@ -8,6 +8,7 @@ import {
   type BatchUsage,
   type Deployment,
 } from "../domain.ts";
+import { createDeadline } from "../deadline.ts";
 import type { RoutedWork } from "../http/contracts.ts";
 import { classifierInputFor, decodeChatCompletion, requestCapabilities } from "../http/decode.ts";
 import { GATEWAY_EFFECT_TIMEOUT_MS } from "../http/limits.ts";
@@ -899,7 +900,8 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
       );
       return;
     }
-    const signal = AbortSignal.timeout(GATEWAY_EFFECT_TIMEOUT_MS);
+    const deadline = createDeadline(GATEWAY_EFFECT_TIMEOUT_MS);
+    const signal = deadline.signal;
     try {
       const result = await deps.inference.complete(work, signal);
       const metadata = result.metadata();
@@ -943,6 +945,8 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
         retryable ? "requeue" : latest?.status === "cancelling" ? "cancelled" : "failed",
         () => deps.keys.finalize(activeAdmission, outcome),
       );
+    } finally {
+      deadline.clear();
     }
   };
 

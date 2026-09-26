@@ -3066,6 +3066,248 @@
         "showLabels": false,
         "wrapLogMessage": true
       }
+    },
+    {
+      "id": 74,
+      "title": "Provider cache locality",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 235,
+        "w": 24,
+        "h": 1
+      },
+      "description": "OpenRouter provider verification, observed cache usage and reported savings."
+    },
+    {
+      "id": 75,
+      "title": "Cached prompt token ratio",
+      "description": "Cached tokens / prompt tokens on requests with known cache usage, by deployment. Unknown cache usage is excluded; known zero hits plot 0%.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 236,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by(deployment)(rate(llm_router_tokens_total{kind=\"cached\",deployment=~\"${deployment:regex}\"}[$__rate_interval])) / sum by(deployment)(rate(llm_router_cache_eligible_prompt_tokens_total{deployment=~\"${deployment:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{deployment}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 76,
+      "title": "Cache observations by deployment",
+      "description": "Observed hit, miss and unknown requests per second; counts are not weighted by cached tokens.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 236,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (deployment, result) (rate(llm_router_cache_observations_total{deployment=~\"${deployment:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{deployment}} · {{result}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 77,
+      "title": "Provider pin matches",
+      "description": "Completed OpenRouter responses whose serving provider matches the deployment restriction in the selected time range.",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 244,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (deployment) (increase(llm_router_provider_pin_total{result=\"match\",deployment=~\"${deployment:regex}\"}[$__range]))",
+          "legendFormat": "{{deployment}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 78,
+      "title": "Provider pin mismatches",
+      "description": "Must be zero; a positive value means OpenRouter served a different provider despite the pin. No completions yields no value.",
+      "type": "stat",
+      "gridPos": {
+        "x": 8,
+        "y": 244,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (deployment) (increase(llm_router_provider_pin_total{result=\"mismatch\",deployment=~\"${deployment:regex}\"}[$__range])) or on(deployment) (sum by(deployment) (increase(llm_router_provider_pin_total{result=~\"match|unknown\",deployment=~\"${deployment:regex}\"}[$__range])) * 0)",
+          "legendFormat": "{{deployment}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1e-07
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 79,
+      "title": "Provider-reported cache savings",
+      "description": "No cloud savings USD series is emitted: OpenRouter cache_discount has no explicit USD unit. Empty until a sourced provider USD amount exists; never infer from rates.",
+      "type": "stat",
+      "gridPos": {
+        "x": 16,
+        "y": 244,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (deployment) (increase(llm_router_cost_usd_total{kind=\"cache_savings\",deployment=~\"${deployment:regex}\"}[$__range]))",
+          "legendFormat": "{{deployment}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
     }
   ]
 }

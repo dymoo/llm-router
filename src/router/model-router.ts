@@ -182,6 +182,7 @@ export interface RouterOptions {
   readonly onDecision?: (decision: RouteDecision, work: RouterWork) => void;
   readonly onClassified?: (work: RouterWork, classified: Classification) => void;
   readonly onCapacityPool?: (pool: CapacityPool) => void;
+  readonly onOpenRouterCompleted?: (deployment: Deployment, generationId: unknown) => void;
   readonly lockWaitMs?: number;
   readonly sessionTtlMs?: number;
   readonly sessionCapacity?: number;
@@ -1091,6 +1092,14 @@ function batchMetadataOf(
   };
 }
 
+function reportOpenRouterCompletion(
+  candidate: RankedCandidate,
+  options: RouterOptions,
+  generationId: unknown,
+): void {
+  if (candidate.deployment.transport === "openrouter")
+    options.onOpenRouterCompleted?.(candidate.deployment, generationId);
+}
 function dispatch(
   work: RouterWork,
   options: RouterOptions,
@@ -1141,6 +1150,7 @@ function dispatch(
               )
           : undefined,
         startedAt,
+        (generationId) => reportOpenRouterCompletion(candidate, options, generationId),
       );
       return {
         headers,
@@ -1157,6 +1167,7 @@ function dispatch(
       catch: () => new ProviderFailure({ message: "Invalid local token usage" }),
     });
     persistPin(sessions, work, candidate, classified.assessment, finishedAt);
+    reportOpenRouterCompletion(candidate, options, completion.body.id);
     return {
       headers,
       reservation,

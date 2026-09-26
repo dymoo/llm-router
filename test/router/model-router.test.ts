@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { Deferred, Effect, Fiber } from "effect";
 import { ClassifierUnqualified } from "../../src/errors.ts";
+import type { RequestAccounting } from "../../src/domain.ts";
 import { modelRouterLayer, ModelRouter } from "../../src/router/model-router.ts";
+import { createOpenRouterPinVerifier } from "../../src/router/adapters/openrouter.ts";
 import type { Classification, RouterWork } from "../../src/router/model-router.ts";
 import {
   balancedPolicy,
@@ -1121,3 +1123,145 @@ describe("ModelRouter batch seam", () => {
     assert.equal(requests, 0);
   });
 });
+it(
+  "verifies pinned OpenRouter provider via generation metadata after each completion",
+  { timeout: 5000 },
+  async () => {
+    const provider = { ...frontier, providerRestriction: "inference-net" };
+    const cases = [
+      { responseProvider: "InferenceNet", actual: "InferenceNet", cached: 0, expected: "match" },
+      {
+        responseProvider: "InferenceNet",
+        actual: "other-provider\nprivate",
+        cached: 12,
+        expected: "mismatch",
+      },
+      { responseProvider: undefined, actual: "InferenceNet", cached: undefined, expected: "match" },
+      { responseProvider: undefined, actual: undefined, cached: undefined, expected: "unknown" },
+    ] as const;
+    const warnings = mock.method(console, "warn", () => undefined);
+    try {
+      for (const streaming of [false, true]) {
+        for (const [index, scenario] of cases.entries()) {
+          const reports: Array<{ deployment: string; result: string }> = [];
+          const sent: Record<string, unknown>[] = [];
+          const lookups: string[] = [];
+          const verified = Promise.withResolvers<void>();
+          const usage = {
+            prompt_tokens: 60,
+            completion_tokens: 8,
+            ...(scenario.cached === undefined
+              ? {}
+              : { prompt_tokens_details: { cached_tokens: scenario.cached } }),
+          };
+          const fetchImpl: typeof fetch = async (input, init) => {
+            const url = String(input);
+            if (url.includes("/generation?")) {
+              lookups.push(url);
+              assert.equal(
+                init?.headers && (init.headers as Record<string, string>).authorization,
+                "Bearer fixture-key",
+              );
+              return Response.json({
+                data: { provider_name: scenario.actual, cache_discount: 0.002 },
+              });
+            }
+            sent.push(JSON.parse(String(init?.body)));
+            if (!streaming)
+              return Response.json({
+                id: `gen-${index}`,
+                provider: scenario.responseProvider,
+                choices: [
+                  { message: { role: "assistant", content: "done" }, finish_reason: "stop" },
+                ],
+                usage,
+              });
+            const chunks = [
+              {
+                id: `gen-${index}`,
+                provider: scenario.responseProvider,
+                choices: [{ delta: { content: "done" } }],
+              },
+              { choices: [{ delta: {}, finish_reason: "stop" }] },
+              { usage, choices: [] },
+            ];
+            return new Response(
+              chunks.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              {
+                headers: { "content-type": "text/event-stream" },
+              },
+            );
+          };
+          const verifyPin = createOpenRouterPinVerifier({
+            fetchImpl,
+            credential: () => "fixture-key",
+            stopping: () => false,
+            delayMs: 0,
+            onVerified: (deployment, result) => {
+              reports.push({ deployment, result });
+              verified.resolve();
+            },
+          });
+          const layer = modelRouterLayer({
+            catalogue: [provider],
+            catalogueVersion: "pinned",
+            classify: () => Effect.succeed(classifyAs(hardCoding)),
+            onOpenRouterCompleted: verifyPin,
+            fetch: fetchImpl,
+          });
+          let accounting: RequestAccounting;
+          if (streaming) {
+            const result = await Effect.runPromise(
+              ModelRouter.use((router) =>
+                router.stream(
+                  work({
+                    routing: { sessionId: `stream-${index}`, boundary: "new-task" },
+                    stream: true,
+                    policy: { ...balancedPolicy, maxEstimatedUsd: 1 },
+                  }),
+                ),
+              ).pipe(Effect.provide(layer)),
+            );
+            await new Response(result.body).text();
+            accounting = result.accounting;
+          } else {
+            const result = await Effect.runPromise(
+              ModelRouter.use((router) =>
+                router.complete(
+                  work({
+                    routing: { sessionId: `complete-${index}`, boundary: "new-task" },
+                    policy: { ...balancedPolicy, maxEstimatedUsd: 1 },
+                  }),
+                ),
+              ).pipe(Effect.provide(layer)),
+            );
+            accounting = result.accounting;
+          }
+          await verified.promise;
+          assert.deepEqual(reports, [{ deployment: "frontier", result: scenario.expected }]);
+          assert.deepEqual(
+            lookups.map((url) => new URL(url).searchParams.get("id")),
+            [`gen-${index}`],
+          );
+          assert.equal(accounting.promptTokens, 60);
+          assert.equal(accounting.cachedInputTokens, scenario.cached ?? null);
+          assert.deepEqual(sent[0]?.provider, {
+            only: ["inference-net"],
+            allow_fallbacks: false,
+            require_parameters: true,
+          });
+        }
+      }
+      assert.equal(warnings.mock.callCount(), 2);
+      for (const call of warnings.mock.calls) {
+        const warning = String(call.arguments[0]);
+        assert.match(warning, /frontier.*other-provider/);
+        assert.equal(warning.includes("\n"), false);
+        assert.equal(warning.includes("private"), false);
+      }
+    } finally {
+      warnings.mock.restore();
+    }
+  },
+);

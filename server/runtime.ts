@@ -15,6 +15,7 @@ import type {
 import type { BatchInferencePort } from "../src/batch/scheduler.ts";
 import { ModelRouter, modelRouterLayer, type RouterWork } from "../src/router/index.ts";
 import type { RoutedCompletion, RoutedStream } from "../src/router/model-router.ts";
+import { createOpenRouterPinVerifier } from "../src/router/adapters/openrouter.ts";
 import { disposeControlPlane, keys, recheckLease } from "./control.ts";
 import { loadClassifierQualifications } from "./qualification.ts";
 import { GatewayFailure } from "../src/http/gateway-failure.ts";
@@ -24,6 +25,7 @@ import {
   observeAdmission,
   observeBatchDispatch,
   observeQueueEvent,
+  observeOpenRouterCompleted,
   observeStream,
   registerDeployments,
 } from "./metrics.ts";
@@ -61,12 +63,20 @@ function makeInferenceRuntime(): InferenceRuntime {
       deployment.credentialEnvVar === null ? [] : [deployment.credentialEnvVar],
     ),
   );
+  const verifyOpenRouterPin = createOpenRouterPinVerifier({
+    fetchImpl: fetch,
+    credential: (deployment) =>
+      deployment.credentialEnvVar === null ? undefined : credentials[deployment.credentialEnvVar],
+    stopping: () => processState.stopping,
+    onVerified: observeOpenRouterCompleted,
+  });
   const routerLayer = Layer.unwrap(
     Effect.map(RouterClassifier, (classifier) =>
       modelRouterLayer({
         catalogue: loaded.catalogue,
         catalogueVersion: loaded.catalogueVersion,
         classify: (input) => classifier.classify(input),
+        onOpenRouterCompleted: verifyOpenRouterPin,
         onCapacityPool: (pool) => {
           processState.routerCapacity = pool;
         },

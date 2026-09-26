@@ -271,6 +271,13 @@ test(
           response.end(JSON.stringify({ data: { is_free_tier: false } }));
           return;
         }
+        // Post-completion pin verification looks up the serving provider (free, no inference).
+        if (request.method === "GET" && request.url?.startsWith("/v1/generation?id=")) {
+          cloud.lookups = (cloud.lookups ?? 0) + 1;
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify({ data: { provider_name: "Fixture/Provider" } }));
+          return;
+        }
         assert.equal(request.method, "POST");
         assert.equal(request.url, "/v1/chat/completions");
         const chunks = [];

@@ -11,8 +11,8 @@ import { processState } from "./state.ts";
 const registry = () => processState.metricRegistry;
 const run = (effect: Effect.Effect<void>) =>
   Effect.runSync(Effect.provideService(effect, Metric.MetricRegistry, registry()));
-const counter = (name: string, value = 1, labels?: Record<string, string>) => {
-  if (Number.isFinite(value) && value > 0)
+const counter = (name: string, value = 1, labels?: Record<string, string>, includeZero = false) => {
+  if (Number.isFinite(value) && (value > 0 || (includeZero && value === 0)))
     run(
       Metric.update(
         Metric.counter(`llm_router_${name}_total`, {
@@ -119,6 +119,16 @@ export function registerDeployments(ids: readonly string[]): void {
   for (const id of ids)
     if (/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(id)) processState.metricDeployments.add(id);
 }
+/** The generation metadata lookup yields only a bounded result label. */
+export function observeOpenRouterCompleted(
+  deploymentId: string,
+  result: "match" | "mismatch" | "unknown",
+): void {
+  counter("provider_pin", 1, {
+    deployment: deployment(deploymentId),
+    result: bounded(result, ["match", "mismatch", "unknown"]),
+  });
+}
 export function observeAdmission(result: unknown): void {
   counter("admissions", 1, {
     result: bounded(result, [
@@ -192,13 +202,20 @@ export function observeFinalized(input: {
     // Usage is only "unknown" for work a provider received; unrouted requests have none.
     if (count === null || count === undefined) {
       if (dep !== "none") counter("usage_unknown", 1, { field: kind, deployment: dep });
-    } else counter("tokens", count, { kind, deployment: dep, key_id });
+    } else counter("tokens", count, { kind, deployment: dep, key_id }, kind === "cached");
   }
+  if (
+    dep !== "none" &&
+    outcome.promptTokens !== null &&
+    outcome.promptTokens !== undefined &&
+    outcome.cachedInputTokens !== null &&
+    outcome.cachedInputTokens !== undefined
+  )
+    counter("cache_eligible_prompt_tokens", outcome.promptTokens, { deployment: dep }, true);
   for (const [kind, amount] of Object.entries({
     provider_reported: outcome.providerReportedUsd,
     estimated: outcome.estimatedCostUsd,
     local_compute: outcome.localComputeEstimatedUsd,
-    cache_savings: outcome.estimatedCacheSavingsUsd,
   })) {
     if (amount !== null && amount !== undefined)
       counter("cost_usd", amount, { kind, deployment: dep, key_id });
