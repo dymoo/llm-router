@@ -251,7 +251,7 @@ Batch never competes with interactive work. Concretely:
 - Items dispatch **only when the interactive capacity queues (high/medium/low) are empty and a permit is free**. Batch is last in line by construction, not by a priority value.
 - At dispatch, an item is an **ordinary routed request**: it admits through KeyService, gets a per-item Assessment (the existing fail-closed qualification gate; the exact classifier cache dedupes identical states), routes deterministically through the ModelRouter, and finalizes into the requests ledger with its `requestId`/`deploymentId`.
 - **Once dispatched, non-preemptive**: neither `DELETE`, expiry, nor a higher-priority arrival takes an in-flight item away.
-- **On Gufo, items run as `service_tier: "flex"`**: Gufo admits them only while sessions beyond its interactive reserve are free, which Router permits cannot see (direct clients share the runtime). A flex refusal (HTTP 429 `resource_unavailable`) is `CapacityBusy`: the item returns to `queued` and is retried on a later tick, not failed.
+- **On Gufo, items run as `service_tier: "flex"`**: Gufo admits them only when it has idle compute (a free session, no default request queued or prefilling, and fewer than its `--flex-sessions` flex requests running), which Router permits cannot see (direct clients share the runtime). A flex refusal (HTTP 429 `resource_unavailable`) is `CapacityBusy`: the item returns to `queued` and is retried on a later tick, not failed.
 
 ### Spill rule
 
