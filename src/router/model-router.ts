@@ -815,6 +815,8 @@ function executeLocked(
             routeReservation,
             pin,
             routeDecision,
+            // Batch work runs only on runtime-verified spare capacity.
+            mode.kind === "batch-local" ? "flex" : undefined,
           ),
         (held, exit) =>
           Effect.sync(() => {
@@ -845,6 +847,13 @@ function executeLocked(
               work,
             );
           };
+          if (mode.kind === "batch-local") {
+            // No spare capacity right now: the batch item stays queued.
+            reportRejected();
+            return yield* new CapacityBusy({
+              message: "local runtime has no spare capacity for batch work",
+            });
+          }
           if (
             mode.kind !== "interactive" ||
             work.policy.overloadAction !== "failover" ||
@@ -1129,6 +1138,7 @@ function adapterRequestFor(
   work: RouterWork,
   candidate: RankedCandidate,
   credentials: (envVar: string) => string | undefined,
+  serviceTier?: "flex",
 ): AdapterRequest {
   const credential =
     candidate.deployment.credentialEnvVar === null
@@ -1150,6 +1160,8 @@ function adapterRequestFor(
     requestedEffort: candidate.requestedEffort,
     appliedEffort: candidate.appliedEffort,
     credential,
+    requestId: work.requestId,
+    ...(serviceTier === undefined ? {} : { serviceTier }),
   };
 }
 
@@ -1210,12 +1222,13 @@ function dispatch(
   reservation: Reservation,
   pin: SessionPin | undefined,
   decision: RouteDecision,
+  serviceTier?: "flex",
 ): Effect.Effect<RoutedCompletion | RoutedStream, RouterFailure> {
   return Effect.gen(function* () {
     if (options.onBeforeDispatch !== undefined) {
       yield* options.onBeforeDispatch(work, reservation);
     }
-    const adapterRequest = adapterRequestFor(work, candidate, credentials);
+    const adapterRequest = adapterRequestFor(work, candidate, credentials, serviceTier);
     const adapter = adapters[candidate.deployment.transport];
     const startedAt = yield* Clock.currentTimeMillis;
     if (stream) {

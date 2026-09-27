@@ -18,6 +18,10 @@ export interface AdapterRequest {
   readonly requestedEffort: RequestedEffort;
   readonly appliedEffort: AppliedEffort;
   readonly credential: string | undefined;
+  /** Router request id, forwarded where the runtime logs it. */
+  readonly requestId?: string;
+  /** OpenAI service tier; Gufo serves `flex` only from spare capacity. */
+  readonly serviceTier?: "flex";
 }
 
 export interface AdapterCompletion {

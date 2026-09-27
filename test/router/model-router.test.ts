@@ -889,6 +889,7 @@ for (const mode of ["classifier", "rules"] as const) {
         credentials: () => "fixture-key",
         fetch: async (url) => {
           const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
           if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
           contacts.push(address);
           if (
@@ -1009,6 +1010,7 @@ for (const mode of ["classifier", "rules"] as const) {
           credentials: (envVar) => (envVar === "GUFO_KEY" ? "fixture-key" : undefined),
           fetch: async (url) => {
             const address = String(url);
+            if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
             if (address.includes("/models"))
               return Response.json({ data: [{ id: local.modelId }] });
             contacted.push(address);
@@ -1063,6 +1065,7 @@ for (const mode of ["classifier", "rules"] as const) {
         credentials: () => "fixture-key",
         fetch: async (url) => {
           const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
           if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
           contacted.push(address);
           return Response.json({ error: { code: "other_failure" } }, { status: 503 });
@@ -1104,6 +1107,7 @@ for (const mode of ["classifier", "rules"] as const) {
         credentials: () => "fixture-key",
         fetch: async (url, init) => {
           const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
           if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
           contacts.push(address.includes(local.id) ? "local" : "cloud");
           if (address.includes(local.id))
@@ -1165,6 +1169,7 @@ for (const mode of ["classifier", "rules"] as const) {
         credentials: () => "fixture-key",
         fetch: async (url) => {
           const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
           if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
           contacts.push(address.includes(local.id) ? "local" : "cloud");
           if (contacts.length === 1)
