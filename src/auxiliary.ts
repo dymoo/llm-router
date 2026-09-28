@@ -4,16 +4,14 @@ const Nonnegative = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0));
 
 /**
- * Explicit single-purpose endpoints: NPU embeddings and transcription, and
- * TypeSafe System One classification (local Kev on Gufo, or cloud Jev). A
- * request names its deployment and never falls back to another one: Kev and
- * Jev give different probabilities for the same question.
+ * TypeSafe System One classification deployments: local Kev on Gufo, or cloud
+ * Jev. A request names its deployment and never falls back to another one:
+ * Kev and Jev give different probabilities for the same question.
  */
 export const AuxiliaryDeployment = Schema.Struct({
   id: Schema.NonEmptyString,
-  modality: Schema.Literals(["embeddings", "transcription", "systemone"]),
-  /** Wire protocol of the upstream; FastFlowLM when omitted. */
-  transport: Schema.optional(Schema.Literals(["fastflowlm", "gufo", "typesafe"])),
+  modality: Schema.Literals(["systemone"]),
+  transport: Schema.Literals(["gufo", "typesafe"]),
   location: Schema.optional(Schema.Literals(["local", "cloud"])),
   /** Environment variable holding the upstream bearer key, if it needs one. */
   credentialEnvVar: Schema.optional(Schema.NonEmptyString),
@@ -47,16 +45,13 @@ export function decodeAuxiliaryCatalogue(value: unknown): readonly AuxiliaryDepl
       throw new Error("Invalid auxiliary endpoint");
     if (deployment.id === "auto" || ids.has(deployment.id))
       throw new Error("Duplicate auxiliary model id");
-    const transport = deployment.transport ?? "fastflowlm";
-    if ((deployment.modality === "systemone") !== (transport !== "fastflowlm"))
-      throw new Error("System One deployments use the gufo or typesafe transport");
-    if (transport === "typesafe" && deployment.location !== "cloud")
+    if (deployment.transport === "typesafe" && deployment.location !== "cloud")
       throw new Error("TypeSafe deployments are cloud deployments");
     if (deployment.capacity.reservedInteractiveSlots >= deployment.capacity.maxParallel)
       throw new Error("Auxiliary capacity must admit every priority");
     const capacity = JSON.stringify(deployment.capacity);
     if (resources.has(deployment.resourceId) && resources.get(deployment.resourceId) !== capacity)
-      throw new Error("Shared NPU resource must have identical capacity");
+      throw new Error("A shared resource must have identical capacity");
     resources.set(deployment.resourceId, capacity);
     ids.add(deployment.id);
   }
