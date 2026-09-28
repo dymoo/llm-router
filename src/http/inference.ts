@@ -10,7 +10,12 @@ import type {
   RoutedWork,
   StreamSuccess,
 } from "./contracts.ts";
-import { classifierInputFor, decodeChatCompletion, requestCapabilities } from "./decode.ts";
+import {
+  classifierInputFor,
+  decodeAppAttribution,
+  decodeChatCompletion,
+  requestCapabilities,
+} from "./decode.ts";
 import { errorBody, failureResponse, flexFailure, jsonResponse, toHttpFailure } from "./errors.ts";
 import { sessionResponseHeaders, sseHeaders } from "./headers.ts";
 import { BODY_READ_TIMEOUT_MS, GATEWAY_EFFECT_TIMEOUT_MS, INFERENCE_MAX_BYTES } from "./limits.ts";
@@ -49,12 +54,18 @@ export async function handleChatCompletions(
   const signal = deadline.signal;
   let streaming = false;
   let flex = false;
+  const app = decodeAppAttribution(request.headers);
   const finalize: Finalize = (outcome, state) => {
     if (admission === undefined) return Promise.resolve();
     if (finalization !== undefined) return finalization;
     const lease = admission;
     finalization = deps.keys
-      .finalize(lease, outcome)
+      .finalize(
+        lease,
+        app === undefined
+          ? outcome
+          : { ...outcome, appUrl: app.url ?? null, appTitle: app.title ?? null },
+      )
       .then(() => {
         if (claimed) deps.status.update(lease.keyId, correlationId, { state });
       })
@@ -132,6 +143,7 @@ export async function handleChatCompletions(
       freshFactsAvailable: false,
       stream: decoded.stream,
       ...(serviceTier === undefined ? {} : { serviceTier }),
+      ...(app === undefined ? {} : { appAttribution: app }),
     };
     if (decoded.stream) {
       // Flex never queues, so dispatch before committing the 200: a refusal is

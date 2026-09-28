@@ -320,6 +320,8 @@ function requestOutcomeFields(
     cacheObservation: outcome.cacheObservation ?? lease.cacheObservation,
     costSource: outcome.costSource ?? lease.costSource,
     decisionTraceJson: outcome.decisionTraceJson ?? lease.decisionTraceJson,
+    appUrl: outcome.appUrl ?? lease.appUrl,
+    appTitle: outcome.appTitle ?? lease.appTitle,
   };
 }
 
@@ -1457,6 +1459,8 @@ export const keyRepositoryLayer = (options: {
                 row.decisionTraceJson === null
                   ? null
                   : (JSON.parse(row.decisionTraceJson) as unknown),
+              appUrl: row.appUrl,
+              appTitle: row.appTitle,
             }));
             return {
               items,

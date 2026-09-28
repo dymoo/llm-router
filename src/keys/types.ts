@@ -84,6 +84,8 @@ export interface FinalizeOutcome {
   readonly cacheObservation?: "observed-hit" | "observed-miss" | "unknown" | null;
   readonly costSource?: "provider-reported" | "local-rate-card" | "estimated" | null;
   readonly decisionTraceJson?: string | null;
+  readonly appUrl?: string | null;
+  readonly appTitle?: string | null;
 }
 
 export interface UsageSummary {
@@ -144,6 +146,8 @@ export interface RecentRequest {
   readonly cacheObservation: string | null;
   readonly costSource: string | null;
   readonly decisionTrace: unknown;
+  readonly appUrl: string | null;
+  readonly appTitle: string | null;
 }
 
 export interface RecentRequestList {

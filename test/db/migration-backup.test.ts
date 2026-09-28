@@ -73,7 +73,7 @@ after(() => {
   for (const directory of dirs) rmSync(directory, { recursive: true, force: true });
 });
 
-it("backs up a v4 control-plane database before upgrading to v5", () => {
+it("backs up a v4 control-plane database before upgrading to the current schema", () => {
   const path = tempDb();
   createV4(path);
   const writer = new DatabaseSync(path);
@@ -86,7 +86,8 @@ it("backs up a v4 control-plane database before upgrading to v5", () => {
     assert.equal(files.length, 1);
     const [backupName] = files;
     assert.ok(backupName !== undefined);
-    assert.match(backupName, /^control-pre-v5-\d{4}-\d\d-\d\dT.*Z\.sqlite$/);
+    assert.ok(backupName.startsWith(`control-pre-v${CONTROL_PLANE_SCHEMA_VERSION}-`));
+    assert.match(backupName, /^control-pre-v\d+-\d{4}-\d\d-\d\dT.*Z\.sqlite$/);
     const backupPath = join(dirname(path), "backups", backupName);
     assert.equal(statSync(join(dirname(path), "backups")).mode & 0o777, 0o700);
     assert.equal(statSync(backupPath).mode & 0o777, 0o600);
@@ -110,6 +111,7 @@ it("backs up a v4 control-plane database before upgrading to v5", () => {
       backup.close();
     }
     assert.equal(keyName(opened.sqlite), "wal-kept");
+    assert.deepEqual(opened.sqlite.prepare("SELECT app_url, app_title FROM requests").all(), []);
   } finally {
     opened.sqlite.close();
     writer.close();
@@ -140,7 +142,7 @@ it("retains only five automatic backups for the target version and leaves operat
   createV4(path);
   const directory = join(dirname(path), "backups");
   mkdirSync(directory, { mode: 0o700 });
-  const prefix = "control-pre-v5-";
+  const prefix = `control-pre-v${CONTROL_PLANE_SCHEMA_VERSION}-`;
   const old = Array.from(
     { length: 5 },
     (_, index) => `${prefix}2025-01-0${index + 1}T00-00-00.000Z.sqlite`,

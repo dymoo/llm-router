@@ -179,6 +179,8 @@ export type RoutingRow = {
   policyVersion: number | null;
   assessmentDifficulty: string | null;
   catalogueVersion: string | null;
+  appTitle: string | null;
+  appUrl: string | null;
 };
 
 export type UsageSnapshot = {

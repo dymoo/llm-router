@@ -357,6 +357,51 @@ describe("ModelRouter", () => {
       }
     }
   });
+  it("hands client app attribution to OpenRouter and never to a local runtime", async () => {
+    const posts: Array<[string, string | null, string | null]> = [];
+    const upstream = fakeFetch();
+    const layer = modelRouterLayer({
+      catalogue: [localQwen, frontier],
+      classify: () => Effect.succeed(classifyAs(easyLocalCoding)),
+      catalogueVersion: "app",
+      credentials: () => "sk-test",
+      fetch: (async (input: string | URL, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          const headers = new Headers(init.headers);
+          posts.push([String(input), headers.get("HTTP-Referer"), headers.get("X-Title")]);
+        }
+        return upstream(input, init);
+      }) as typeof fetch,
+    });
+    const appAttribution = { url: "https://vibe.example", title: "Free Vibecode" };
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const router = yield* ModelRouter;
+        for (const [requestId, allowed] of [
+          ["req-cloud", frontier.id],
+          ["req-local", localQwen.id],
+        ] as const)
+          yield* router.complete(
+            work({
+              requestId,
+              appAttribution,
+              policy: {
+                ...balancedPolicy,
+                maxWaitMs: 0,
+                localityBias: 0,
+                allowedModels: [allowed],
+              },
+              routing: { sessionId: requestId, boundary: "new-task" },
+            }),
+          );
+      }).pipe(Effect.provide(layer)),
+    );
+    assert.deepEqual(posts, [
+      [frontier.endpoint + "/v1/chat/completions", appAttribution.url, appAttribution.title],
+      [localQwen.endpoint + "/v1/chat/completions", null, null],
+    ]);
+  });
+
   it("pins continuations to the same deployment and effort", async () => {
     const layer = modelRouterLayer({
       catalogue: [localQwen, cloudGlm],

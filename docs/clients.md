@@ -40,6 +40,29 @@ A changed continuity hash (system/developer messages, tools, tool choice, respon
 
 Successful responses expose request, deployment, session, and applied-effort headers (URI-encoded where needed). Persist `sessionId` from the header or from the id you sent; do not invent a second trajectory.
 
+## App attribution
+
+Every client app should send OpenRouter's app attribution headers on every chat request:
+
+```http
+HTTP-Referer: https://your-app.example
+X-OpenRouter-Title: Your App
+X-Title: Your App
+```
+
+`HTTP-Referer` is the app's public URL (OpenRouter's app identity); `X-OpenRouter-Title` is its display name, and `X-Title` repeats it for older tooling. `X-OpenRouter-Categories` (up to two, comma-separated, lowercase hyphenated, each at most 30 characters) and `X-OpenRouter-App-Visibility: hidden` (keep the app out of public rankings) are optional.
+
+| Header                               | Accepted when                                                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------- |
+| `HTTP-Referer`                       | Absolute `http`/`https` URL without credentials or whitespace, at most 512 characters |
+| `X-OpenRouter-Title`, else `X-Title` | 1–128 characters after trimming, no control characters                                |
+| `X-OpenRouter-Categories`            | OpenRouter's format above; the whole header is dropped otherwise                      |
+| `X-OpenRouter-App-Visibility`        | Exactly `hidden`; anything else means public, which is the default                    |
+
+Attribution is advisory metadata. It never changes routing, authentication or key policy, and an invalid value is ignored rather than failing the request. Categories and visibility count only alongside a valid URL or title.
+
+The router records the URL and title with the request (the admin **Request** dialog shows them as **App**). When the request is served by OpenRouter, the router forwards the client's attribution instead of its own: `HTTP-Referer` = URL, `X-OpenRouter-Title` and `X-Title` = title, plus categories and visibility only if the client sent them. Referer and title replace the router's as a pair, so a title without a URL is sent without a Referer and never renames the router's own app. Requests without a URL or title keep the router's attribution (`llm-router`, hidden). Gufo and other runtimes never receive these headers, and `POST /v1/batches` OpenRouter spill always uses the router's attribution.
+
 ## OMP / coding-agent wiring
 
 Point the harness at `http://127.0.0.1:3000/v1` with the gateway API key (`jrv_…`). Send `routing.sessionId` as the harness task/session id and `routing.boundary` as:

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHook } from "node:async_hooks";
 import test from "node:test";
+import type { AppAttribution } from "../../src/domain.ts";
+import type { InferenceDeps, RoutedWork } from "../../src/http/contracts.ts";
 import { GatewayFailure } from "../../src/http/gateway-failure.ts";
 import { handleChatCompletions } from "../../src/http/inference.ts";
 import { GATEWAY_EFFECT_TIMEOUT_MS } from "../../src/http/limits.ts";
@@ -862,5 +864,133 @@ test("other service tiers route normally and keep the local overload shape", asy
     assert.equal(seen, undefined, tier);
     assert.equal(response.status, 503, tier);
     assert.equal((await response.json()).error.code, "local_overloaded");
+  }
+});
+
+function attributedChat(headers: Record<string, string>, gateway: InferenceDeps["gateway"]) {
+  const keys = memoryKeys();
+  const response = handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k", ...headers },
+      json: { model: "auto", messages: [{ role: "user", content: "hi" }] },
+    }),
+    inferenceDeps(keys, gateway),
+  );
+  return { keys, response };
+}
+
+function capturingGateway(): { gateway: InferenceDeps["gateway"]; seen: RoutedWork[] } {
+  const seen: RoutedWork[] = [];
+  return {
+    seen,
+    gateway: {
+      complete: async (work) => {
+        seen.push(work);
+        return {
+          headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+          body: completion,
+          metadata: () => ({ deploymentId: "d" }),
+        };
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    },
+  };
+}
+
+test("records client app attribution and hands it to routing as advisory metadata", async () => {
+  const { gateway, seen } = capturingGateway();
+  const { keys, response } = attributedChat(
+    {
+      "HTTP-Referer": "https://vibe.example/studio",
+      "X-OpenRouter-Title": "  Free Vibecode ",
+      "X-Title": "Legacy name",
+      "X-OpenRouter-Categories": "programming-app, native-app-builder",
+      "X-OpenRouter-App-Visibility": "hidden",
+    },
+    gateway,
+  );
+  assert.equal((await response).status, 200);
+  assert.deepEqual(seen[0]?.appAttribution, {
+    url: "https://vibe.example/studio",
+    title: "Free Vibecode",
+    categories: "programming-app,native-app-builder",
+    visibility: "hidden",
+  });
+  assert.equal(seen[0]?.policy.priority, samplePolicy().priority);
+  assert.equal(keys.finalizes[0]?.status, "success");
+  assert.equal(keys.finalizes[0]?.appUrl, "https://vibe.example/studio");
+  assert.equal(keys.finalizes[0]?.appTitle, "Free Vibecode");
+});
+
+test("records attribution on failed requests too", async () => {
+  const { keys, response } = attributedChat(
+    { "HTTP-Referer": "https://vibe.example", "X-Title": "Free Vibecode" },
+    {
+      complete: async () => {
+        throw Object.assign(new Error("no route"), { _tag: "NoEligibleModel" });
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    },
+  );
+  assert.notEqual((await response).status, 200);
+  assert.equal(keys.finalizes[0]?.status, "error");
+  assert.equal(keys.finalizes[0]?.appUrl, "https://vibe.example");
+  assert.equal(keys.finalizes[0]?.appTitle, "Free Vibecode");
+});
+
+test("ignores invalid app attribution without failing the request", async () => {
+  const cases: Array<[Record<string, string>, AppAttribution | undefined]> = [
+    [
+      {
+        "HTTP-Referer": "javascript:alert(1)",
+        "X-OpenRouter-Title": "   ",
+        "X-OpenRouter-Categories": "game",
+        "X-OpenRouter-App-Visibility": "hidden",
+      },
+      undefined,
+    ],
+    [{ "HTTP-Referer": "https://user:secret@vibe.example/" }, undefined],
+    [{ "HTTP-Referer": "ftp://vibe.example/" }, undefined],
+    [{ "HTTP-Referer": "/relative/path" }, undefined],
+    [{ "HTTP-Referer": `https://vibe.example/${"a".repeat(512)}` }, undefined],
+    [{ "X-OpenRouter-Title": "x".repeat(129) }, undefined],
+    [{ "X-OpenRouter-Title": "Free\tVibecode" }, undefined],
+    [
+      {
+        "HTTP-Referer": "https://vibe.example a",
+        "X-OpenRouter-Title": "t".repeat(129),
+        "X-Title": "Old tool",
+        "X-OpenRouter-Categories": "cli-agent,game,roleplay",
+        "X-OpenRouter-App-Visibility": "public",
+      },
+      { title: "Old tool" },
+    ],
+    [
+      {
+        "HTTP-Referer": "http://localhost:3000/",
+        "X-OpenRouter-Categories": "Programming-App",
+      },
+      { url: "http://localhost:3000/" },
+    ],
+    [
+      {
+        "X-Title": "Old tool",
+        "X-OpenRouter-Categories": `${"a".repeat(31)}`,
+      },
+      { title: "Old tool" },
+    ],
+  ];
+  for (const [headers, expected] of cases) {
+    const { gateway, seen } = capturingGateway();
+    const { keys, response } = attributedChat(headers, gateway);
+    assert.equal((await response).status, 200, JSON.stringify(headers));
+    assert.deepEqual(seen[0]?.appAttribution, expected, JSON.stringify(headers));
+    assert.equal(keys.finalizes[0]?.appUrl ?? null, expected?.url ?? null);
+    assert.equal(keys.finalizes[0]?.appTitle ?? null, expected?.title ?? null);
   }
 });

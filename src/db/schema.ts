@@ -97,6 +97,9 @@ export const requests = sqliteTable(
     /** 1 while a remote batch owns this authorized request (no ordinary HTTP lease held);
      * 0 for every request that is not remote-deferred. */
     deferred: integer("deferred").notNull().default(0),
+    /** Client-declared app attribution (advisory, unverified). */
+    appUrl: text("app_url"),
+    appTitle: text("app_title"),
   },
   (table) => [
     index("requests_key_status_idx").on(table.keyId, table.status),

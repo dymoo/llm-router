@@ -645,6 +645,8 @@ export function decodeRoutingRow(payload: unknown): RoutingRow | null {
     policyVersion: nullableCount(trace.keyPolicyVersion),
     assessmentDifficulty: nullableString(payload.difficulty),
     catalogueVersion: nullableString(trace.catalogueVersion),
+    appTitle: nullableString(payload.appTitle),
+    appUrl: nullableString(payload.appUrl),
   };
 }
 

@@ -4,6 +4,7 @@ import {
   checkCatalogueForInference,
   checkFeasibility,
   applyConfiguredRateCardUsd,
+  type AppAttribution,
   type Assessment,
   type ClassifiedAssessment,
   type ClassifyInput,
@@ -118,6 +119,8 @@ export interface RouterWork {
    * never spills or fails over to cloud.
    */
   readonly serviceTier?: "flex";
+  /** Client app attribution, passed to adapters only; routing never reads it. */
+  readonly appAttribution?: AppAttribution;
 }
 
 export interface RouteHeaders {
@@ -1229,6 +1232,7 @@ function adapterRequestFor(
     credential,
     requestId: work.requestId,
     ...(serviceTier === undefined ? {} : { serviceTier }),
+    ...(work.appAttribution === undefined ? {} : { appAttribution: work.appAttribution }),
   };
 }
 

@@ -47,6 +47,19 @@ export const serviceTierFor = (
   requested: "flex" | undefined,
 ): "flex" | undefined => requested ?? (priority === "low" ? "flex" : undefined);
 
+/**
+ * A client app's OpenRouter attribution (`HTTP-Referer`, `X-OpenRouter-Title`,
+ * `X-OpenRouter-Categories`, `X-OpenRouter-App-Visibility`), already validated.
+ * Advisory metadata: recorded per request and forwarded to OpenRouter, never
+ * used for routing, auth or key policy. At least one of `url`/`title` is set.
+ */
+export type AppAttribution = {
+  readonly url?: string;
+  readonly title?: string;
+  readonly categories?: string;
+  readonly visibility?: "hidden";
+};
+
 export const OverloadAction = Schema.Literals(["report", "failover"]);
 export type OverloadAction = typeof OverloadAction.Type;
 
@@ -826,6 +839,9 @@ export const AnalyticsRequestRow = Schema.Struct({
   queueWaitMs: UnknownCount,
   decodeTokensPerSecond: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
   saturation: Schema.Boolean,
+  /** Client-declared app attribution (advisory, unverified). */
+  appUrl: Schema.NullOr(Schema.String),
+  appTitle: Schema.NullOr(Schema.String),
   httpOutcome: RequestOutcome,
   /** Always null until an explicit future opt-in evaluator. HTTP success is not task success. */
   taskSuccess: Schema.Null,

@@ -138,6 +138,29 @@ describe("Gufo ProviderAdapter", () => {
     assert.equal(seen?.requestId, null);
   });
 
+  it("never forwards client app attribution to Gufo", async () => {
+    let names: string[] = [];
+    const adapter = gufoAdapter(async (_url, init) => {
+      names = [...new Headers(init?.headers).keys()];
+      return Response.json({
+        model: gufo.modelId,
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" } }],
+      });
+    });
+    await Effect.runPromise(
+      adapter.complete(
+        request({ appAttribution: { url: "https://vibe.example", title: "Free Vibecode" } }),
+      ),
+    );
+    assert.ok(names.includes("authorization"));
+    assert.deepEqual(
+      names.filter(
+        (name) => name === "http-referer" || name === "x-title" || name.startsWith("x-openrouter-"),
+      ),
+      [],
+    );
+  });
+
   it("sends Gufo's exact completion protocol and returns tool and usage data", async () => {
     const tool = { id: "call_1", type: "function", function: { name: "read", arguments: "{}" } };
     const adapter = gufoAdapter(async (url, init) => {

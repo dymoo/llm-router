@@ -71,6 +71,8 @@ test("SQLite analytics separates actual costs, local COGS, unknown usage, reuse 
           exclusionJson: JSON.stringify([
             { deploymentId: "cloud", code: "quality", detail: "Below floor" },
           ]),
+          appUrl: "https://vibe.example",
+          appTitle: "Free Vibecode",
         });
         const second = yield* keys.admit(cloud.secret);
         yield* keys.finalize(second, {
@@ -148,6 +150,10 @@ test("SQLite analytics separates actual costs, local COGS, unknown usage, reuse 
         const rows = decodeRequestPage(yield* keys.recentRequests({ since, until, limit: 10 }));
         assert.equal(rows.items.length, 3);
         assert.equal(rows.items.find((item) => item.id === first.requestId)?.appliedEffort, "high");
+        const firstRow = rows.items.find((item) => item.id === first.requestId);
+        assert.equal(firstRow?.appTitle, "Free Vibecode");
+        assert.equal(firstRow?.appUrl, "https://vibe.example");
+        assert.equal(rows.items.find((item) => item.id === second.requestId)?.appUrl, null);
       }),
     );
   } finally {

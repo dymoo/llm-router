@@ -1,6 +1,6 @@
 import type { Effect } from "effect";
 import type { SamplingOptions } from "../../sampling.ts";
-import type { AppliedEffort, Deployment, RequestedEffort } from "../../domain.ts";
+import type { AppAttribution, AppliedEffort, Deployment, RequestedEffort } from "../../domain.ts";
 import type { LocalOverloaded, ProviderFailure } from "../../errors.ts";
 import type { ProviderUsage } from "../accounting.ts";
 import type { SaturationEvidence } from "../locality.ts";
@@ -22,6 +22,8 @@ export interface AdapterRequest {
   readonly requestId?: string;
   /** OpenAI service tier; Gufo serves `flex` only from spare capacity. */
   readonly serviceTier?: "flex";
+  /** Client app attribution; only the OpenRouter adapter sends it upstream. */
+  readonly appAttribution?: AppAttribution;
 }
 
 export interface AdapterCompletion {

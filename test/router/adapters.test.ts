@@ -8,6 +8,7 @@ import {
   createOpenRouterPinVerifier,
   OPENROUTER_APP_HEADERS,
   openRouterAdapter,
+  openRouterAppHeaders,
   openRouterBody,
 } from "../../src/router/adapters/openrouter.ts";
 import { localQwen, cloudGlm, frontier } from "./fixtures.ts";
@@ -81,6 +82,45 @@ describe("adapters", () => {
     for (const headers of seen)
       for (const [name, value] of Object.entries(OPENROUTER_APP_HEADERS))
         assert.equal(headers.get(name), value);
+  });
+
+  it("forwards a self-identified client's attribution to OpenRouter instead of the router's", async () => {
+    const seen: Headers[] = [];
+    const adapter = openRouterAdapter(async (_url, init) => {
+      seen.push(new Headers(init?.headers));
+      return Response.json({ choices: [{ message: { role: "assistant", content: "ok" } }] });
+    });
+    const app = {
+      url: "https://vibe.example/studio",
+      title: "Free Vibecode",
+      categories: "programming-app,native-app-builder",
+      visibility: "hidden" as const,
+    };
+    await Effect.runPromise(
+      adapter.complete(
+        request({ deployment: frontier, appliedEffort: "none", appAttribution: app }),
+      ),
+    );
+    await Effect.runPromise(
+      adapter.stream(request({ deployment: frontier, appliedEffort: "none", appAttribution: app })),
+    );
+    assert.equal(seen.length, 2);
+    for (const headers of seen) {
+      assert.equal(headers.get("HTTP-Referer"), app.url);
+      assert.equal(headers.get("X-OpenRouter-Title"), app.title);
+      assert.equal(headers.get("X-Title"), app.title);
+      assert.equal(headers.get("X-OpenRouter-Categories"), app.categories);
+      assert.equal(headers.get("X-OpenRouter-App-Visibility"), "hidden");
+    }
+
+    // Referer/Title replace the router's as a pair; the router's `hidden` is its own default.
+    assert.deepEqual(openRouterAppHeaders({ url: app.url }), { "HTTP-Referer": app.url });
+    assert.deepEqual(openRouterAppHeaders({ title: app.title }), {
+      "X-OpenRouter-Title": app.title,
+      "X-Title": app.title,
+    });
+    assert.equal(openRouterAppHeaders(undefined), OPENROUTER_APP_HEADERS);
+    assert.equal(openRouterAppHeaders({ categories: "game" }), OPENROUTER_APP_HEADERS);
   });
 
   it("pins OpenRouter provider without hidden fallbacks", () => {

@@ -2,6 +2,7 @@ import type { ClassifierHealth } from "../classifier.ts";
 import type { SamplingOptions } from "../sampling.ts";
 import type {
   AnalyticsSnapshot,
+  AppAttribution,
   BatchRequestCounts,
   BatchStatus,
   BatchUsage,
@@ -216,6 +217,8 @@ export type RoutedWork = {
   freshFactsAvailable: false;
   stream: boolean;
   serviceTier?: "flex";
+  /** Client app attribution; forwarded to OpenRouter, never used for routing. */
+  appAttribution?: AppAttribution;
 };
 
 export type SessionHeaders = {

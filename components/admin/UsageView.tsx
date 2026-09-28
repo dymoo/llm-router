@@ -346,6 +346,13 @@ export function UsageView({
             <Item label="ID" value={selected.id} />
             <Item label="When" value={formatEpoch(selected.createdAt)} />
             <Item label="Key" value={selected.keyName ?? selected.keyPrefix ?? "—"} />
+            <Item
+              label="App"
+              value={
+                [selected.appTitle, selected.appUrl].filter((part) => part !== null).join(" · ") ||
+                "—"
+              }
+            />
             <Item label="Priority" value={selected.priority ?? "—"} />
             <Item label="Deployment" value={selected.deploymentId ?? "—"} />
             <Item label="Location" value={selected.location ?? "—"} />

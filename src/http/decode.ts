@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { KeyPolicy as DomainKeyPolicy } from "../domain.ts";
+import { type AppAttribution, KeyPolicy as DomainKeyPolicy } from "../domain.ts";
 import { decodeSampling, SAMPLING_FIELDS } from "../sampling.ts";
 import type {
   ChatCompletionRequest,
@@ -201,6 +201,56 @@ function decodeRouting(value: unknown, newId: () => string): RoutingHint {
   return taskBrief === undefined
     ? { sessionId, boundary }
     : { sessionId, boundary, taskBrief, taskBriefSource: "caller-brief" };
+}
+
+/** Header values are byte strings (≤ U+00FF); this matches C0, DEL and C1 controls. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+/** OpenRouter's documented category format: lowercase, hyphen-separated. */
+const APP_CATEGORY = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * The client app's OpenRouter attribution headers. Each invalid value is
+ * ignored, never rejected: attribution is advisory and must not fail a request.
+ * Categories and visibility only count alongside a url or title.
+ */
+export function decodeAppAttribution(headers: Headers): AppAttribution | undefined {
+  const url = appUrl(headers.get("http-referer"));
+  const title = appTitle(headers.get("x-openrouter-title")) ?? appTitle(headers.get("x-title"));
+  if (url === undefined && title === undefined) return undefined;
+  const categories = appCategories(headers.get("x-openrouter-categories"));
+  const hidden = headers.get("x-openrouter-app-visibility")?.trim() === "hidden";
+  return {
+    ...(url === undefined ? {} : { url }),
+    ...(title === undefined ? {} : { title }),
+    ...(categories === undefined ? {} : { categories }),
+    ...(hidden ? { visibility: "hidden" as const } : {}),
+  };
+}
+
+function appUrl(value: string | null): string | undefined {
+  const text = value?.trim() ?? "";
+  if (text.length === 0 || text.length > 512 || /\s/.test(text) || CONTROL_CHARS.test(text))
+    return undefined;
+  const url = URL.parse(text);
+  return url !== null &&
+    (url.protocol === "https:" || url.protocol === "http:") &&
+    url.username === "" &&
+    url.password === ""
+    ? text
+    : undefined;
+}
+
+function appTitle(value: string | null): string | undefined {
+  const text = value?.trim() ?? "";
+  return text.length >= 1 && text.length <= 128 && !CONTROL_CHARS.test(text) ? text : undefined;
+}
+
+function appCategories(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const parts = value.split(",").map((part) => part.trim());
+  return parts.length <= 2 && parts.every((part) => part.length <= 30 && APP_CATEGORY.test(part))
+    ? parts.join(",")
+    : undefined;
 }
 
 function requireNonempty(value: unknown, label: string): string {

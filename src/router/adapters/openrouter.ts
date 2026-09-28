@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import type { AppliedEffort, Deployment } from "../../domain.ts";
+import type { AppAttribution, AppliedEffort, Deployment } from "../../domain.ts";
 import type { AdapterRequest, ProviderAdapter } from "./types.ts";
 import {
   bearerHeaders,
@@ -10,9 +10,10 @@ import {
 } from "./http.ts";
 
 /**
- * OpenRouter app attribution, sent on every OpenRouter call (chat, generation
- * lookups, Batch, readiness). `hidden` keeps the app out of public rankings
- * while attribution and per-app analytics keep working.
+ * The router's own OpenRouter app attribution, sent on every OpenRouter call
+ * (chat, generation lookups, Batch, readiness) unless a chat client identifies
+ * itself. `hidden` keeps the app out of public rankings while attribution and
+ * per-app analytics keep working.
  */
 export const OPENROUTER_APP_HEADERS = {
   "HTTP-Referer": "https://github.com/dymoo/llm-router",
@@ -20,18 +21,35 @@ export const OPENROUTER_APP_HEADERS = {
   "X-OpenRouter-App-Visibility": "hidden",
 } as const;
 
+/**
+ * Attribution for one chat call. A client that identifies itself (url and/or
+ * title) replaces the router's Referer/Title as a pair, so the router's app is
+ * never retitled and the client's app never inherits `hidden`; categories and
+ * visibility are sent only if the client sent them.
+ */
+export function openRouterAppHeaders(app: AppAttribution | undefined): Record<string, string> {
+  if (app === undefined || (app.url === undefined && app.title === undefined))
+    return OPENROUTER_APP_HEADERS;
+  return {
+    ...(app.url === undefined ? {} : { "HTTP-Referer": app.url }),
+    ...(app.title === undefined ? {} : { "X-OpenRouter-Title": app.title, "X-Title": app.title }),
+    ...(app.categories === undefined ? {} : { "X-OpenRouter-Categories": app.categories }),
+    ...(app.visibility === undefined ? {} : { "X-OpenRouter-App-Visibility": app.visibility }),
+  };
+}
+
 export function openRouterAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
   return {
     complete: (request) =>
       fetchResponse(fetchImpl, joinUrl(request.deployment.endpoint, "/v1/chat/completions"), {
         method: "POST",
-        headers: bearerHeaders(request.credential, OPENROUTER_APP_HEADERS),
+        headers: bearerHeaders(request.credential, openRouterAppHeaders(request.appAttribution)),
         body: JSON.stringify(openRouterBody(request, false)),
       }).pipe(Effect.flatMap(readJsonCompletion)),
     stream: (request) =>
       fetchResponse(fetchImpl, joinUrl(request.deployment.endpoint, "/v1/chat/completions"), {
         method: "POST",
-        headers: bearerHeaders(request.credential, OPENROUTER_APP_HEADERS),
+        headers: bearerHeaders(request.credential, openRouterAppHeaders(request.appAttribution)),
         body: JSON.stringify(openRouterBody(request, true)),
       }),
     probeUnavailable: () => Effect.succeed(false),

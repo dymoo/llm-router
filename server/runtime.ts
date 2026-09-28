@@ -238,6 +238,7 @@ function toRouterWork(work: RoutedWork): RouterWork {
     freshFactsAvailable: false,
     stream: work.stream,
     ...(work.serviceTier === undefined ? {} : { serviceTier: work.serviceTier }),
+    ...(work.appAttribution === undefined ? {} : { appAttribution: work.appAttribution }),
   };
 }
 
