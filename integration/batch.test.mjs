@@ -1284,13 +1284,13 @@ test(
     assert.equal(state.openRouter.posts.length, 2);
     assert.equal(completed.results.length, 2);
     assert.equal(completed.usage.is_byok, null, "unknown cannot become known after a later group");
-    assert.deepEqual(
-      query(
-        "SELECT usage_json FROM batch_remotes WHERE job_id = ? ORDER BY created_at",
-        submitted.body.id,
-      ).map((remote) => JSON.parse(remote.usage_json).is_byok),
-      [null, false],
-    );
+    // The two groups can be created in the same millisecond, so compare as a set.
+    const groups = query(
+      "SELECT usage_json FROM batch_remotes WHERE job_id = ?",
+      submitted.body.id,
+    ).map((remote) => JSON.parse(remote.usage_json).is_byok);
+    assert.equal(groups.length, 2);
+    assert.ok(groups.includes(null) && groups.includes(false), JSON.stringify(groups));
   },
 );
 
