@@ -8,7 +8,6 @@ import type { AdminDeps, KeyService, PublicKey } from "../src/http/contracts.ts"
 import { ApiKeys, apiKeysLayer, keyRepositoryLayer, type Admission } from "../src/keys/index.ts";
 import type { FinalizeOutcome, ListedKey } from "../src/keys/types.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
-import { loadClassifierQualifications } from "./qualification.ts";
 import { processState } from "./state.ts";
 import {
   observeAdmission,
@@ -154,8 +153,7 @@ export const keys: KeyService = {
   },
   usageSummary: (query) => run(ApiKeys.use((api) => api.usageSummary(query))),
   recentRequests: (query) => run(ApiKeys.use((api) => api.recentRequests(query))),
-  analytics: (query, qualifications) =>
-    run(ApiKeys.use((api) => api.analytics(query, qualifications))),
+  analytics: (query) => run(ApiKeys.use((api) => api.analytics(query))),
 };
 
 export function leaseFor(requestId: string): Admission | undefined {
@@ -261,11 +259,7 @@ export const batchKeyService: KeyService = keys;
 
 export function getAdminDeps(): AdminDeps {
   const env = getEnv();
-  return {
-    appOrigin: env.APP_ORIGIN,
-    classifierQualifications: env.CLASSIFIER_MODE === "rules" ? [] : loadClassifierQualifications(),
-    keys,
-  };
+  return { appOrigin: env.APP_ORIGIN, keys };
 }
 
 export async function disposeControlPlane(): Promise<void> {

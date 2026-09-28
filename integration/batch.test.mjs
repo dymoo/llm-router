@@ -572,7 +572,6 @@ globalThis.fetch = (input, init) => {
       BATCH_RESULTS_DIR: state.resultsDir,
       AUXILIARY_CATALOG: "",
       API_KEY_PEPPER: pepper,
-      CLASSIFIER_MODE: "rules",
       OPENROUTER_API_KEY: FAKE_OPENROUTER_KEY,
     };
 

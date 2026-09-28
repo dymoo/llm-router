@@ -324,7 +324,6 @@ globalThis.fetch = (input, init) => {
             MODEL_CATALOG: cataloguePath,
             AUXILIARY_CATALOG: "",
             API_KEY_PEPPER: randomUUID(),
-            CLASSIFIER_MODE: "rules",
             GUFO_API_KEY: FIXTURE_CREDENTIAL,
             OPENROUTER_API_KEY: "fixture-cloud-only",
           },

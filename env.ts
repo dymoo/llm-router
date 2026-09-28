@@ -12,13 +12,6 @@ const loadEnv = () =>
       AUXILIARY_CATALOG: z.string().min(1).optional(),
       BATCH_CATALOG: z.string().min(1).optional(),
       BATCH_RESULTS_DIR: z.string().min(1).optional(),
-      CLASSIFIER_MODE: z.enum(["rules", "laya", "jev"]),
-      CLASSIFIER_QUALIFICATION: z.string().min(1).optional(),
-      LAYA_URL: z.string().url().optional(),
-      LAYA_MODEL_REVISION: z.string().min(1).default("1c5edc17a7acd8701df6fc341c0d179f1c62c982"),
-      TYPESAFE_API_KEY: z.string().min(1).optional(),
-      TYPESAFE_MODEL: z.string().min(1).default("jev-1.13.0"),
-      TYPESAFE_BASE_URL: z.string().url().default("https://api.typesafe.ai"),
       OPENROUTER_API_KEY: z.string().min(1).optional(),
       METRICS_PORT: z.coerce.number().int().min(1).max(65535).optional(),
     },
@@ -31,13 +24,6 @@ const loadEnv = () =>
       AUXILIARY_CATALOG: process.env.AUXILIARY_CATALOG,
       BATCH_CATALOG: process.env.BATCH_CATALOG,
       BATCH_RESULTS_DIR: process.env.BATCH_RESULTS_DIR,
-      CLASSIFIER_MODE: process.env.CLASSIFIER_MODE,
-      CLASSIFIER_QUALIFICATION: process.env.CLASSIFIER_QUALIFICATION,
-      LAYA_URL: process.env.LAYA_URL,
-      LAYA_MODEL_REVISION: process.env.LAYA_MODEL_REVISION,
-      TYPESAFE_API_KEY: process.env.TYPESAFE_API_KEY,
-      TYPESAFE_MODEL: process.env.TYPESAFE_MODEL,
-      TYPESAFE_BASE_URL: process.env.TYPESAFE_BASE_URL,
       OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
       METRICS_PORT: process.env.METRICS_PORT,
     },
@@ -52,13 +38,6 @@ export interface Env {
   AUXILIARY_CATALOG?: string;
   BATCH_CATALOG?: string;
   BATCH_RESULTS_DIR?: string;
-  CLASSIFIER_MODE: "rules" | "laya" | "jev";
-  CLASSIFIER_QUALIFICATION?: string;
-  LAYA_URL?: string;
-  LAYA_MODEL_REVISION: string;
-  TYPESAFE_API_KEY?: string;
-  TYPESAFE_MODEL: string;
-  TYPESAFE_BASE_URL: string;
   OPENROUTER_API_KEY?: string;
   METRICS_PORT?: number;
 }

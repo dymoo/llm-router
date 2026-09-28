@@ -136,7 +136,6 @@ export async function handleSystemOne(request: Request, deps: AuxiliaryDeps): Pr
         keyPolicyVersion: lease.version,
         priority: lease.policy.priority,
         resourceId: deployment.resourceId,
-        classifier: "not-required",
       }),
     };
     const started = Date.now();

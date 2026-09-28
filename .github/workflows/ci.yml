@@ -23,15 +23,3 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
       - run: npm run test:production
-
-  python:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Run classifier protocol and backend-gating regressions
-        run: python -m unittest discover -s services/laya/tests -v
-        env:
-          PYTHONPATH: services/laya

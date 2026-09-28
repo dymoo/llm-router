@@ -8,8 +8,6 @@ const baseEnv = {
   SQLITE_PATH: ":memory:",
   MODEL_CATALOG: "./catalog.example.json",
   API_KEY_PEPPER: "test-pepper-not-a-production-credential",
-  CLASSIFIER_MODE: "laya",
-  CLASSIFIER_QUALIFICATION: "",
   BATCH_CATALOG: "",
   BATCH_RESULTS_DIR: "",
 };
@@ -24,7 +22,7 @@ function evaluate(script: string, overrides: Record<string, string | undefined>)
 
 function inspect(overrides: Record<string, string | undefined>) {
   return evaluate(
-    'import { getEnv } from "./env.ts"; const env=getEnv(); console.log(JSON.stringify({ mode:env.CLASSIFIER_MODE, qualification:env.CLASSIFIER_QUALIFICATION ?? null}));',
+    'import { getEnv } from "./env.ts"; const env=getEnv(); console.log(JSON.stringify({ origin: env.APP_ORIGIN, catalogue: env.MODEL_CATALOG }));',
     overrides,
   );
 }
@@ -32,25 +30,15 @@ function inspect(overrides: Record<string, string | undefined>) {
 test("typed configuration keeps credentials out of output", () => {
   const result = inspect({});
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { mode: "laya", qualification: null });
+  assert.deepEqual(JSON.parse(result.stdout), {
+    origin: "http://127.0.0.1:3000",
+    catalogue: "./catalog.example.json",
+  });
   assert.equal(result.stdout.includes(baseEnv.API_KEY_PEPPER), false);
 });
 
-test("optional qualification evidence path survives and empty stays absent", () => {
-  const configured = inspect({ CLASSIFIER_QUALIFICATION: "/etc/llm-router/qualification.json" });
-  assert.equal(configured.status, 0, configured.stderr);
-  assert.deepEqual(
-    JSON.parse(configured.stdout).qualification,
-    "/etc/llm-router/qualification.json",
-  );
-
-  const empty = inspect({ CLASSIFIER_QUALIFICATION: "" });
-  assert.equal(empty.status, 0, empty.stderr);
-  assert.deepEqual(JSON.parse(empty.stdout).qualification, null);
-});
-
-test("invalid backend configuration fails closed", () => {
-  for (const overrides of [{ CLASSIFIER_MODE: "automatic" }, { APP_ORIGIN: "not-a-url" }]) {
+test("invalid configuration fails closed", () => {
+  for (const overrides of [{ APP_ORIGIN: "not-a-url" }, { MODEL_CATALOG: "" }]) {
     const result = inspect(overrides);
     assert.notEqual(result.status, 0);
     assert.equal(result.stdout.includes(baseEnv.API_KEY_PEPPER), false);

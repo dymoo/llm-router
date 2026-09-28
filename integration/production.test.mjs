@@ -134,7 +134,6 @@ test(
             MODEL_CATALOG: cataloguePath,
             AUXILIARY_CATALOG: "",
             API_KEY_PEPPER: randomUUID(),
-            CLASSIFIER_MODE: "rules",
           },
         },
       );

@@ -28,7 +28,6 @@ services:
     environment:
       SQLITE_PATH: /var/lib/llm-router/control.sqlite
       MODEL_CATALOG: /etc/llm-router/catalog.json
-      CLASSIFIER_QUALIFICATION: /etc/llm-router/classifier-qualification.json
     ports:
       - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-3000}:3000"
     volumes:
@@ -36,10 +35,6 @@ services:
       - ${MODEL_CATALOG_FILE:-./catalog.json}:/etc/llm-router/catalog.json:ro
       - ${BATCH_CATALOG_FILE:-./catalog.batch.example.json}:/etc/llm-router/batch-catalog.json:ro
       - ./${AUXILIARY_CATALOG_FILE:-catalog.auxiliary.example.json}:/etc/llm-router/auxiliary.json:ro
-      - type: bind
-        source: ${CLASSIFIER_QUALIFICATION_FILE:-./classifier-qualification.example.json}
-        target: /etc/llm-router/classifier-qualification.json
-        read_only: true
     networks:
       - router
     healthcheck:

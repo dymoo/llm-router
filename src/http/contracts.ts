@@ -1,4 +1,3 @@
-import type { ClassifierHealth } from "../classifier.ts";
 import type { SamplingOptions } from "../sampling.ts";
 import type {
   AnalyticsSnapshot,
@@ -6,7 +5,6 @@ import type {
   BatchRequestCounts,
   BatchStatus,
   BatchUsage,
-  ClassifierQualification,
 } from "../domain.ts";
 import type { BatchLedger } from "../batch/ledger.ts";
 import type { BatchResultRow, BatchResultStore } from "../batch/results.ts";
@@ -101,12 +99,21 @@ export type DeploymentHealth = {
   evidence?: "runtime-probe" | "configuration-only" | "unavailable";
 };
 
+/** Fixed: there is no task classifier. Kept so the current console keeps compiling. */
+export const RULES_CLASSIFIER = {
+  backend: "rules",
+  ready: true,
+  local: true,
+  evidence: "configuration-only",
+} as const;
+
 export type HealthSnapshot = {
   checkedAt?: number;
   persistence?: boolean;
   stopping?: boolean;
+  /** Persistence is up and at least one non-optional deployment is ready. */
   ready: boolean;
-  classifier: ClassifierHealth;
+  classifier: typeof RULES_CLASSIFIER;
   deployments: DeploymentHealth[];
 };
 
@@ -239,10 +246,7 @@ export type KeyService = {
   finalize: (admission: Admission, outcome: FinalizeOutcome) => Promise<void>;
   usageSummary: (query: UsageQuery) => Promise<UsageSummary>;
   recentRequests: (query: RequestQuery) => Promise<RecentRequestList>;
-  analytics: (
-    query: AnalyticsQuery,
-    qualifications: readonly ClassifierQualification[],
-  ) => Promise<AnalyticsSnapshot>;
+  analytics: (query: AnalyticsQuery) => Promise<AnalyticsSnapshot>;
 };
 
 export type InferenceGateway = {
@@ -261,7 +265,6 @@ export type HealthService = {
 export type AdminDeps = {
   appOrigin: string;
   keys: KeyService;
-  classifierQualifications: readonly ClassifierQualification[];
 };
 
 export type InferenceDeps = {

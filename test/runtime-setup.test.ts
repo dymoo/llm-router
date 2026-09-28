@@ -22,12 +22,7 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "runtime-setup-"));
   mkdirSync(join(root, "scripts"));
   copyFileSync("scripts/setup.mjs", join(root, "scripts", "setup.mjs"));
-  for (const file of [
-    ".env.example",
-    "catalog.example.json",
-    "catalog.batch.example.json",
-    "classifier-qualification.example.json",
-  ])
+  for (const file of [".env.example", "catalog.example.json", "catalog.batch.example.json"])
     copyFileSync(file, join(root, file));
   return root;
 }
@@ -91,7 +86,6 @@ test("native and Compose setup do not overwrite each other's catalogue or secret
     const env = parseEnv(readFileSync(join(root, ".env.native"), "utf8"));
     assert.equal(env.MODEL_CATALOG, "./catalog.native.json");
     assert.equal(env.BATCH_CATALOG, "./catalog.batch.example.json");
-    assert.equal(env.CLASSIFIER_QUALIFICATION, undefined, "native qualification stays optional");
     assert.equal(
       new URL(catalogue(join(root, "catalog.native.json"))[0]!.endpoint).hostname,
       "127.0.0.1",
@@ -124,12 +118,6 @@ test("compose setup selects the shipped batch catalogue and keeps sync/batch pro
     assert.equal(env.BATCH_CATALOG, "/etc/llm-router/batch-catalog.json");
     assert.equal(env.BATCH_CATALOG_FILE, "./catalog.batch.example.json");
     assert.equal(env.BATCH_RESULTS_DIR, undefined, "setup must not force a content-dir override");
-    assert.equal(env.CLASSIFIER_QUALIFICATION_FILE, "./classifier-qualification.example.json");
-    assert.equal(
-      env.CLASSIFIER_QUALIFICATION,
-      undefined,
-      "setup must leave record selection to the operator; compose pins the container path itself",
-    );
     assert.equal(env.OPENROUTER_API_KEY, undefined, "setup must never fabricate provider secrets");
     assert.equal(hash(shipped), before, "setup must not rewrite the shipped batch catalogue");
 
@@ -174,7 +162,7 @@ test("compose setup selects the shipped batch catalogue and keeps sync/batch pro
 });
 
 test("setup fails before writing configuration when a shipped example is missing", () => {
-  for (const missing of ["catalog.batch.example.json", "classifier-qualification.example.json"]) {
+  for (const missing of ["catalog.batch.example.json"]) {
     const root = fixture();
     try {
       rmSync(join(root, missing));

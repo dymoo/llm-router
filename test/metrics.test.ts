@@ -105,49 +105,6 @@ it("counts only a committed terminal transition, and never treats unknown usage 
   assert.equal(output.includes("private-session-id"), false);
 });
 
-it("keeps committed classifier source and reuse on classification series", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "router-metrics-"));
-  dirs.push(dir);
-  const runtime = ManagedRuntime.make(
-    apiKeysLayer.pipe(
-      Layer.provideMerge(
-        keyRepositoryLayer({ pepper: "metrics-pepper", onFinalized: observeFinalized }),
-      ),
-      Layer.provide(sqliteDatabaseLayer(join(dir, "control.sqlite"))),
-    ),
-  );
-  await runtime.runPromise(
-    Effect.gen(function* () {
-      const keys = yield* ApiKeys;
-      const created = yield* keys.createKey({
-        name: "classified",
-        expiresAt: null,
-        policy: POLICY_SUGGESTIONS.Standard,
-      });
-      const admission = yield* keys.admit(created.secret);
-      yield* keys.finalize(admission, {
-        status: "success",
-        classifierBackend: "laya",
-        source: "caller-brief",
-        reuse: "exact-cache",
-        taskKind: "coding",
-        difficulty: "hard",
-      });
-    }),
-  );
-  await runtime.dispose();
-  assert.ok(
-    samples(renderMetrics(), "llm_router_classifications_total").some(
-      (row) =>
-        row.labels.backend === "laya" &&
-        row.labels.source === "caller-brief" &&
-        row.labels.reuse === "exact-cache" &&
-        row.labels.task === "coding" &&
-        row.labels.difficulty === "hard",
-    ),
-  );
-});
-
 it("normalizes unknown admission and request labels without disclosing secrets", () => {
   observeAdmission("surprise-secret-value");
   observeFinalized({
@@ -276,16 +233,18 @@ it("removes key metadata when a formerly active key is revoked", () => {
         name: "sensitive-key-name",
         policyJson: JSON.stringify({
           priority: "high",
-          overloadAction: "report",
+          cloud: true,
           requestsPerMinute: 10,
           maxConcurrent: 2,
         }),
       },
     ],
   });
-  assert.ok(
-    samples(renderMetrics(), "llm_router_key_info").some((row) => row.labels.key_id === id),
+  const info = samples(renderMetrics(), "llm_router_key_info").find(
+    (row) => row.labels.key_id === id,
   );
+  assert.equal(info?.labels.cloud, "true");
+  assert.equal(info?.labels.overload_action, undefined);
   observeSqlMetrics({ ...empty, keyInfo: [] });
   assert.equal(
     samples(renderMetrics(), "llm_router_key_info").some((row) => row.labels.key_id === id),
@@ -314,7 +273,6 @@ it("rejects an invalid or application-conflicting metrics port", () => {
           SQLITE_PATH: ":memory:",
           API_KEY_PEPPER: "test-pepper",
           MODEL_CATALOG: "catalog.example.json",
-          CLASSIFIER_MODE: "laya",
           PORT: "3000",
           METRICS_PORT: port,
         },

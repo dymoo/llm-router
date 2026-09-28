@@ -6,7 +6,7 @@ import {
   handleUpdateKey,
   handleUsage,
 } from "../../src/http/admin.ts";
-import type { AdminDeps, AnalyticsSnapshot, KeyService } from "../../src/http/contracts.ts";
+import type { AnalyticsSnapshot, KeyService } from "../../src/http/contracts.ts";
 import { decodeKeyDraft, decodeKeyPatch } from "../../src/http/decode.ts";
 import { adminDeps, jsonRequest, memoryKeys, ORIGIN, samplePolicy } from "./helpers.ts";
 
@@ -146,25 +146,20 @@ test("stale edits return stale_version without leaking secrets", async () => {
   assert.equal(body.error.message.includes("jrv_"), false);
 });
 
-test("usage forwards the AdminDeps classifier qualifications into analytics", async () => {
-  const classifierQualifications: AdminDeps["classifierQualifications"] = [];
+test("usage forwards the query window into analytics", async () => {
   let observedQuery: { since?: number; until?: number } | undefined;
-  let observedQualifications: readonly unknown[] | undefined;
   const keys: KeyService = {
     ...memoryKeys(),
-    analytics: async (query, qualifications) => {
+    analytics: async (query) => {
       observedQuery = query;
-      observedQualifications = qualifications;
       return { marker: "usage" } as unknown as AnalyticsSnapshot;
     },
   };
-  const deps: AdminDeps = { appOrigin: ORIGIN, keys, classifierQualifications };
   const response = await handleUsage(
     new Request(`${ORIGIN}/api/admin/usage?since=1000&until=2000`),
-    deps,
+    { appOrigin: ORIGIN, keys },
   );
   assert.equal(response.status, 200);
-  assert.equal(observedQualifications, classifierQualifications);
   assert.equal(observedQuery?.since, 1000);
   assert.equal(observedQuery?.until, 2000);
   assert.deepEqual(await response.json(), { marker: "usage" });

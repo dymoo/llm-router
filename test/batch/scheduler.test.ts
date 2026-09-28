@@ -892,7 +892,6 @@ test(
       "SQLITE_PATH",
       "API_KEY_PEPPER",
       "MODEL_CATALOG",
-      "CLASSIFIER_MODE",
     ];
     const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
     t.after(() => {
@@ -909,7 +908,6 @@ test(
       SQLITE_PATH: ":memory:",
       API_KEY_PEPPER: "fixture",
       MODEL_CATALOG: "fixture",
-      CLASSIFIER_MODE: "laya",
     });
     delete process.env.NEXT_MANUAL_SIG_HANDLE;
     processState.batch = {

@@ -60,7 +60,7 @@ export const apiKeysLayer: Layer.Layer<ApiKeys, never, KeyRepository> = Layer.ef
         keys.finalize(admission, outcome),
       usageSummary: (input) => keys.usageSummary(input),
       recentRequests: (input) => keys.recentRequests(input),
-      analytics: (input, qualifications) => keys.analytics(input, qualifications),
+      analytics: (input) => keys.analytics(input),
     });
   }),
 );

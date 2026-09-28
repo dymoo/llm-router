@@ -152,7 +152,7 @@ export function memoryKeys(options?: { secret?: string }): MemoryKeys {
 export type FinalizeSpy = Parameters<KeyService["finalize"]>[1];
 
 export function adminDeps(keys: KeyService): AdminDeps {
-  return { appOrigin: ORIGIN, keys, classifierQualifications: [] };
+  return { appOrigin: ORIGIN, keys };
 }
 
 export function inferenceDeps(keys: KeyService, gateway: InferenceDeps["gateway"]): InferenceDeps {

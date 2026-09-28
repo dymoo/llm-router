@@ -18,7 +18,7 @@ const catalogPath = path.join(root, catalogName);
 for (const file of [envPath, catalogPath]) {
   if (existsSync(file)) throw new Error(`Refusing to overwrite ${file}; edit it in place instead`);
 }
-for (const example of ["catalog.batch.example.json", "classifier-qualification.example.json"])
+for (const example of ["catalog.batch.example.json"])
   if (!existsSync(path.join(root, example)))
     throw new Error(
       `Missing ${example}; setup ships these examples and Compose binds them read-only`,

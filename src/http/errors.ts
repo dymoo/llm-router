@@ -7,9 +7,6 @@ export type HttpErrorCode =
   | "stale_version"
   | "rate_limited"
   | "unavailable"
-  | "classifier_unavailable"
-  | "classifier_context_exceeded"
-  | "classifier_unqualified"
   | "no_eligible_model"
   | "busy"
   | "local_overloaded"
@@ -17,7 +14,6 @@ export type HttpErrorCode =
   | "provider_failure"
   | "timeout"
   | "cancelled"
-  | "brief_required"
   | "unknown";
 
 export type HttpErrorBody = {
@@ -64,39 +60,9 @@ const TAG_MAP: Record<string, { status: number; code: HttpErrorCode; message: st
   RateLimited: { status: 429, code: "rate_limited", message: "rate limit exceeded" },
   ConcurrentLimit: { status: 429, code: "rate_limited", message: "concurrency limit exceeded" },
   NoEligibleModel: { status: 422, code: "no_eligible_model", message: "no eligible deployment" },
-  ClassifierContextExceeded: {
-    status: 422,
-    code: "classifier_context_exceeded",
-    message: "classifier context exceeded; supply routing.taskBrief",
-  },
-  BriefRequired: {
-    status: 422,
-    code: "brief_required",
-    message: "routing.taskBrief is required for this request",
-  },
-  ClassifierInputTooLarge: {
-    status: 422,
-    code: "classifier_context_exceeded",
-    message: "classifier input is too large",
-  },
   DatabaseError: { status: 500, code: "unavailable", message: "persistence unavailable" },
   PepperMismatch: { status: 500, code: "unavailable", message: "control plane unavailable" },
   SchemaVersionMismatch: { status: 500, code: "unavailable", message: "control plane unavailable" },
-  ClassifierUnavailable: {
-    status: 503,
-    code: "classifier_unavailable",
-    message: "classifier unavailable",
-  },
-  ClassifierUnqualified: {
-    status: 503,
-    code: "classifier_unqualified",
-    message: "classifier is not qualified for production routing",
-  },
-  ClassifierInvalidResponse: {
-    status: 503,
-    code: "classifier_unavailable",
-    message: "classifier unavailable",
-  },
   LocalOverloaded: {
     status: 503,
     code: "local_overloaded",
@@ -110,7 +76,6 @@ const TAG_MAP: Record<string, { status: number; code: HttpErrorCode; message: st
     message: "deployment catalogue is not configured for inference",
   },
   ProviderFailure: { status: 502, code: "provider_failure", message: "upstream provider failed" },
-  ClassifierTimeout: { status: 504, code: "timeout", message: "classifier timed out" },
   RequestTimeout: { status: 504, code: "timeout", message: "request timed out" },
   TimeoutError: { status: 504, code: "timeout", message: "request timed out" },
   Cancelled: { status: 499, code: "cancelled", message: "request cancelled" },

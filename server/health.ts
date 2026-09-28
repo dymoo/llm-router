@@ -1,8 +1,7 @@
 import "server-only";
 import { Effect } from "effect";
-import { getEnv, getProviderCredentials } from "../env.ts";
+import { getProviderCredentials } from "../env.ts";
 import { createDeadline } from "../src/deadline.ts";
-import { RouterClassifier, type ClassifierHealth } from "../src/classifier.ts";
 import { probeAuxiliary } from "../src/auxiliary.ts";
 import { deploymentIsPlaceholder } from "../src/domain.ts";
 import { createHealthMonitor } from "../src/health.ts";
@@ -11,7 +10,6 @@ import { adaptersFor } from "../src/router/adapters/index.ts";
 import { OPENROUTER_APP_HEADERS } from "../src/router/adapters/openrouter.ts";
 import { configuredAuxiliaryDeployments } from "./auxiliary.ts";
 import { keys } from "./control.ts";
-import { loadClassifierQualifications } from "./qualification.ts";
 import { configuredChatDeployments } from "./runtime.ts";
 import { processState } from "./state.ts";
 
@@ -30,23 +28,6 @@ async function boundedFetch(
 }
 // Runtime adapters own their probe budgets.
 const adapters = adaptersFor(fetch);
-
-async function classifier(): Promise<ClassifierHealth> {
-  const env = getEnv();
-  if (env.CLASSIFIER_MODE === "rules") {
-    return { backend: "rules", ready: true, local: true, evidence: "deterministic-rules" };
-  }
-  return Effect.runPromise(
-    RouterClassifier.readiness({
-      mode: env.CLASSIFIER_MODE,
-      layaUrl: env.LAYA_URL,
-      layaModelRevision: env.LAYA_MODEL_REVISION,
-      jevModel: env.TYPESAFE_MODEL,
-      jevApiKey: env.TYPESAFE_API_KEY,
-      qualifications: loadClassifierQualifications(),
-    }),
-  );
-}
 
 async function deployments(): Promise<DeploymentHealth[]> {
   const chat = configuredChatDeployments();
@@ -113,7 +94,6 @@ async function deployments(): Promise<DeploymentHealth[]> {
 }
 
 const monitor = (processState.health ??= createHealthMonitor({
-  classifier,
   deployments,
   persistence: async () => {
     await keys.listKeys({ limit: 1 });

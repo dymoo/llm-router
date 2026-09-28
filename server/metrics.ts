@@ -43,7 +43,6 @@ const buckets = {
   ttft_seconds: [0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60],
   generation_duration_seconds: [0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 660],
   decode_tokens_per_second: [1, 2, 5, 10, 15, 20, 30, 40, 60, 80, 120, 200],
-  classifier_duration_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
 } as const;
 const histogram = (
   name: keyof typeof buckets,
@@ -78,7 +77,6 @@ const deployment = (value: unknown) =>
     : bounded(value, processState.metricDeployments);
 const priority = (value: unknown) => bounded(value, ["high", "medium", "low"]);
 const location = (value: unknown) => bounded(value, ["local", "cloud"]);
-const backend = (value: unknown) => bounded(value, ["rules", "laya", "jev"]);
 const errorTags = [
   "AuthFailed",
   "KeyRevoked",
@@ -86,8 +84,6 @@ const errorTags = [
   "RateLimited",
   "ConcurrentLimit",
   "InvalidInput",
-  "ClassifierUnavailable",
-  "ClassifierUnqualified",
   "LocalOverloaded",
   "QueueFull",
   "CapacityBusy",
@@ -225,25 +221,6 @@ export function observeFinalized(input: {
             : "unknown",
       deployment: dep,
     });
-  if (outcome.classifierBackend !== undefined && outcome.classifierBackend !== null) {
-    const b = backend(outcome.classifierBackend);
-    counter("classifications", 1, {
-      backend: b,
-      source: bounded(outcome.source, ["full-input", "caller-brief"]),
-      reuse: bounded(outcome.reuse, ["classified", "exact-cache", "session"]),
-      task: bounded(outcome.taskKind, [
-        "chat",
-        "coding",
-        "math",
-        "analysis",
-        "writing",
-        "extraction",
-      ]),
-      difficulty: bounded(outcome.difficulty, ["easy", "moderate", "hard"]),
-    });
-    histogram("classifier_duration_seconds", outcome.classifierElapsedMs, { backend: b }, 0.001);
-    counter("classifier_input_tokens", outcome.classifierInputTokens ?? 0, { backend: b });
-  }
   if (outcome.decisionReason !== undefined && outcome.decisionReason !== null) {
     counter("route_decisions", 1, {
       reason: bounded(outcome.decisionReason, ROUTE_DECISION_REASONS),
@@ -321,18 +298,6 @@ export function observeHealth(snapshot: HealthSnapshot): void {
     "health_snapshot_age_seconds",
     Math.max(0, (Date.now() - (snapshot.checkedAt ?? Date.now())) / 1000),
   );
-  const b = backend(snapshot.classifier.backend);
-  gauge("classifier_ready", Number(snapshot.classifier.ready), { backend: b });
-  if (snapshot.classifier.backend !== "rules") {
-    gauge(
-      "classifier_qualified",
-      Number(
-        snapshot.classifier.evidence !== "unqualified" &&
-          snapshot.classifier.evidence !== undefined,
-      ),
-      { backend: b },
-    );
-  }
   for (const item of snapshot.deployments)
     gauge("deployment_ready", Number(item.ready), {
       deployment: deployment(item.id),

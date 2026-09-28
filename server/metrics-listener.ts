@@ -2,7 +2,7 @@ import "server-only";
 import { createServer } from "node:http";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { getEnv } from "../env.ts";
-import type { HealthSnapshot } from "../src/http/contracts.ts";
+import { RULES_CLASSIFIER, type HealthSnapshot } from "../src/http/contracts.ts";
 import { gatewayHealth } from "./health.ts";
 import {
   clearSqlMetrics,
@@ -83,7 +83,7 @@ async function sampleLive(): Promise<void> {
         ready: false,
         persistence: false,
         checkedAt: Date.now(),
-        classifier: { ready: false, backend: "unknown", local: false, evidence: "unavailable" },
+        classifier: RULES_CLASSIFIER,
         deployments: [],
       },
   );

@@ -40,67 +40,6 @@ export class NoEligibleModel extends Schema.TaggedError<NoEligibleModel>()(
   Message,
 ) {}
 
-export class ClassifierUnavailable extends Schema.TaggedError<ClassifierUnavailable>()(
-  "ClassifierUnavailable",
-  Message,
-) {}
-
-export class ClassifierTimeout extends Schema.TaggedError<ClassifierTimeout>()(
-  "ClassifierTimeout",
-  {
-    message: Schema.String,
-    timeoutMs: Schema.Finite,
-  },
-) {}
-
-export class ClassifierInvalidResponse extends Schema.TaggedError<ClassifierInvalidResponse>()(
-  "ClassifierInvalidResponse",
-  Message,
-) {}
-
-export class ClassifierInputTooLarge extends Schema.TaggedError<ClassifierInputTooLarge>()(
-  "ClassifierInputTooLarge",
-  {
-    message: Schema.String,
-    maxChars: Schema.Int,
-    actualChars: Schema.Int,
-  },
-) {}
-
-export class ClassifierContextExceeded extends Schema.TaggedError<ClassifierContextExceeded>()(
-  "ClassifierContextExceeded",
-  {
-    message: Schema.String,
-    inputTokens: Schema.NullOr(Schema.Int),
-    maxLen: Schema.NullOr(Schema.Int),
-    headBudget: Schema.NullOr(Schema.Int),
-  },
-) {}
-
-export class ClassifierUnqualified extends Schema.TaggedError<ClassifierUnqualified>()(
-  "ClassifierUnqualified",
-  {
-    message: Schema.String,
-    reason: Schema.Literals([
-      "missing",
-      "identity-mismatch",
-      "placeholder",
-      "not-passed",
-      "metric-invalid",
-      "unmeasured",
-      "error-rate",
-      "false-positive-rate",
-    ]),
-    questionId: Schema.optional(Schema.String),
-  },
-) {}
-
-export class BriefRequired extends Schema.TaggedError<BriefRequired>()("BriefRequired", {
-  message: Schema.String,
-  inputTokens: Schema.NullOr(Schema.Int),
-  maxLen: Schema.NullOr(Schema.Int),
-}) {}
-
 export class CatalogueInvalid extends Schema.TaggedError<CatalogueInvalid>()(
   "CatalogueInvalid",
   Message,
@@ -128,15 +67,6 @@ export class RequestTimeout extends Schema.TaggedError<RequestTimeout>()(
 
 export class Cancelled extends Schema.TaggedError<Cancelled>()("Cancelled", Message) {}
 
-export type ClassifierError =
-  | ClassifierUnavailable
-  | ClassifierTimeout
-  | ClassifierInvalidResponse
-  | ClassifierInputTooLarge
-  | ClassifierContextExceeded
-  | ClassifierUnqualified
-  | BriefRequired;
-
 export type KeyLifecycleError =
   | DatabaseError
   | KeyNotFound
@@ -154,7 +84,6 @@ export type DomainError =
   | InvalidInput
   | NoEligibleModel
   | CatalogueInvalid
-  | ClassifierError
   | KeyLifecycleError
   | CapacityBusy
   | ProviderFailure
