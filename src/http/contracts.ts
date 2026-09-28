@@ -284,7 +284,6 @@ export type HealthService = {
 
 export type AdminDeps = {
   appOrigin: string;
-  basicAuth?: { username: string; password: string };
   keys: KeyService;
   classifierQualifications: readonly ClassifierQualification[];
 };

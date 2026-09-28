@@ -165,9 +165,8 @@ Missing timings stay unknown. Do not invent TPS from catalogue placeholders. HTT
 
 ## Admin access
 
-The console is internal. There is **no login form and no admin session**. Reachability of the bound address is admin access unless optional HTTP Basic is set.
+The console is internal. There is **no login form and no admin session**. Reachability of the bound address is admin access, so deployments gate the console at the proxy (Authentik forward auth in front of everything except `/v1` and `/health`). See [setup.md](setup.md).
 
-- Optional `ADMIN_BASIC_AUTH=username:password` protects HTML and the admin API only. Absent = no gate. Malformed = refuse startup. See [setup.md](setup.md).
 - Inference keeps `jrv_` API keys. Keys never authorize administration.
 - Mutations still require the exact `APP_ORIGIN` and the existing same-origin admin header. That check is not a login.
 

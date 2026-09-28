@@ -136,7 +136,6 @@ for (const mode of ["rules", "laya", "jev"]) {
             AUXILIARY_CATALOG: "",
             BATCH_CATALOG: "",
             BATCH_RESULTS_DIR: "",
-            ADMIN_BASIC_AUTH: "",
           },
         },
       );

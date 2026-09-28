@@ -7,7 +7,7 @@ A self-hosted, key-controlled inference gateway for coding agents and internal c
 - Routes with explicit classifier-free **Rules** mode, or qualified local **Laya** / **TypeSafe Jev** assessment, using the same deterministic capability, context, budget and locality policy.
 - Routes chat to **llama.cpp or Halogen** and **OpenRouter `z-ai/glm-5.3-flash`**. Both local runtimes have supported adapters and selectable Compose configurations.
 - Keeps task sessions pinned through tool turns and holds capacity/session ownership until streaming finishes or is cancelled.
-- Provides per-key priority and locality/cost/quality/latency controls, bounded non-preemptive queues, API-key rotation/revocation and optional admin HTTP Basic authentication.
+- Provides per-key priority and locality/cost/quality/latency controls, bounded non-preemptive queues, API-key rotation/revocation.
 - Records metadata analytics: provider-reported cost, token estimates, configured local COGS, observed cache use, classifier reuse, route decisions, queue/TTFT/decode metrics, errors and cancellation. The gateway does **not** store prompts or completions.
 - Optionally exposes **NPU embeddings and transcription** with FastFlowLM and an **Open WebUI** frontend. Every client request still goes through gateway policy and accounting.
 
@@ -50,7 +50,7 @@ For an explicitly cloud-only fresh installation, use `--runtime cloud` and confi
 | `GET /health/ready` | Cached dependency readiness, 503 when chat is unavailable |
 | `GET /api/health` | Detailed dependency snapshot for the console |
 
-Inference requires a gateway `jrv_…` Bearer key. The console has no login/session system; network access is administration unless `ADMIN_BASIC_AUTH=username:password` is configured. Keep it on loopback or a trusted private network. Admin mutations additionally require exact Origin and `X-Jev-Admin: 1`.
+Inference requires a gateway `jrv_…` Bearer key. The console has no login/session system; network access is administration. Keep it on loopback, or put an authenticating proxy such as Authentik forward auth in front of everything except `/v1` and `/health`. Admin mutations additionally require exact Origin and `X-Jev-Admin: 1`.
 
 ## Verification
 

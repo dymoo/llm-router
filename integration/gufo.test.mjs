@@ -421,7 +421,6 @@ globalThis.fetch = (input, init) => {
             MODEL_CATALOG: cataloguePath,
             AUXILIARY_CATALOG: "",
             API_KEY_PEPPER: randomUUID(),
-            ADMIN_BASIC_AUTH: "",
             CLASSIFIER_MODE: "jev",
             CLASSIFIER_QUALIFICATION: qualificationPath,
             TYPESAFE_API_KEY: "fixture-jev-only",

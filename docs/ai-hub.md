@@ -84,7 +84,7 @@ Optional profile `webui`, pinned image `ghcr.io/open-webui/open-webui:v0.11.3`, 
 
 All three Open WebUI connections point to `http://gateway:3000/v1`. Ollama and browser-direct connections are disabled. Environment configuration remains authoritative (`ENABLE_PERSISTENT_CONFIG=False`), avoiding a stale database connection silently bypassing the gateway after a restart. The chat model picker exposes `auto`, not embedding or ASR models.
 
-The profile uses **no Open WebUI login** and binds to loopback, matching this internal single-user deployment. Anyone with network access to it can use its configured gateway key and read its stored conversations. `ADMIN_BASIC_AUTH` protects the gateway console, not Open WebUI. Put authentication/TLS in front of either service before exposing it beyond a trusted network.
+The profile uses **no Open WebUI login** and binds to loopback, matching this internal single-user deployment. Anyone with network access to it can use its configured gateway key and read its stored conversations. Put authentication/TLS in front of either service before exposing it beyond a trusted network.
 
 ### Continuity and privacy
 
