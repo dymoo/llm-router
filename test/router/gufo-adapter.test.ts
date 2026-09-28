@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Effect } from "effect";
 import { LocalOverloaded } from "../../src/errors.ts";
-import { gufoAdapter } from "../../src/router/adapters/gufo.ts";
+import { gufoAdapter, gufoMessages } from "../../src/router/adapters/gufo.ts";
 import { deployment } from "./fixtures.ts";
 import type { AdapterRequest } from "../../src/router/adapters/types.ts";
 
@@ -38,6 +38,40 @@ const failure =
   };
 
 describe("Gufo ProviderAdapter", () => {
+  it("sends a mid-conversation system message as a user note and keeps a leading one", () => {
+    const messages = gufoMessages([
+      { role: "system", content: "rules" },
+      { role: "user", content: "hi" },
+      { role: "system", content: "reminder" },
+      { role: "developer", content: [{ type: "text", text: "dev" }] },
+    ] as unknown as AdapterRequest["messages"]);
+    assert.deepEqual(
+      messages.map((message) => message.role),
+      ["system", "user", "user", "user"],
+    );
+    assert.equal(messages[0]?.content, "rules");
+    assert.equal(messages[2]?.content, "[System note]\nreminder");
+    assert.deepEqual(messages[3]?.content, [
+      { type: "text", text: "[System note]" },
+      { type: "text", text: "dev" },
+    ]);
+  });
+
+  it("reports Gufo's 400 as the client's invalid request, with Gufo's reason", async () => {
+    const adapter = gufoAdapter(async () =>
+      Response.json(
+        { error: { message: "System message must be at the beginning.", code: "invalid_prompt" } },
+        { status: 400 },
+      ),
+    );
+    const exit = await Effect.runPromise(adapter.complete(request()).pipe(Effect.exit));
+    assert.equal(exit._tag, "Failure");
+    const error = exit._tag === "Failure" ? exit.cause.reasons[0] : undefined;
+    const failure = error?._tag === "Fail" ? error.error : undefined;
+    assert.equal(failure?._tag, "InvalidInput");
+    assert.match(String(failure?.message), /System message must be at the beginning/);
+  });
+
   it("fails closed without a bearer credential before contacting Gufo", async () => {
     let called = false;
     const adapter = gufoAdapter(async () => {

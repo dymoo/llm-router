@@ -530,6 +530,30 @@ describe("flex tier (low, service_tier flex)", () => {
     assert.ok(net.generations.every((call) => call.body.service_tier === "flex"));
   });
 
+  it("promotes a long-waiting flex request to the default tier, so busy traffic cannot starve it", async () => {
+    const local = gufo("gufo-a");
+    const net = network({
+      generate: (call) =>
+        call.body.service_tier === "flex"
+          ? refuse("resource_unavailable", "0")
+          : Response.json(completionBody(String(call.body.model))),
+    });
+    const done = await run(
+      ModelRouter.use((router) => router.complete(work({ policy: backgroundPolicy }))),
+      layer({
+        catalogue: [local, cloudGlm],
+        fetch: net.fetchImpl,
+        waitMs: { flex: 5_000, promote: 400 },
+      }),
+    );
+    assert.equal(done.headers.deploymentId, local.id);
+    const tiers = net.generations.map((call) => call.body.service_tier ?? "default");
+    assert.ok(tiers.length >= 2, tiers.join());
+    assert.equal(tiers.at(-1), "default");
+    assert.ok(tiers.slice(0, -1).every((tier) => tier === "flex"));
+    assert.ok(net.generations.every((call) => call.id === local.id));
+  });
+
   it("fails 422 when no local deployment could ever serve it, even with cloud allowed", async () => {
     const exit = await run(
       ModelRouter.use((router) =>

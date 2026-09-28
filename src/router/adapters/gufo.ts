@@ -1,6 +1,6 @@
 import { Clock, Effect, Schema } from "effect";
 import type { Deployment } from "../../domain.ts";
-import { LocalOverloaded, ProviderFailure } from "../../errors.ts";
+import { InvalidInput, LocalOverloaded, ProviderFailure } from "../../errors.ts";
 import type { AdapterRequest, ProviderAdapter } from "./types.ts";
 import {
   bearerHeaders,
@@ -98,6 +98,23 @@ const fetchGufoResponse = Effect.fn("Gufo.fetchResponse")(function* (
         });
       }
     }
+  } else if (response.status === 400) {
+    // Gufo validates the prompt before any work: the client's request is at
+    // fault, so say why instead of reporting a provider failure.
+    const text = yield* readBoundedBody(response, true).pipe(
+      Effect.catch(() => Effect.succeed("")),
+    );
+    let message = "";
+    try {
+      const parsed = JSON.parse(text ?? "") as { error?: { message?: unknown } };
+      if (typeof parsed.error?.message === "string") message = parsed.error.message.slice(0, 300);
+    } catch {
+      // Keep the generic message.
+    }
+    return yield* new InvalidInput({
+      message:
+        message === "" ? "Gufo rejected the request" : `Gufo rejected the request: ${message}`,
+    });
   } else {
     yield* Effect.promise(
       () => response.body?.cancel().catch(() => undefined) ?? Promise.resolve(),
@@ -380,10 +397,37 @@ function gufoHeaders(request: AdapterRequest): Record<string, string> {
     : { ...GUFO_NO_QUEUE, "X-Request-ID": request.requestId };
 }
 
+/**
+ * Qwen's chat template only accepts system (or developer) messages at the
+ * start. Agents often inject one mid-conversation; send it as a user turn in
+ * place, so the prompt prefix (and Gufo's prefix cache) stays unchanged.
+ */
+export function gufoMessages(messages: AdapterRequest["messages"]): AdapterRequest["messages"] {
+  const first = messages.findIndex(
+    (message) => message.role !== "system" && message.role !== "developer",
+  );
+  if (first < 0) return messages;
+  return messages.map((message, index) => {
+    if (index < first || (message.role !== "system" && message.role !== "developer"))
+      return message;
+    const content = message.content;
+    return {
+      ...message,
+      role: "user",
+      content:
+        typeof content === "string"
+          ? `[System note]\n${content}`
+          : Array.isArray(content)
+            ? [{ type: "text", text: "[System note]" }, ...content]
+            : content,
+    } as (typeof messages)[number];
+  });
+}
+
 export function gufoBody(request: AdapterRequest, stream: boolean): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: request.deployment.modelId,
-    messages: request.messages,
+    messages: gufoMessages(request.messages),
     max_tokens: request.maxCompletionTokens,
     reasoning_effort: request.appliedEffort === "none" ? "off" : request.appliedEffort,
     stream,

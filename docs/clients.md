@@ -26,6 +26,10 @@ Open WebUI's `X-OpenWebUI-Chat-Id` header becomes session `webui:<id>` when the 
 
 Successful responses expose request, deployment, priority, queue-wait and applied-effort headers, and the session id when one was sent (URI-encoded where needed).
 
+## Message order on Gufo
+
+Qwen's chat template accepts system (or developer) messages only at the start. The Router sends a system message that appears later in the conversation to Gufo as a user turn in the same place, prefixed `[System note]`, so agents that inject reminders mid-conversation keep working and the prompt prefix stays cacheable. Other requests Gufo rejects before any work come back as **400 `invalid`** with Gufo's reason.
+
 ## App attribution
 
 Every client app should send OpenRouter's app attribution headers on every chat request:

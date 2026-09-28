@@ -15,6 +15,13 @@ export const LOCAL_WAIT_MS = { high: 5_000, medium: 30_000 } as const;
 /** How long a flex request waits for idle local compute; under the 11-minute
  * gateway deadline (`GATEWAY_EFFECT_TIMEOUT_MS`). */
 export const FLEX_MAX_WAIT_MS = 10 * 60 * 1000;
+/**
+ * A flex request that has waited this long is promoted: it dispatches on
+ * Gufo's default tier and takes a router permit ranked with high traffic by
+ * arrival, so a stream of high-priority work cannot starve it. Only flex-slot
+ * holders (Gufo's `flex_limit`) are promoted, which bounds what low work takes.
+ */
+export const FLEX_PROMOTE_AFTER_MS = 60_000;
 /** Flex slots per deployment when Gufo does not report `sessions.flex_limit`. */
 export const DEFAULT_FLEX_LIMIT = 2;
 export const DEFAULT_POLL_MS = 50;
