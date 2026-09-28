@@ -1061,6 +1061,7 @@ function probeUnavailable(
   return Effect.gen(function* () {
     const unavailable = new Set<string>(extra ?? []);
     const missingCredentials = new Set<string>();
+    const probes: Array<{ deployment: Deployment; credential: string | undefined }> = [];
     for (const deployment of catalogue) {
       const credential =
         deployment.credentialEnvVar === null ? undefined : credentials(deployment.credentialEnvVar);
@@ -1072,11 +1073,18 @@ function probeUnavailable(
         missingCredentials.add(deployment.id);
         continue;
       }
-      const down = yield* adapters[deployment.transport].probeUnavailable(deployment, credential);
-      if (down) {
-        unavailable.add(deployment.id);
-      }
+      probes.push({ deployment, credential });
     }
+    // Probes are independent: one slow provider no longer delays the others.
+    const down = yield* Effect.forEach(
+      probes,
+      ({ deployment, credential }) =>
+        adapters[deployment.transport].probeUnavailable(deployment, credential),
+      { concurrency: "unbounded" },
+    );
+    probes.forEach(({ deployment }, i) => {
+      if (down[i]) unavailable.add(deployment.id);
+    });
     return { unavailable, missingCredentials };
   });
 }
