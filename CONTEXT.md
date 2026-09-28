@@ -6,7 +6,7 @@ A self-hosted coding-agent inference gateway: it applies routing policy, optiona
 
 **Router**:
 The control plane that authenticates keys, selects routes, and holds a deployment reservation through generation.
-_Avoid_: proxy, load balancer, classifier, Halogen, runtime, analytics warehouse
+_Avoid_: proxy, load balancer, classifier, Gufo, runtime, analytics warehouse
 
 **Key**:
 A tenant credential whose stored policy is the sole authority for priority, locality, limits, and ranking biases.
@@ -27,7 +27,7 @@ A semantic reading of a task (kind, difficulty, effort, local sufficiency, and r
 _Avoid_: route, live wait/load/price text, Jev as fallback router, classification as authorization
 
 **Classifier**:
-The assessment backend, either local Laya or explicitly selected remote Jev.
+The assessment backend, either Kev on Gufo or TypeSafe's cloud Jev, each explicitly selected.
 _Avoid_: generator, Router, automatic fallback
 
 **Classifier readiness**:
@@ -42,13 +42,13 @@ _Avoid_: confidence, readiness, self-claimed accuracy, benchmark as Task success
 The dated record pairing one Classifier backend revision and question schema with its measured Calibration and sourced token rates. Assessment-based routing fails closed without it; absent rates stay unknown.
 _Avoid_: licence, certification, model card, readiness
 
-**Laya**:
-The local classifier model. Default execution is CPU. NPU is optional and only when IOMMU is enabled.
-_Avoid_: Halogen, local Qwen, NPU as the default, generator
+**Kev**:
+TypeSafe's System One model served locally by Gufo. As the Classifier (`CLASSIFIER_MODE=kev`) it uses the same System One client as Jev, pointed at the Kev deployment in the auxiliary catalogue.
+_Avoid_: Jev, Gufo chat deployment, generator, automatic fallback
 
 **Jev**:
-The remote TypeSafe assessment service, used only when the operator selects it.
-_Avoid_: the Router, paid fallback, local classifier
+TypeSafe's cloud System One model, used as the Classifier only when the operator selects it (`CLASSIFIER_MODE=jev`).
+_Avoid_: the Router, paid fallback, Kev
 
 **Task**:
 A unit of user work, assessed at a safe boundary and not on every tool turn.
@@ -59,7 +59,7 @@ An advisory compact description of a long task for the Classifier. It is not the
 _Avoid_: last user message, truncated prompt, silent summary
 
 **Question overhead**:
-The Classifier question text that consumes Laya or Jev context alongside the task state.
+The Classifier question text that consumes Kev or Jev context alongside the task state.
 _Avoid_: generation tokens, prompt cache, unused 1k family window, mutable occupancy or price snapshots
 
 ## Routing
@@ -146,32 +146,24 @@ _Avoid_: continue, crash recovery, automatic retry after dispatch
 
 ## Runtimes
 
-**Local generator**:
-A separate completion process reached through a small adapter. llama.cpp and Halogen are first-class runtime choices with matching catalogue and Compose configuration.
-_Avoid_: Classifier, Halogen as required default, baked-in runtime
+**Gufo**:
+The owner's private GPU inference server on a Strix Halo host, and the only local runtime. The Router reaches it over HTTP with a bearer key (`transport: "gufo"`). It is operated outside this repository and is not a Compose service. Another local OpenAI server can use the generic `openai-compatible` transport.
+_Avoid_: bundled runtime, Compose service, runtime choice, Router
 
-**llama.cpp**:
-A supported GGUF generator. The optimized native control is the pinned pwilkin Strix Halo build with isolated ROCr/HIP for Qwen3.8-Flash-Next. A separately pinned upstream Vulkan Compose image supplies a compatibility lane, not an equivalent-performance claim. Hardware validation remains pending.
-_Avoid_: Halogen `.hgn`, proven quant, IOMMU-off as a llama.cpp requirement, generic Vulkan pin as gfx1151 proof
-
-**Halogen**:
-A supported generator adapter using the unmodified Flash Server image and its matching quality overlay. `.hgn` weights are not portable to llama.cpp. The public packaging restriction applies to this image only.
-_Avoid_: required default, combined public image, GGUF, deleted adapter
-
-**NPU**:
-The XDNA2 inference processor used optionally by FastFlowLM for embeddings and transcription, with IOMMU enabled. Laya's separate VitisAI path is experimental; CPU remains its default. Sharing an NPU with GPU chat still shares host RAM and memory bandwidth.
-_Avoid_: default Laya backend, CPU Laya, llama.cpp prerequisite
+**System One**:
+TypeSafe's API for typed questions about a state (`POST /v1/systemone`). The Router passes each request to one named Kev or Jev deployment and never substitutes one for the other.
+_Avoid_: chat completion, Assessment (one use of System One), automatic fallback
 
 **Auxiliary deployment**:
-An explicitly configured embedding or transcription endpoint. It uses key policy, admission, resource ownership and accounting without chat-task classification or GPU/cloud fallback.
+An explicitly configured System One endpoint: Kev on Gufo or cloud Jev. It uses key policy, admission, resource ownership and accounting without chat-task classification or fallback to another deployment.
 _Avoid_: automatic chat fallback, unmetered side channel, free because local
 
-**NPU resource**:
-A shared admission identity for auxiliary deployments on the same physical NPU. It is distinct from a model ID and a GPU chat slot.
-_Avoid_: one independent NPU per model, unconstrained parallelism
+**Auxiliary resource**:
+A shared admission identity (`resourceId`) for auxiliary deployments on the same backend. It is distinct from a model ID and a chat permit.
+_Avoid_: one independent pool per model, unconstrained parallelism
 
 **Open WebUI**:
-An optional client of the gateway for chat, RAG embeddings and speech-to-text. Its dedicated gateway key governs all those calls; its own conversation store is separate from gateway metadata.
+An optional chat client of the gateway. Its dedicated gateway key governs its calls; its own conversation store is separate from gateway metadata.
 _Avoid_: runtime bypass, provider credential store for this topology, gateway transcript logging
 
 ## Accounting

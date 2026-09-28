@@ -6,20 +6,16 @@ Run **one gateway process** with local SQLite. Session pins, model permits and p
 
 The gateway's resource registry is process-owned so Next instrumentation and route bundles share admission leases, capacity pools, session routing, health state and disposal. A production HTTP regression holds a generation open while SIGTERM arrives, rejects new work, and checks that the admitted response and SQLite finalization complete before exit. Restart the process after server-code or catalogue changes rather than hot-swapping live ownership.
 
-Compose defaults to `gateway` with Rules routing. CPU `laya` is behind the opt-in `laya` profile and is not built or started for Rules/Jev. Choose either `llamacpp` or `halogen` as the GPU profile, or run optimized native llama.cpp through `host.docker.internal`. Optional profiles also include `npu` (FastFlowLM) and `webui`. Only gateway and WebUI publish ports, both loopback by default. See [runtime selection](runtime-selection.md) before changing engines.
+Compose defaults to `gateway` with Rules routing; the optional `webui` profile adds Open WebUI. Gufo, the local model runtime, runs on the owner's GPU host outside Compose and is operated from the owner's infra repository. Only gateway and WebUI publish ports, both loopback by default.
 
 ## Storage and privacy
 
-| Volume                                               | Contents                                                                                                                           |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `sqlite-data`                                        | Keys, policy versions, admission leases, metadata usage and audit; opt-in batch inputs/results in a separate private content store |
-| `laya-cache`                                         | Local classifier weights and optional ONNX artifacts                                                                               |
-| `fastflowlm-models`                                  | Optional NPU model downloads                                                                                                       |
-| `webui-data`                                         | Open WebUI conversations and document state — separate from gateway metadata                                                       |
-| `LLAMACPP_MODELS_DIR` bind                           | GGUF weights and SSD-backed PLE table                                                                                              |
-| `HALOGEN_MODELS_DIR`, `HALOGEN_CACHE_DIR_HOST` binds | HGN weights/quality overlay and sensitive derived prompt-cache state                                                               |
+| Volume        | Contents                                                                                                                           |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `sqlite-data` | Keys, policy versions, admission leases, metadata usage and audit; opt-in batch inputs/results in a separate private content store |
+| `webui-data`  | Open WebUI conversations and document state — separate from gateway metadata                                                       |
 
-Catalogues are read-only bind mounts. Secrets live in private `.env` files, not images or the repository. Keep `API_KEY_PEPPER` stable: changing it invalidates stored key authentication. Ordinary inference stores request metadata, not prompts/completions; submitting a batch explicitly stores its inputs and results in a bounded private store beside `control.sqlite`, outside Analytics, until acknowledgement or the 24 h post-terminal TTL ([batch.md](batch.md#result-holding)). Open WebUI stores conversations by design. FastFlowLM v1.0.6 prints inputs/transcripts, so the supplied profile disables Docker log persistence.
+Catalogues are read-only bind mounts. Secrets live in private `.env` files, not images or the repository. Keep `API_KEY_PEPPER` stable: changing it invalidates stored key authentication. Ordinary inference stores request metadata, not prompts/completions; submitting a batch explicitly stores its inputs and results in a bounded private store beside `control.sqlite`, outside Analytics, until acknowledgement or the 24 h post-terminal TTL ([batch.md](batch.md#result-holding)). Open WebUI stores conversations by design.
 
 Request metadata retention is 30 days; audit retention is 90 days. Maintenance runs on repository activity. These defaults are not a compliance policy.
 
@@ -63,14 +59,14 @@ Infra contract for `dymoo/dylans-infra`:
 ## Health
 
 - `/health/live`: 200 while the HTTP process is alive. No inference, classifier or provider call.
-- `/health/ready`: cached readiness; 200 only when persistence, the selected routing mode, and at least one non-optional chat deployment are ready. Otherwise 503. Rules itself is always ready; Laya/Jev require classifier readiness and qualification.
+- `/health/ready`: cached readiness; 200 only when persistence, the selected routing mode, and at least one non-optional chat deployment are ready. Otherwise 503. Rules itself is always ready; Kev/Jev require classifier readiness and qualification.
 - `/api/health`: the same detailed snapshot with HTTP 200 for the console, including degraded optional deployments.
 
-Probe rounds are coalesced and cached for five seconds. Runtime HTTP probes have bounded deadlines. The Classifier module owns backend readiness: Laya readiness and uncached classification both require HTTP `200`, `ok: true`, `ready: true`, and a model revision matching the configured pin. The readiness probe has a separate two-second budget that includes reading the response body. Readiness probes do not populate the Assessment exact cache.
+Probe rounds are coalesced and cached for five seconds. Runtime HTTP probes have bounded deadlines. The Classifier module owns backend readiness. Readiness probes do not populate the Assessment exact cache.
 
-llama.cpp uses its root `/health`, not `/v1/health`. Its `/slots` telemetry is the evidence for saturation; gateway permit counts and an absent runtime are not equivalent to saturation.
+Gufo readiness is an authenticated `GET /v1/models` that must list the catalogued model ID, within 1.5 seconds. Its `GET /v1/runtime` report (contract version 1) is the evidence for saturation, read at most once per second per deployment; gateway permit counts and an unreachable runtime are not saturation.
 
-Cloud health uses non-generating metadata/account endpoints. Jev has no documented free authenticated readiness probe, so its status explicitly says `configuration-only`; it does not claim that a classification call succeeded. NPU model-list reachability establishes service availability, not measured inference quality or hardware performance.
+Cloud health uses non-generating metadata/account endpoints. Jev has no documented free authenticated readiness probe, so its status explicitly says `configuration-only`; it does not claim that a classification call succeeded. System One deployments are optional: a model-list probe marks each one ready or degraded without affecting chat readiness, and establishes reachability only, not answer quality.
 
 ## Metrics
 
@@ -105,7 +101,9 @@ The Grafana dashboard JSON lives at `deploy/grafana/llm-router.json` and uses th
 
 ## Routing mode configuration
 
-Set `CLASSIFIER_MODE=rules` to route without a classifier (the example configuration now selects it). Neither `LAYA_URL`, `TYPESAFE_API_KEY` nor `CLASSIFIER_QUALIFICATION` is required or consulted for routing in Rules mode. A mounted qualification file may remain in Compose, but the gateway does not read it. Existing installations retain their explicitly configured mode until the operator changes it and restarts the gateway; no live configuration is changed by this release.
+Set `CLASSIFIER_MODE=rules` to route without a classifier (the example configuration selects it, and production runs it). Neither `TYPESAFE_API_KEY`, a Kev deployment nor `CLASSIFIER_QUALIFICATION` is required or consulted for routing in Rules mode. A mounted qualification file may remain in Compose, but the gateway does not read it.
+
+`CLASSIFIER_MODE=kev` uses the same TypeSafe System One client as `jev`, pointed at the Kev deployment in the auxiliary catalogue: its endpoint and `GUFO_API_KEY`, model `kev-latest`. `jev` sends task briefs to TypeSafe's cloud Jev with `TYPESAFE_API_KEY`. Both fail closed without a matching qualification record, and neither falls back to Rules or to the other.
 
 Both health endpoints preserve the classifier-shaped section as `{backend:"rules", ready:true, local:true, evidence:"deterministic-rules"}`. Here `local` describes in-process routing, not the selected generator. The console displays **Routing mode Rules**. Readiness still requires persistence and a ready non-optional chat deployment; optional auxiliaries cannot make chat ready. Metrics use bounded backend `rules` and decision `deterministic-rules`, emit no classifier-call metrics, and do not claim classifier qualification for Rules.
 
@@ -128,7 +126,7 @@ node scripts/drain.mjs --compose
 node scripts/upgrade-gateway.mjs
 ```
 
-Gateway-only upgrades do not restart the native generator, Laya, FastFlowLM, or optional Halogen. Full Compose stop is a deliberate separate operation. Native `next start` deployments that want this drain handler must also set `NEXT_MANUAL_SIG_HANDLE=true`.
+Gateway-only upgrades do not restart Gufo or Open WebUI. Full Compose stop is a deliberate separate operation. Native `next start` deployments that want this drain handler must also set `NEXT_MANUAL_SIG_HANDLE=true`.
 
 | Bound                        | Default          |
 | ---------------------------- | ---------------- |
@@ -139,7 +137,7 @@ Gateway-only upgrades do not restart the native generator, Laya, FastFlowLM, or 
 | Overall inference deadline   | 11 minutes       |
 | Durable request lease        | 12 minutes       |
 
-The overall chat deadline applies through the end of a streamed response, not merely until its headers are sent. Its timer is cancelled once chat work settles, including completed, failed, and cancelled requests; a completed request does not retain an eleven-minute timer. There is no lease heartbeat or crash-resume of generation. FastFlowLM's pinned ASR handler ignores cancellation during execution; its resource permit is retained through response/deadline instead of pretending the NPU is immediately idle.
+The overall chat deadline applies through the end of a streamed response, not merely until its headers are sent. Its timer is cancelled once chat work settles, including completed, failed, and cancelled requests; a completed request does not retain an eleven-minute timer. There is no lease heartbeat or crash-resume of generation. A dispatched System One request keeps its resource permit until the upstream answers or its ten-minute deadline passes, even if the client disconnects, because the upstream keeps working on it.
 
 ## Accounting and analytics
 
@@ -160,8 +158,6 @@ Classifier costs are priced from the selected Classifier's qualification record 
 
 HTTP success is not task success. Full capture and a task-outcome evaluator remain a future, explicit, per-key opt-in design with access control, retention, redaction and a separate spend budget. Neither is enabled here.
 
-## Hardware acceptance still required
+## Unverified here
 
-No AMD host is available in this session. Validate live llama.cpp/Halogen generation, NPU device passthrough and inference, SSD-backed PLE behavior, RAM headroom, correctness under concurrency and mixed GPU/NPU load on the incoming machine. No paid OpenRouter completion has been run. Public IDs/prices and local software protocol tests are not hardware benchmarks.
-
-The runtime comparison protocol is in [research/strix-concurrency-comparison.md](research/strix-concurrency-comparison.md). Keep IOMMU enabled for the NPU-enabled topology and record that difference from historical IOMMU-off GPU benchmarks.
+This repository does not measure Gufo quality or throughput, and no paid OpenRouter completion has been run. Public IDs/prices and local protocol tests are not benchmarks.

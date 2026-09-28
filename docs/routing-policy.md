@@ -5,10 +5,8 @@ Normative product policy for dymoo/llm-router. The decisions below supersede con
 Stack (given, not re-argued here): Effect 4 RC, Drizzle on SQLite, Next.js, T3 Env for typed configuration. Topology, env names, backup, and drain live in operator docs — do not copy them here.
 
 - Topology, accounting retention, timeouts: [operations.md](operations.md)
-- Env, bind, optional Basic: [setup.md](setup.md)
-- llama.cpp / Qwen3.8-Next-Flash host procedures (install lives there): [llamacpp.md](llamacpp.md)
-- Optional Halogen adapter (unmodified image): [halogen.md](halogen.md)
-- Laya NPU feasibility: [npu.md](npu.md); optional FastFlowLM and WebUI: [ai-hub.md](ai-hub.md)
+- Env, bind, proxy-gated console: [setup.md](setup.md)
+- Open WebUI and System One: [ai-hub.md](ai-hub.md)
 - Live catalogue facts: [catalogue.md](catalogue.md)
 - Session metadata for coding agents: [clients.md](clients.md)
 - Domain language: [../CONTEXT.md](../CONTEXT.md)
@@ -16,10 +14,10 @@ Stack (given, not re-argued here): Effect 4 RC, Drizzle on SQLite, Next.js, T3 E
 
 ## Authority and superseded handoff controls
 
-| Status         | Control                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **In force**   | Explicit classifier-free Rules mode or qualified Laya/Jev assessment followed by deterministic chat routing; locality bias `[0,1]`; high/medium/low priority; hard limits; pinned task continuations; tenant-scoped exact classifier cache in assessed modes; explicit briefs without silent truncation; no classifier fallback; internal admin with optional Basic; metadata-only accounting/analytics; first-class llama.cpp and Halogen choices; SSD-backed PLE table; IOMMU enabled for optional FastFlowLM NPU embeddings/STT; Open WebUI routes through the gateway.                                                                                                                                                                                                                                                                                                                                    |
-| **Superseded** | Mandatory admin login / `admin_sessions`; priority `interactive \| background`; privacy `local-only \| cloud-allowed`; `routingPreference`; binary `allowCloudOverflow`; silent cloud spill; silent Laya/Jev fallback; silent classifier truncation; NPU while IOMMU is off; sample catalogue numbers as measurements; automatic paid classifier fallback; counters-only admin; treating HTTP 200 as task success; collecting chat transcripts by default; Halogen as required/default local generator; llama.cpp as merely-under-evaluation or not-adopted; treating `.hgn` as portable to llama.cpp; IOMMU-off as a llama.cpp or Router-wide requirement; HumanEval+ thinking-off as thinking-enabled coding proof; generic Vulkan image pin as gfx1151 Qwen3.8-Next-Flash proof; omitting `usage.cost` on local; treating local API price 0 as COGS zero; inventing zero for unknown token counts or rates |
+| Status         | Control                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **In force**   | Explicit classifier-free Rules mode or qualified Kev/Jev assessment followed by deterministic chat routing; locality bias `[0,1]`; high/medium/low priority, with low keys on Gufo flex; hard limits; pinned task continuations; tenant-scoped exact classifier cache in assessed modes; explicit briefs without silent truncation; no classifier fallback; internal admin gated by an authenticating proxy; metadata-only accounting/analytics; Gufo as the local runtime; Open WebUI routes through the gateway.                                                                                                                                                                                                                     |
+| **Superseded** | Mandatory admin login / `admin_sessions`; optional admin Basic auth; priority `interactive \| background`; privacy `local-only \| cloud-allowed`; `routingPreference`; binary `allowCloudOverflow`; silent cloud spill; silent classifier fallback; silent classifier truncation; sample catalogue numbers as measurements; automatic paid classifier fallback; counters-only admin; treating HTTP 200 as task success; collecting chat transcripts by default; selectable local runtime adapters and Compose runtime profiles; a separate local classifier service; embeddings and transcription endpoints; omitting `usage.cost` on local; treating local API price 0 as COGS zero; inventing zero for unknown token counts or rates |
 
 The handoff remains useful for stack intent, reservation-through-execution, and “do not invent live model ids.” It is not authority for the superseded rows.
 
@@ -89,7 +87,7 @@ Context, completion, RPM, concurrency, wait, allowlist, and `maxEstimatedUsd` re
 
 ## Rules mode
 
-With `CLASSIFIER_MODE=rules`, the existing selection, reservation and dispatch path runs **without an Assessment**. No Laya/Jev service is constructed, no classifier URL/key is needed, and qualification files are neither loaded nor consulted (including admin analytics). This is an explicit mode, never an automatic fallback from an unqualified classifier.
+With `CLASSIFIER_MODE=rules`, the existing selection, reservation and dispatch path runs **without an Assessment**. No Kev/Jev client is constructed, no classifier endpoint/key is needed, and qualification files are neither loaded nor consulted (including admin analytics). This is an explicit mode, never an automatic fallback from an unqualified classifier.
 
 1. Hard eligibility still checks the Key allowlist, tools/JSON/vision requirements, input estimate **plus the full requested completion allowance**, Key/deployment context and output caps, usable credentials, health, and cold-cache generation estimate against `maxEstimatedUsd`. Unknown pricing cannot satisfy an estimate ceiling; it is not zero. A local deployment with unknown prices remains eligible when no ceiling is set.
 2. Among eligible deployments, locality orders first: bias **at least 0.5 prefers local**, below 0.5 prefers cloud, matching the existing locality preference seam. Within that location, existing cost/latency weights order candidates, with deployment ID as the stable final tie-break. There is no task-quality, difficulty, complexity-escalation, retrieval or expected-length judgment to invent. Output estimates use the full completion allowance. Quality bias and a highest-quality override cannot synthesize a task-quality signal.
@@ -101,18 +99,18 @@ With `CLASSIFIER_MODE=rules`, the existing selection, reservation and dispatch p
 
 Fresh Rules decisions use bounded reason/selection code `deterministic-rules`; overload/failover keep their existing operational codes. Accounting records `classifierBackend: null`, no invented task/difficulty/confidence, no classifier usage, and no classifier-cache reuse (null; continuations still report session reuse). Deployment accounting and cache evidence remain unchanged.
 
-## Classification (Laya/Jev modes)
+## Classification (Kev/Jev modes)
 
-- **Chat in assessed modes:** assess, then apply deterministic policy. This is not a fallback after a classifier-owned route. Explicit embedding/STT models do not need semantic classification. A bounded Choice over already-filtered chat deployments remains a documented alternative, not the implemented design — [jev-routing.md](research/jev-routing.md).
+- **Chat in assessed modes:** assess, then apply deterministic policy. This is not a fallback after a classifier-owned route. `/v1/systemone` requests name their deployment and are not assessed. A bounded Choice over already-filtered chat deployments remains a documented alternative, not the implemented design — [jev-routing.md](research/jev-routing.md).
 - Assess a **Task** at `new-task` / `checkpoint`. Tool-result turns of the same Task use `continue` and reuse the Assessment.
 - Classifier caching is exact, tenant-scoped and completed-result only: key + backend/model revision + question schema + state/brief + catalogue version. No fuzzy matching or in-flight coalescing.
 - Reuse stored judgments across locality/cost/quality **slider** edits when the brief, evidence, and question meanings are unchanged. Do not put slider weights into question text.
 - Include a semantic quality rubric in questions **only** when it changes meaning. Do not send mutable wait, load, or price text into classifier state for arithmetic — policy does that math.
 - Short work may be classified from the real input. Long work needs an explicit compact **task brief** plus non-secret metadata (size, tools, turns). The generation prompt is never shortened to feed the Classifier.
 - **Loss-awareness:** if neither the input nor the brief fits the selected Classifier (tokens, including question overhead), return an explicit context/brief error. Never silently truncate, guess a Route, or call the other Classifier.
-- **Laya:** tokenize with the actual Laya tokenizer, including question overhead. The configured **root** checkpoint is max_len **512** / head **192**. A ~1k family checkpoint was discussed and is **not** this root — do not assume 1k state.
+- **Kev:** the same TypeSafe System One client as Jev, pointed at the Kev deployment in the auxiliary catalogue (its endpoint and `GUFO_API_KEY`, model `kev-latest`). Kev and Jev give different probabilities for the same question, so each needs its own qualification record.
 - **Jev:** this product’s explicit selection bound for the brief is **32k** tokens. Official Jev documents a 64k total / 32k state+longest-question split, sourced in [jev-routing.md](research/jev-routing.md) and not re-measured here. Never silently shrink a larger brief. Cookbook cost/latency figures in that file are published examples, not this host.
-- `CLASSIFIER_MODE` is explicitly `rules`, `laya` or `jev`. Laya/Jev retain their qualification gate. Neither classifier mode falls back to Rules or to the other classifier on failure.
+- `CLASSIFIER_MODE` is explicitly `rules`, `kev` or `jev`; production runs `rules`. Kev/Jev retain their qualification gate. Neither classifier mode falls back to Rules or to the other classifier on failure.
 
 Assessment confidence is concentration of the classifier’s output distribution, not the probability that generation will succeed.
 
@@ -183,23 +181,7 @@ Default bind is loopback. LAN bind is a deliberate exposure of administration.
 
 ## Runtime assumptions (unverified here)
 
-The exact selected llama.cpp/ROCm/guide revisions are recorded in [llamacpp.md](llamacpp.md). No local generator is claimed validated on the incoming AMD host. EngramHalo and kyuz0 alternatives remain source-researched benchmark candidates.
-
-- **Adapter-based.** llama.cpp and Halogen are first-class choices, not forced defaults or silent fallbacks. Both have matching Compose profiles and generated catalogues; the optimized native pwilkin/isolated ROCr-HIP path is retained. The generic Vulkan container is a compatibility lane, not optimized-fork performance evidence. See [runtime selection](runtime-selection.md) and [ADR 0002](adr/0002-separate-runtime-deployment-and-licensing.md).
-- Halogen `.hgn` weights are **not portable** to llama.cpp. The unmodified-image redistribution restriction applies only to Halogen. Its quality overlay is required explicitly; see [halogen.md](halogen.md).
-- User-supplied **HumanEval+** screenshot (thinking **off**, temperature **0**, max tokens **1024**). Does **not** isolate quant vs engine vs template. **Not** proof for thinking-enabled coding-agent work. Not this repository’s measurements:
-
-| Label                      | Pass  | Time   |
-| -------------------------- | ----- | ------ |
-| llama Q6_K_v7              | 82.9% | 11.26s |
-| llama Heretic2 IQ4_XS NGQ4 | 79.3% | 4.16s  |
-| Halogen official overlay   | 78%   | 13.82s |
-| Halogen Heretic2 BYO       | 61%   | 4.32s  |
-
-The 61% BYO row is a different Halogen configuration from official+overlay (78%). Neither row makes Halogen the required default.
-
-- `amd_iommu=off` was a **prior Halogen-host** prefill approval. It is **not** a llama.cpp requirement. **No host boot changes have been performed** from this tree. It would disable the NPU; default Laya remains CPU until an IOMMU-on NPU path is verified — [npu.md](npu.md).
+- **Gufo is the local runtime.** It is the owner's private GPU inference server, reached over HTTP with a bearer key and operated outside this repository. The generic `openai-compatible` transport remains for another local OpenAI server. [ADR 0002](adr/0002-separate-runtime-deployment-and-licensing.md) records the earlier adapter-choice design and is superseded.
 - Cloud chat is explicitly OpenRouter `z-ai/glm-5.3-flash`, with the selected endpoint and dated prices in [catalogue.md](catalogue.md). Public metadata was checked; paid generation and backend-specific graded effort were not. Binary thinking reports applied `on` truthfully.
-- Co-tenancy of CPU Laya with a local GPU generator, measured TPS/TTFT, and container NPU passthrough are unverified.
 - Sample quality, latency, and `tokensPerSecond` values are not measurements.
 - Decode TPS and TTFT in analytics are observed request fields when present, not host benchmarks.
