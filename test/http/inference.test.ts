@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createHook } from "node:async_hooks";
 import test from "node:test";
+import type { AppAttribution } from "../../src/domain.ts";
+import type { InferenceDeps, RoutedWork } from "../../src/http/contracts.ts";
 import { GatewayFailure } from "../../src/http/gateway-failure.ts";
 import { handleChatCompletions } from "../../src/http/inference.ts";
 import { GATEWAY_EFFECT_TIMEOUT_MS } from "../../src/http/limits.ts";
-import { inferenceDeps, jsonRequest, memoryKeys, ORIGIN } from "./helpers.ts";
+import { inferenceDeps, jsonRequest, memoryKeys, ORIGIN, samplePolicy } from "./helpers.ts";
 
 const completion = {
   id: "cmpl",
@@ -221,34 +223,6 @@ test("keeps client identity and storage metadata private while retaining paralle
   assert.equal(dispatched, true);
 });
 
-test("client completion budget cannot exceed the key policy", async () => {
-  const keys = memoryKeys();
-  const response = await handleChatCompletions(
-    jsonRequest(ORIGIN + "/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k" },
-      json: {
-        model: "auto",
-        messages: [{ role: "user", content: "hi" }],
-        max_completion_tokens: 8193,
-        store: false,
-      },
-    }),
-    inferenceDeps(keys, {
-      complete: async () => {
-        throw new Error("must not dispatch");
-      },
-      stream: async () => {
-        throw new Error("must not dispatch");
-      },
-    }),
-  );
-  assert.equal(response.status, 422);
-  assert.equal(((await response.json()) as { error: { code: string } }).error.code, "invalid");
-  assert.equal(keys.admits, 1);
-  assert.equal(keys.finalizes[0]?.errorCode, "ImpossibleLimits");
-});
-
 test("rejects unknown, unsupported, and multi-choice controls before admission", async () => {
   for (const control of [
     { enable_thinking: false },
@@ -257,7 +231,8 @@ test("rejects unknown, unsupported, and multi-choice controls before admission",
     { logprobs: true },
     { top_logprobs: 2 },
     { logit_bias: { "42": 1 } },
-    { reasoning_effort: "none" },
+    { reasoning_effort: "maximal" },
+    { routing: { sessionId: "s", pin: true } },
     { parallel_tool_calls: "no" },
     { metadata: { user: 42 } },
   ]) {
@@ -662,20 +637,17 @@ test("streaming failures before provider output send a terminal structured SSE e
         throw new Error("unexpected completion");
       },
       stream: async () => {
-        throw Object.assign(new Error("private classifier detail"), {
-          _tag: "ClassifierUnqualified",
-          reason: "missing",
-        });
+        throw Object.assign(new Error("private routing detail"), { _tag: "NoEligibleModel" });
       },
     }),
   );
   assert.equal(response.status, 200);
   const events = await response.text();
   assert.match(events, /event: router\.error/);
-  assert.match(events, /"code":"classifier_unqualified"/);
+  assert.match(events, /"code":"no_eligible_model"/);
   assert.doesNotMatch(events, /retry_after_seconds/);
-  assert.doesNotMatch(events, /private classifier detail/);
-  assert.equal(keys.finalizes[0]?.errorCode, "ClassifierUnqualified");
+  assert.doesNotMatch(events, /private routing detail/);
+  assert.equal(keys.finalizes[0]?.errorCode, "NoEligibleModel");
 });
 test("provider failure after streamed output aborts instead of closing cleanly", async () => {
   const keys = memoryKeys();
@@ -707,46 +679,109 @@ test("provider failure after streamed output aborts instead of closing cleanly",
   assert.equal(response.status, 200);
   await assert.rejects(response.text());
 });
-test("tool schemas consume key context budget before any model dispatch", async () => {
-  const keys = memoryKeys();
-  const admit = keys.admit;
-  keys.admit = async (secret) => {
-    const lease = await admit(secret);
-    return {
-      ...lease,
-      policy: { ...lease.policy, contextLimitTokens: 2048, maxCompletionTokens: 128 },
-    };
-  };
-  let dispatched = false;
-  const response = await handleChatCompletions(
-    jsonRequest(`${ORIGIN}/v1/chat/completions`, {
-      method: "POST",
-      headers: { authorization: "Bearer test" },
-      json: {
-        model: "auto",
-        messages: [{ role: "user", content: "hi" }],
-        tools: [
-          { type: "function", function: { name: "large_schema", description: "x".repeat(4096) } },
-        ],
-      },
-    }),
-    inferenceDeps(keys, {
-      complete: async () => {
-        dispatched = true;
-        throw new Error("must not dispatch");
-      },
-      stream: async () => {
-        dispatched = true;
-        throw new Error("must not dispatch");
-      },
-    }),
-  );
-  assert.equal(response.status, 422);
-  assert.equal(dispatched, false);
-  assert.equal(keys.finalizes[0]?.status, "error");
+test("reasoning_effort passes through, with minimal folded into low", async () => {
+  for (const [requested, expected] of [
+    ["minimal", "low"],
+    ["none", "none"],
+    ["xhigh", "xhigh"],
+    [undefined, undefined],
+  ] as const) {
+    let seen: unknown = "not called";
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: {
+          model: "auto",
+          messages: [{ role: "user", content: "hi" }],
+          ...(requested === undefined ? {} : { reasoning_effort: requested }),
+        },
+      }),
+      inferenceDeps(memoryKeys(), {
+        complete: async (work) => {
+          seen = work.reasoningEffort;
+          return {
+            headers: { requestId: "r", deploymentId: "d", appliedEffort: "low" },
+            body: completion,
+            metadata: () => ({ deploymentId: "d" }),
+          };
+        },
+        stream: async () => {
+          throw new Error("unexpected stream");
+        },
+      }),
+    );
+    assert.equal(response.status, 200);
+    assert.equal(seen, expected, String(requested));
+  }
 });
 
-test("flex requests carry the tier and a local refusal is OpenAI's 429 resource_unavailable", async () => {
+test("a session comes from routing.sessionId or the Open WebUI chat id and never fails a request", async () => {
+  const cases: Array<{ json?: Record<string, unknown>; header?: string; session?: string }> = [
+    // Older clients' boundary protocol is accepted and ignored.
+    {
+      json: {
+        routing: {
+          sessionId: "agent-1",
+          boundary: "continue",
+          taskBrief: "fix the bug",
+          qualityOverride: "highest",
+        },
+      },
+      session: "agent-1",
+    },
+    { json: { routing: { boundary: "checkpoint" } }, session: undefined },
+    { header: "chat-42", session: "webui:chat-42" },
+    { json: { routing: { sessionId: "explicit" } }, header: "chat-42", session: "explicit" },
+    { header: "not a valid id!", session: undefined },
+    { session: undefined },
+  ];
+  for (const { json, header, session } of cases) {
+    let seen: unknown = "not called";
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer k",
+          ...(header === undefined ? {} : { "x-openwebui-chat-id": header }),
+        },
+        json: {
+          model: "auto",
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "assistant", content: "hello" },
+            { role: "user", content: "again" },
+          ],
+          ...json,
+        },
+      }),
+      inferenceDeps(memoryKeys(), {
+        complete: async (work) => {
+          seen = work.sessionId;
+          return {
+            headers: {
+              requestId: "r",
+              deploymentId: "d",
+              ...(work.sessionId === undefined ? {} : { sessionId: work.sessionId }),
+              appliedEffort: "low",
+            },
+            body: completion,
+            metadata: () => ({ deploymentId: "d" }),
+          };
+        },
+        stream: async () => {
+          throw new Error("unexpected stream");
+        },
+      }),
+    );
+    assert.equal(response.status, 200, JSON.stringify({ json, header }));
+    assert.equal(seen, session, JSON.stringify({ json, header }));
+    const header_ = response.headers.get("x-session-id");
+    assert.equal(header_ === null ? undefined : decodeURIComponent(header_), session);
+  }
+});
+
+test("flex requests carry the tier; running out of idle compute is 429 resource_unavailable", async () => {
   for (const stream of [false, true]) {
     const keys = memoryKeys();
     const tiers: unknown[] = [];
@@ -782,18 +817,69 @@ test("flex requests carry the tier and a local refusal is OpenAI's 429 resource_
         },
       }),
     );
-    // Streams are dispatched before the 200 is committed, so they get a real 429 too.
-    assert.equal(response.status, 429, `stream=${stream}`);
-    assert.equal(response.headers.get("retry-after"), "2");
-    assert.deepEqual(await response.json(), {
-      error: {
-        code: "resource_unavailable",
-        message: "no spare local capacity for a flex request",
-      },
-    });
+    if (stream) {
+      // Flex streams take the normal path: 200 committed, then a terminal router.error.
+      assert.equal(response.status, 200);
+      const events = await response.text();
+      assert.match(events, /event: router\.error/);
+      assert.match(events, /"code":"resource_unavailable"/);
+      assert.match(events, /"retry_after_seconds":2/);
+      assert.doesNotMatch(events, /private overload detail/);
+    } else {
+      assert.equal(response.status, 429);
+      assert.equal(response.headers.get("retry-after"), "2");
+      assert.deepEqual(await response.json(), {
+        error: {
+          code: "resource_unavailable",
+          message: "no spare local capacity for a flex request",
+        },
+      });
+    }
     assert.deepEqual(tiers, ["flex"]);
     assert.equal(keys.finalizes[0]?.errorCode, "LocalOverloaded");
     assert.equal(keys.finalizes[0]?.deploymentId, "local-qwen");
+  }
+});
+
+test("low-priority keys run as flex; other keys only when they ask", async () => {
+  const cases = [
+    { priority: "low", requested: undefined, tier: "flex" },
+    { priority: "low", requested: "default", tier: "flex" },
+    { priority: "medium", requested: undefined, tier: undefined },
+    { priority: "high", requested: "flex", tier: "flex" },
+  ] as const;
+  for (const { priority, requested, tier } of cases) {
+    const base = memoryKeys();
+    const keys = {
+      ...base,
+      admit: async (raw: string) => ({
+        ...(await base.admit(raw)),
+        policy: samplePolicy({ priority }),
+      }),
+    };
+    let seen: unknown = "not called";
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: {
+          model: "auto",
+          messages: [{ role: "user", content: "hi" }],
+          ...(requested === undefined ? {} : { service_tier: requested }),
+        },
+      }),
+      inferenceDeps(keys, {
+        complete: async (work) => {
+          seen = work.serviceTier;
+          throw new Error("stop after routing");
+        },
+        stream: async () => {
+          throw new Error("not streaming");
+        },
+      }),
+    );
+    assert.equal(response.status >= 400, true);
+    assert.equal(seen, tier, `${priority} asking for ${requested ?? "nothing"}`);
   }
 });
 
@@ -820,5 +906,133 @@ test("other service tiers route normally and keep the local overload shape", asy
     assert.equal(seen, undefined, tier);
     assert.equal(response.status, 503, tier);
     assert.equal((await response.json()).error.code, "local_overloaded");
+  }
+});
+
+function attributedChat(headers: Record<string, string>, gateway: InferenceDeps["gateway"]) {
+  const keys = memoryKeys();
+  const response = handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k", ...headers },
+      json: { model: "auto", messages: [{ role: "user", content: "hi" }] },
+    }),
+    inferenceDeps(keys, gateway),
+  );
+  return { keys, response };
+}
+
+function capturingGateway(): { gateway: InferenceDeps["gateway"]; seen: RoutedWork[] } {
+  const seen: RoutedWork[] = [];
+  return {
+    seen,
+    gateway: {
+      complete: async (work) => {
+        seen.push(work);
+        return {
+          headers: { requestId: "r", deploymentId: "d", sessionId: "s", appliedEffort: "low" },
+          body: completion,
+          metadata: () => ({ deploymentId: "d" }),
+        };
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    },
+  };
+}
+
+test("records client app attribution and hands it to routing as advisory metadata", async () => {
+  const { gateway, seen } = capturingGateway();
+  const { keys, response } = attributedChat(
+    {
+      "HTTP-Referer": "https://vibe.example/studio",
+      "X-OpenRouter-Title": "  Free Vibecode ",
+      "X-Title": "Legacy name",
+      "X-OpenRouter-Categories": "programming-app, native-app-builder",
+      "X-OpenRouter-App-Visibility": "hidden",
+    },
+    gateway,
+  );
+  assert.equal((await response).status, 200);
+  assert.deepEqual(seen[0]?.appAttribution, {
+    url: "https://vibe.example/studio",
+    title: "Free Vibecode",
+    categories: "programming-app,native-app-builder",
+    visibility: "hidden",
+  });
+  assert.equal(seen[0]?.policy.priority, samplePolicy().priority);
+  assert.equal(keys.finalizes[0]?.status, "success");
+  assert.equal(keys.finalizes[0]?.appUrl, "https://vibe.example/studio");
+  assert.equal(keys.finalizes[0]?.appTitle, "Free Vibecode");
+});
+
+test("records attribution on failed requests too", async () => {
+  const { keys, response } = attributedChat(
+    { "HTTP-Referer": "https://vibe.example", "X-Title": "Free Vibecode" },
+    {
+      complete: async () => {
+        throw Object.assign(new Error("no route"), { _tag: "NoEligibleModel" });
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    },
+  );
+  assert.notEqual((await response).status, 200);
+  assert.equal(keys.finalizes[0]?.status, "error");
+  assert.equal(keys.finalizes[0]?.appUrl, "https://vibe.example");
+  assert.equal(keys.finalizes[0]?.appTitle, "Free Vibecode");
+});
+
+test("ignores invalid app attribution without failing the request", async () => {
+  const cases: Array<[Record<string, string>, AppAttribution | undefined]> = [
+    [
+      {
+        "HTTP-Referer": "javascript:alert(1)",
+        "X-OpenRouter-Title": "   ",
+        "X-OpenRouter-Categories": "game",
+        "X-OpenRouter-App-Visibility": "hidden",
+      },
+      undefined,
+    ],
+    [{ "HTTP-Referer": "https://user:secret@vibe.example/" }, undefined],
+    [{ "HTTP-Referer": "ftp://vibe.example/" }, undefined],
+    [{ "HTTP-Referer": "/relative/path" }, undefined],
+    [{ "HTTP-Referer": `https://vibe.example/${"a".repeat(512)}` }, undefined],
+    [{ "X-OpenRouter-Title": "x".repeat(129) }, undefined],
+    [{ "X-OpenRouter-Title": "Free\tVibecode" }, undefined],
+    [
+      {
+        "HTTP-Referer": "https://vibe.example a",
+        "X-OpenRouter-Title": "t".repeat(129),
+        "X-Title": "Old tool",
+        "X-OpenRouter-Categories": "cli-agent,game,roleplay",
+        "X-OpenRouter-App-Visibility": "public",
+      },
+      { title: "Old tool" },
+    ],
+    [
+      {
+        "HTTP-Referer": "http://localhost:3000/",
+        "X-OpenRouter-Categories": "Programming-App",
+      },
+      { url: "http://localhost:3000/" },
+    ],
+    [
+      {
+        "X-Title": "Old tool",
+        "X-OpenRouter-Categories": `${"a".repeat(31)}`,
+      },
+      { title: "Old tool" },
+    ],
+  ];
+  for (const [headers, expected] of cases) {
+    const { gateway, seen } = capturingGateway();
+    const { keys, response } = attributedChat(headers, gateway);
+    assert.equal((await response).status, 200, JSON.stringify(headers));
+    assert.deepEqual(seen[0]?.appAttribution, expected, JSON.stringify(headers));
+    assert.equal(keys.finalizes[0]?.appUrl ?? null, expected?.url ?? null);
+    assert.equal(keys.finalizes[0]?.appTitle ?? null, expected?.title ?? null);
   }
 });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createBatchResultStore } from "../../src/batch/results.ts";
+import { CLOUD_SPILL_DELAY_MS } from "../../src/batch/spill.ts";
 import {
   handleCreateBatch,
   handleDeleteBatch,
@@ -287,14 +288,28 @@ test("valid submit returns 202 with the OpenRouter-shaped batch object and durab
   assert.ok(id.startsWith("batch_"));
   assert.ok((body.created_at as number) >= before && (body.created_at as number) <= before + 2);
 
+  // The sample key has cloud: false, so the job is local-only for its whole window.
   const job = deps.ledger.job(id)!;
-  assert.equal(Number.isInteger(job.spillAt), true);
-  assert.ok(job.spillAt - job.createdAt <= 86_400_000 * 0.65);
-  assert.ok(job.spillAt - job.createdAt > 86_400_000 * 0.65 - 2);
+  assert.equal(job.cloud, false);
+  assert.equal(job.spillAt, job.createdAt);
   assert.equal(body.created_at, Math.floor(job.createdAt / 1000));
-  assert.equal(body.local_wait_until, Math.floor(job.spillAt / 1000));
-  assert.equal(body.deadline_at, Math.floor((job.spillAt + job.completionWindowMs) / 1000));
-  assert.equal((body.deadline_at as number) - (body.local_wait_until as number), 86_400);
+  assert.equal(body.deadline_at, Math.floor((job.createdAt + 86_400_000) / 1000));
+  assert.equal(body.local_wait_until, body.deadline_at);
+
+  const cloudDeps = batchDeps();
+  cloudDeps.keys.authenticate = async () => ({
+    keyId: "key-1",
+    policy: samplePolicy({ cloud: true }),
+  });
+  const cloud = await submit(envelope({ requests: [entry("a")] }), cloudDeps);
+  const cloudJob = cloudDeps.ledger.job(cloud.body.id as string)!;
+  assert.equal(cloudJob.cloud, true);
+  assert.equal(cloudJob.spillAt - cloudJob.createdAt, CLOUD_SPILL_DELAY_MS);
+  assert.equal(cloud.body.local_wait_until, Math.floor(cloudJob.spillAt / 1000));
+  assert.equal(
+    (cloud.body.deadline_at as number) - (cloud.body.local_wait_until as number),
+    86_400,
+  );
 
   const items = deps.ledger.items(id);
   assert.equal(items.length, 2);

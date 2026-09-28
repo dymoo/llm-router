@@ -1,11 +1,10 @@
-import type { ClassifierHealth } from "../classifier.ts";
 import type { SamplingOptions } from "../sampling.ts";
 import type {
   AnalyticsSnapshot,
+  AppAttribution,
   BatchRequestCounts,
   BatchStatus,
   BatchUsage,
-  ClassifierQualification,
 } from "../domain.ts";
 import type { BatchLedger } from "../batch/ledger.ts";
 import type { BatchResultRow, BatchResultStore } from "../batch/results.ts";
@@ -19,25 +18,14 @@ import type {
 import type { RequestStatusStore } from "./status.ts";
 
 export type Priority = "high" | "medium" | "low";
-export type OverloadAction = "report" | "failover";
-export type SessionBoundary = "new-task" | "continue" | "checkpoint";
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 
+/** The whole key policy (the admin API's `policy` object). */
 export type KeyPolicy = {
   priority: Priority;
-  localityBias: number;
-  contextLimitTokens: number;
-  maxCompletionTokens: number;
-  allowedModels: readonly string[] | null;
+  cloud: boolean;
   requestsPerMinute: number;
   maxConcurrent: number;
-  maxWaitMs: number;
-  overloadAction: OverloadAction;
-  maxEstimatedUsd: number | null;
-  bias: {
-    cost: number;
-    quality: number;
-    latency: number;
-  };
 };
 
 export type PublicKey = {
@@ -74,8 +62,7 @@ export type KeyDraft = {
   policy: KeyPolicy;
 };
 
-export type KeyPatch = Omit<KeyDraft, "policy"> & {
-  policy: Omit<KeyPolicy, "overloadAction"> & Partial<Pick<KeyPolicy, "overloadAction">>;
+export type KeyPatch = KeyDraft & {
   expectedVersion: number;
 };
 
@@ -112,12 +99,21 @@ export type DeploymentHealth = {
   evidence?: "runtime-probe" | "configuration-only" | "unavailable";
 };
 
+/** Fixed: there is no task classifier. Kept so the current console keeps compiling. */
+export const RULES_CLASSIFIER = {
+  backend: "rules",
+  ready: true,
+  local: true,
+  evidence: "configuration-only",
+} as const;
+
 export type HealthSnapshot = {
   checkedAt?: number;
   persistence?: boolean;
   stopping?: boolean;
+  /** Persistence is up and at least one non-optional deployment is ready. */
   ready: boolean;
-  classifier: ClassifierHealth;
+  classifier: typeof RULES_CLASSIFIER;
   deployments: DeploymentHealth[];
 };
 
@@ -157,13 +153,6 @@ export type ToolDefinition = {
   };
 };
 
-export type RoutingHint = {
-  sessionId: string;
-  boundary: SessionBoundary;
-  taskBrief?: string;
-  taskBriefSource?: "caller-brief";
-};
-
 export type ChatCompletionRequest = {
   model: "auto";
   stream: boolean;
@@ -174,8 +163,11 @@ export type ChatCompletionRequest = {
   tool_choice?: unknown;
   response_format?: unknown;
   maxCompletionTokens?: number;
-  routing: RoutingHint;
-  /** OpenAI `service_tier: "flex"`: local spare capacity only, refused otherwise. */
+  /** OpenAI `reasoning_effort`, with `minimal` folded into `low`. */
+  reasoningEffort?: ReasoningEffort;
+  /** `routing.sessionId` or the Open WebUI chat id: stickiness only. */
+  sessionId?: string;
+  /** OpenAI `service_tier: "flex"`: local idle compute only. */
   serviceTier?: "flex";
 };
 
@@ -185,16 +177,6 @@ export type RequestCapabilities = {
   vision: false;
   pendingToolCalls: number;
   turns: number;
-};
-
-export type ClassifierInput = {
-  source: "full-input" | "caller-brief";
-  state: string;
-  advisory: boolean;
-  inputTokens: number;
-  tools: boolean;
-  turns: number;
-  pendingToolCalls: number;
 };
 
 export type RoutedWork = {
@@ -209,19 +191,20 @@ export type RoutedWork = {
   toolChoice?: unknown;
   responseFormat?: unknown;
   maxCompletionTokens?: number;
+  reasoningEffort?: ReasoningEffort;
   inputTokens: number;
-  routing: RoutingHint;
+  sessionId?: string;
   capabilities: RequestCapabilities;
-  classifierInput: ClassifierInput;
-  freshFactsAvailable: false;
   stream: boolean;
   serviceTier?: "flex";
+  /** Client app attribution; forwarded to OpenRouter, never used for routing. */
+  appAttribution?: AppAttribution;
 };
 
 export type SessionHeaders = {
   requestId: string;
   deploymentId: string;
-  sessionId: string;
+  sessionId?: string;
   appliedEffort: string;
   priority?: Priority;
   queueWaitMs?: number;
@@ -263,10 +246,7 @@ export type KeyService = {
   finalize: (admission: Admission, outcome: FinalizeOutcome) => Promise<void>;
   usageSummary: (query: UsageQuery) => Promise<UsageSummary>;
   recentRequests: (query: RequestQuery) => Promise<RecentRequestList>;
-  analytics: (
-    query: AnalyticsQuery,
-    qualifications: readonly ClassifierQualification[],
-  ) => Promise<AnalyticsSnapshot>;
+  analytics: (query: AnalyticsQuery) => Promise<AnalyticsSnapshot>;
 };
 
 export type InferenceGateway = {
@@ -285,7 +265,6 @@ export type HealthService = {
 export type AdminDeps = {
   appOrigin: string;
   keys: KeyService;
-  classifierQualifications: readonly ClassifierQualification[];
 };
 
 export type InferenceDeps = {
@@ -303,7 +282,7 @@ export type HealthDeps = {
 };
 
 /** Every batch handler is wired through this and nothing else. `keys` authenticates the
- * bearer (and supplies localityBias for the submit-time spill computation); `kick` wakes
+ * bearer (and supplies the key's `cloud` for the submit-time spill rule); `kick` wakes
  * the deferred-lane scheduler after a state change it must notice. */
 export type BatchDeps = {
   ledger: BatchLedger;

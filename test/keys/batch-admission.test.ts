@@ -38,7 +38,7 @@ function live(path: string) {
 }
 
 const policy: KeyPolicy = {
-  ...POLICY_SUGGESTIONS.Balanced,
+  ...POLICY_SUGGESTIONS.Standard,
   maxConcurrent: 1,
   requestsPerMinute: 30,
 };

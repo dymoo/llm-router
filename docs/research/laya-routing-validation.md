@@ -14,11 +14,11 @@ With the gateway's task-and-deployment metadata state, Laya selected `chat`, wit
 
 A controlled input-format diagnostic used the same seven questions:
 
-| State form | Task choice | Observation |
-| --- | --- | --- |
-| Task text alone | coding; probability 0.9563; entropy confidence 0.8861 | Task classification improved, but `trivialChat` was 0.8451 and local sufficiency 0.3137. No local catalogue was supplied in this diagnostic arm. |
-| Structured task plus local deployment | chat | Metadata materially changed the answer. |
-| Plain labelled task and deployment sections | extraction | Formatting alone did not establish a reliable fix. |
+| State form                                  | Task choice                                           | Observation                                                                                                                                      |
+| ------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Task text alone                             | coding; probability 0.9563; entropy confidence 0.8861 | Task classification improved, but `trivialChat` was 0.8451 and local sufficiency 0.3137. No local catalogue was supplied in this diagnostic arm. |
+| Structured task plus local deployment       | chat                                                  | Metadata materially changed the answer.                                                                                                          |
+| Plain labelled task and deployment sections | extraction                                            | Formatting alone did not establish a reliable fix.                                                                                               |
 
 The upstream API is being called with its documented `predict(state, questions)` contract, and the service preserves rather than invents the outputs. These examples do **not** establish that Laya is generally unusable, but they do establish that this question/state combination is not yet validated for trustworthy production routing.
 

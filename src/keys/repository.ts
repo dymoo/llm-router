@@ -4,11 +4,11 @@ import { Clock, Context, Effect, Layer, Schema } from "effect";
 import {
   CandidateExclusion,
   KeyPolicy,
+  decodeStoredKeyPolicy,
   type AnalyticsSnapshot,
   type ApiKeyPublic,
   type ClassificationReuse,
   type ClassifierMode,
-  type ClassifierQualification,
   type ClassifierSource,
   type KeyPolicy as KeyPolicyType,
 } from "../domain.ts";
@@ -82,9 +82,6 @@ type TerminalObservation = {
   outcome: FinalizeOutcome;
 };
 
-type KeyPolicyUpdate = Omit<KeyPolicyType, "overloadAction"> &
-  Partial<Pick<KeyPolicyType, "overloadAction">>;
-
 export class KeyRepository extends Context.Service<
   KeyRepository,
   {
@@ -100,7 +97,7 @@ export class KeyRepository extends Context.Service<
       expectedVersion: number;
       name: string;
       expiresAt: number | null;
-      policy: KeyPolicyUpdate;
+      policy: KeyPolicyType;
     }): Effect.Effect<ApiKeyPublic, RepoError>;
     revokeKey(id: string): Effect.Effect<ApiKeyPublic, RepoError>;
     rotateKey(input: { id: string; expectedVersion: number }): Effect.Effect<CreatedKey, RepoError>;
@@ -137,10 +134,7 @@ export class KeyRepository extends Context.Service<
       priority?: "high" | "medium" | "low";
       deploymentId?: string;
     }): Effect.Effect<RecentRequestList, RepoError>;
-    analytics(
-      input: AnalyticsQuery,
-      qualifications: readonly ClassifierQualification[],
-    ): Effect.Effect<AnalyticsSnapshot, RepoError>;
+    analytics(input: AnalyticsQuery): Effect.Effect<AnalyticsSnapshot, RepoError>;
   }
 >()("dymoo/llm-router/keys/KeyRepository") {}
 
@@ -168,7 +162,7 @@ function mapRepoError(cause: unknown): RepoError {
 
 function decodePolicyJson(json: string): KeyPolicyType {
   try {
-    return Schema.decodeUnknownSync(KeyPolicy)(JSON.parse(json) as unknown);
+    return decodeStoredKeyPolicy(JSON.parse(json) as unknown);
   } catch {
     throw new InvalidInput({ message: "stored policy is invalid" });
   }
@@ -320,6 +314,8 @@ function requestOutcomeFields(
     cacheObservation: outcome.cacheObservation ?? lease.cacheObservation,
     costSource: outcome.costSource ?? lease.costSource,
     decisionTraceJson: outcome.decisionTraceJson ?? lease.decisionTraceJson,
+    appUrl: outcome.appUrl ?? lease.appUrl,
+    appTitle: outcome.appTitle ?? lease.appTitle,
   };
 }
 
@@ -613,7 +609,7 @@ export const keyRepositoryLayer = (options: {
         expectedVersion: number;
         name: string;
         expiresAt: number | null;
-        policy: KeyPolicyUpdate;
+        policy: KeyPolicyType;
       }) {
         const now = yield* Clock.currentTimeMillis;
         return yield* Effect.try({
@@ -634,13 +630,11 @@ export const keyRepositoryLayer = (options: {
                 if (input.expiresAt !== null && input.expiresAt < now) {
                   throw new InvalidInput({ message: "expiry must be in the future" });
                 }
-                const overloadAction =
-                  input.policy.overloadAction ?? decodePolicyJson(row.policyJson).overloadAction;
                 tx.update(apiKeys)
                   .set({
                     name,
                     expiresAt: input.expiresAt,
-                    policyJson: encodePolicy({ ...input.policy, overloadAction }),
+                    policyJson: encodePolicy(input.policy),
                     version: row.version + 1,
                   })
                   .where(and(eq(apiKeys.id, input.id), eq(apiKeys.version, input.expectedVersion)))
@@ -765,12 +759,7 @@ export const keyRepositoryLayer = (options: {
       ): Admission {
         {
           const policy = decodePolicyJson(row.policyJson);
-          if (policy.maxConcurrent <= 0) {
-            throw new ConcurrentLimit({ message: "concurrent request limit reached" });
-          }
-          if (policy.requestsPerMinute <= 0) {
-            throw new RateLimited({ message: "request rate limit reached" });
-          }
+          // 0 means unlimited for both abuse limits; revoke a key to block it.
           const running = tx
             .select({ n: sql<number>`count(*)` })
             .from(requests)
@@ -782,7 +771,7 @@ export const keyRepositoryLayer = (options: {
               ),
             )
             .get();
-          if ((running?.n ?? 0) >= policy.maxConcurrent) {
+          if (policy.maxConcurrent > 0 && (running?.n ?? 0) >= policy.maxConcurrent) {
             throw new ConcurrentLimit({ message: "concurrent request limit reached" });
           }
           const minute = utcMinute(now);
@@ -792,7 +781,7 @@ export const keyRepositoryLayer = (options: {
             .where(and(eq(rateLimits.keyId, row.id), eq(rateLimits.minute, minute)))
             .get();
           const count = bucket?.count ?? 0;
-          if (count >= policy.requestsPerMinute) {
+          if (policy.requestsPerMinute > 0 && count >= policy.requestsPerMinute) {
             throw new RateLimited({ message: "request rate limit reached" });
           }
           if (bucket === undefined) {
@@ -815,7 +804,6 @@ export const keyRepositoryLayer = (options: {
               status: "running",
               deferred: 0,
               priority: policy.priority,
-              localityBias: policy.localityBias,
             })
             .run();
           tx.update(apiKeys).set({ lastUsedAt: now }).where(eq(apiKeys.id, row.id)).run();
@@ -1457,6 +1445,8 @@ export const keyRepositoryLayer = (options: {
                 row.decisionTraceJson === null
                   ? null
                   : (JSON.parse(row.decisionTraceJson) as unknown),
+              appUrl: row.appUrl,
+              appTitle: row.appTitle,
             }));
             return {
               items,
@@ -1469,12 +1459,9 @@ export const keyRepositoryLayer = (options: {
           catch: mapRepoError,
         });
       });
-      const analytics = Effect.fn("KeyRepository.analytics")(function* (
-        input: AnalyticsQuery,
-        qualifications: readonly ClassifierQualification[],
-      ) {
+      const analytics = Effect.fn("KeyRepository.analytics")(function* (input: AnalyticsQuery) {
         return yield* Effect.try({
-          try: () => queryAnalyticsSnapshot(db, input, qualifications),
+          try: () => queryAnalyticsSnapshot(db, input),
           catch: mapRepoError,
         });
       });

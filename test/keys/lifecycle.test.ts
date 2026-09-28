@@ -43,10 +43,10 @@ describe("key lifecycle", () => {
         const created = yield* keys.createKey({
           name: "agent",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS.Balanced,
+          policy: POLICY_SUGGESTIONS.Standard,
         });
         assert.ok(parseApiKey(created.secret));
-        assert.equal(created.key.policy.localityBias, POLICY_SUGGESTIONS.Balanced.localityBias);
+        assert.deepEqual(created.key.policy, POLICY_SUGGESTIONS.Standard);
         const listed = yield* keys.listKeys({});
         assert.equal(listed.items.length, 1);
         assert.equal("secret" in listed.items[0]!, false);
@@ -57,10 +57,10 @@ describe("key lifecycle", () => {
           expectedVersion: created.key.version,
           name: "agent-2",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS.Dylan,
+          policy: POLICY_SUGGESTIONS.Interactive,
         });
         assert.equal(updated.policy.priority, "high");
-        assert.equal(updated.policy.localityBias, POLICY_SUGGESTIONS.Dylan.localityBias);
+        assert.deepEqual(updated.policy, POLICY_SUGGESTIONS.Interactive);
         assert.equal(updated.version, created.key.version + 1);
 
         const rotated = yield* keys.rotateKey({
@@ -80,7 +80,7 @@ describe("key lifecycle", () => {
     await runtime.dispose();
   });
 
-  it("persists failover, defaults historical rows, and preserves action on legacy full-policy edits", async () => {
+  it("persists cloud, and reads an unmigrated legacy row without bricking the key", async () => {
     const path = tempDb();
     const runtime = ManagedRuntime.make(live(path, "pepper-a"));
     await runtime.runPromise(
@@ -89,37 +89,43 @@ describe("key lifecycle", () => {
         const created = yield* keys.createKey({
           name: "policy",
           expiresAt: null,
-          policy: { ...POLICY_SUGGESTIONS.Balanced, overloadAction: "failover" },
+          policy: { ...POLICY_SUGGESTIONS.Standard, cloud: true },
         });
-        assert.equal((yield* keys.getKey(created.key.id)).policy.overloadAction, "failover");
-
-        const { overloadAction: _omitted, ...oldClientPolicy } = POLICY_SUGGESTIONS.Dylan;
-        const updated = yield* keys.updateKey({
-          id: created.key.id,
-          expectedVersion: created.key.version,
-          name: "edited",
-          expiresAt: null,
-          policy: oldClientPolicy,
-        });
-        assert.equal(updated.policy.overloadAction, "failover");
-        assert.equal(updated.policy.priority, "high");
+        assert.equal((yield* keys.getKey(created.key.id)).policy.cloud, true);
 
         const database = new DatabaseSync(path);
-        database
-          .prepare("UPDATE api_keys SET policy_json = ? WHERE id = ?")
-          .run(JSON.stringify(oldClientPolicy), created.key.id);
+        database.prepare("UPDATE api_keys SET policy_json = ? WHERE id = ?").run(
+          JSON.stringify({
+            priority: "high",
+            localityBias: 0.15,
+            contextLimitTokens: 131_072,
+            maxCompletionTokens: 16_384,
+            allowedModels: null,
+            requestsPerMinute: 120,
+            maxConcurrent: 4,
+            maxWaitMs: 0,
+            overloadAction: "failover",
+            maxEstimatedUsd: null,
+            bias: { cost: 0.2, quality: 0.9, latency: 0.3 },
+          }),
+          created.key.id,
+        );
         database.close();
-        const historical = yield* keys.getKey(created.key.id);
-        assert.equal(historical.policy.overloadAction, "report");
-        const optedIn = yield* keys.updateKey({
-          id: created.key.id,
-          expectedVersion: historical.version,
-          name: "opted in",
-          expiresAt: null,
-          policy: { ...oldClientPolicy, overloadAction: "failover" },
+        const legacy = yield* keys.getKey(created.key.id);
+        assert.deepEqual(legacy.policy, {
+          priority: "high",
+          cloud: true,
+          requestsPerMinute: 120,
+          maxConcurrent: 4,
         });
-        assert.equal((yield* keys.getKey(created.key.id)).policy.overloadAction, "failover");
-        assert.equal(optedIn.policy.overloadAction, "failover");
+        const updated = yield* keys.updateKey({
+          id: created.key.id,
+          expectedVersion: legacy.version,
+          name: "edited",
+          expiresAt: null,
+          policy: { ...legacy.policy, cloud: false },
+        });
+        assert.equal(updated.policy.cloud, false);
       }),
     );
     await runtime.dispose();
@@ -133,14 +139,14 @@ describe("key lifecycle", () => {
         const created = yield* keys.createKey({
           name: "stale",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS.Balanced,
+          policy: POLICY_SUGGESTIONS.Standard,
         });
         const first = yield* keys.updateKey({
           id: created.key.id,
           expectedVersion: created.key.version,
           name: "stale-1",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS.Dylan,
+          policy: POLICY_SUGGESTIONS.Interactive,
         });
         const stale = yield* keys
           .updateKey({
@@ -148,7 +154,7 @@ describe("key lifecycle", () => {
             expectedVersion: created.key.version,
             name: "should-not-stick",
             expiresAt: null,
-            policy: POLICY_SUGGESTIONS["Free Vibecode"],
+            policy: POLICY_SUGGESTIONS.Background,
           })
           .pipe(Effect.result);
         assert.equal(stale._tag, "Failure");
@@ -173,7 +179,7 @@ describe("key lifecycle", () => {
         yield* keys.createKey({
           name: "keep",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS.Balanced,
+          policy: POLICY_SUGGESTIONS.Standard,
         });
       }),
     );
@@ -195,7 +201,7 @@ describe("key lifecycle", () => {
         const created = yield* keys.createKey({
           name: "gone",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS.Balanced,
+          policy: POLICY_SUGGESTIONS.Standard,
         });
         yield* keys.revokeKey(created.key.id);
         const update = yield* keys
@@ -204,7 +210,7 @@ describe("key lifecycle", () => {
             expectedVersion: created.key.version + 1,
             name: "resurrect",
             expiresAt: null,
-            policy: POLICY_SUGGESTIONS.Dylan,
+            policy: POLICY_SUGGESTIONS.Interactive,
           })
           .pipe(Effect.result);
         assert.equal(update._tag, "Failure");

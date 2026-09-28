@@ -1,30 +1,22 @@
 [
   {
-    "id": "npu-embedding-gemma",
-    "modality": "embeddings",
-    "modelId": "embed-gemma:300m",
-    "endpoint": "http://fastflowlm:52625/v1",
-    "resourceId": "strix-halo-npu",
-    "capacity": { "maxParallel": 1, "reservedInteractiveSlots": 0 },
-    "maxInputTokens": 2048,
-    "maxBatchSize": 16,
-    "maxBodyBytes": 131072,
-    "inputUsdPerMillion": null,
+    "id": "gufo-kev-4b",
+    "modality": "systemone",
+    "transport": "gufo",
+    "location": "local",
+    "credentialEnvVar": "GUFO_API_KEY",
+    "modelId": "kev-4b",
+    "endpoint": "REPLACE_GUFO_ENDPOINT",
+    "resourceId": "gufo-kev",
+    "capacity": {
+      "maxParallel": 32,
+      "reservedInteractiveSlots": 0
+    },
+    "maxInputTokens": 32768,
+    "maxBatchSize": 128,
+    "maxBodyBytes": 4194304,
+    "inputUsdPerMillion": 0,
     "requestUsd": null,
-    "priceVersion": "unconfigured"
-  },
-  {
-    "id": "npu-whisper-turbo",
-    "modality": "transcription",
-    "modelId": "whisper-v3:turbo",
-    "endpoint": "http://fastflowlm:52625/v1",
-    "resourceId": "strix-halo-npu",
-    "capacity": { "maxParallel": 1, "reservedInteractiveSlots": 0 },
-    "maxInputTokens": 1,
-    "maxBatchSize": 1,
-    "maxBodyBytes": 26214400,
-    "inputUsdPerMillion": null,
-    "requestUsd": null,
-    "priceVersion": "unconfigured"
+    "priceVersion": "local-free"
   }
 ]

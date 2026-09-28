@@ -5,7 +5,9 @@ export function sessionResponseHeaders(headers: SessionHeaders, extra?: HeadersI
   const out = noStoreHeaders(extra);
   out.set("x-request-id", headers.requestId);
   out.set("x-deployment-id", encodeURIComponent(headers.deploymentId));
-  out.set("x-session-id", encodeURIComponent(headers.sessionId));
+  if (headers.sessionId !== undefined) {
+    out.set("x-session-id", encodeURIComponent(headers.sessionId));
+  }
   out.set("x-applied-effort", headers.appliedEffort);
   if (headers.priority !== undefined) {
     out.set("x-priority", headers.priority);

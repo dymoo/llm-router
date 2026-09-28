@@ -9,11 +9,10 @@ test("health probes coalesce, cache, degrade and recover without paid inference"
   const monitor = createHealthMonitor({
     now: () => now,
     ttlMs: 10,
-    classifier: async () => {
+    deployments: async () => {
       calls++;
-      return { ready, backend: "laya", local: true };
+      return [{ id: "local", location: "local", ready }];
     },
-    deployments: async () => [{ id: "local", location: "local", ready }],
     persistence: async () => true,
   });
   assert.equal(
@@ -39,7 +38,6 @@ test("an unavailable optional NPU does not block healthy chat, but persistence d
   const monitor = createHealthMonitor({
     now: () => now,
     ttlMs: 1,
-    classifier: async () => ({ ready: true, backend: "laya", local: true }),
     deployments: async () => [
       { id: "chat", ready: true, location: "local" },
       { id: "npu", ready: false, location: "local", optional: true },
@@ -58,11 +56,10 @@ test("shutdown during a probe cannot publish a stale healthy result", async () =
     release = resolve;
   });
   const monitor = createHealthMonitor({
-    classifier: async () => {
+    deployments: async () => {
       await barrier;
-      return { ready: true, backend: "laya", local: true };
+      return [{ id: "chat", ready: true, location: "local" }];
     },
-    deployments: async () => [{ id: "chat", ready: true, location: "local" }],
     persistence: async () => true,
   });
   const pending = monitor.snapshot();
@@ -70,4 +67,19 @@ test("shutdown during a probe cannot publish a stale healthy result", async () =
   release();
   assert.equal((await pending).ready, false);
   assert.equal((await monitor.snapshot()).stopping, true);
+});
+
+test("readiness depends on persistence and deployments; the classifier section is fixed", async () => {
+  const monitor = createHealthMonitor({
+    deployments: async () => [{ id: "chat", ready: true, location: "local" }],
+    persistence: async () => true,
+  });
+  const snapshot = await monitor.snapshot();
+  assert.equal(snapshot.ready, true);
+  assert.deepEqual(snapshot.classifier, {
+    backend: "rules",
+    ready: true,
+    local: true,
+    evidence: "configuration-only",
+  });
 });

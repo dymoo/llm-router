@@ -18,6 +18,8 @@ import {
   CONTROL_PLANE_V3_SQL,
   CONTROL_PLANE_V4_SQL,
   CONTROL_PLANE_V5_SQL,
+  CONTROL_PLANE_V6_SQL,
+  CONTROL_PLANE_V7_SQL,
 } from "./migrations-sql.ts";
 
 const migrations = [
@@ -26,6 +28,8 @@ const migrations = [
   CONTROL_PLANE_V3_SQL,
   CONTROL_PLANE_V4_SQL,
   CONTROL_PLANE_V5_SQL,
+  CONTROL_PLANE_V6_SQL,
+  CONTROL_PLANE_V7_SQL,
 ];
 export const CONTROL_PLANE_SCHEMA_VERSION = migrations.length;
 export const SQLITE_USER_VERSION = CONTROL_PLANE_SCHEMA_VERSION;

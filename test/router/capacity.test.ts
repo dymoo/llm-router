@@ -13,7 +13,7 @@ describe("capacity", () => {
     assert.ok(first);
     assert.ok(second);
     await Effect.runPromise(
-      pool.acquire([localQwen], "high", { requestId: "r1", waitMs: 0, spill: false }).pipe(
+      pool.acquire([localQwen], "high", { requestId: "r1", waitMs: 0 }).pipe(
         Effect.match({
           onFailure: (error) => {
             assert.equal(error._tag, "CapacityBusy");
@@ -52,14 +52,12 @@ describe("capacity", () => {
     assert.ok(held);
     assert.ok(held2);
     const waiter = Effect.runPromise(
-      pool
-        .acquire([localQwen], "medium", { requestId: "wait", waitMs: 5_000, spill: false })
-        .pipe(Effect.result),
+      pool.acquire([localQwen], "medium", { requestId: "wait", waitMs: 5_000 }).pipe(Effect.result),
     );
     await Effect.runPromise(Effect.sleep("20 millis"));
     assert.equal(pool.snapshot(localQwen.id).waiting, 1);
     await Effect.runPromise(
-      pool.acquire([localQwen], "low", { requestId: "full", waitMs: 5_000, spill: false }).pipe(
+      pool.acquire([localQwen], "low", { requestId: "full", waitMs: 5_000 }).pipe(
         Effect.match({
           onFailure: (error) => {
             assert.equal(error._tag, "QueueFull");
@@ -83,7 +81,7 @@ describe("capacity", () => {
     assert.ok(held);
     assert.ok(held2);
     const fiber = Effect.runFork(
-      pool.acquire([localQwen], "high", { requestId: "int", waitMs: 30_000, spill: false }),
+      pool.acquire([localQwen], "high", { requestId: "int", waitMs: 30_000 }),
     );
     await Effect.runPromise(Effect.sleep("20 millis"));
     assert.equal(pool.snapshot(localQwen.id).waiting, 1);
@@ -106,9 +104,7 @@ describe("capacity", () => {
     assert.ok(held);
     assert.ok(held2);
     const result = await Effect.runPromise(
-      pool
-        .acquire([localQwen], "high", { requestId: "timeout", waitMs: 25, spill: false })
-        .pipe(Effect.result),
+      pool.acquire([localQwen], "high", { requestId: "timeout", waitMs: 25 }).pipe(Effect.result),
     );
     assert.equal(result._tag, "Failure");
     assert.equal(pool.snapshot(localQwen.id).waiting, 0);
@@ -128,7 +124,7 @@ describe("capacity", () => {
     assert.ok(held);
     assert.ok(held2);
     const fiber = Effect.runFork(
-      pool.acquire([localQwen], "high", { requestId: "handoff", waitMs: 30_000, spill: false }),
+      pool.acquire([localQwen], "high", { requestId: "handoff", waitMs: 30_000 }),
     );
     await Effect.runPromise(Effect.sleep("20 millis"));
     assert.equal(pool.snapshot(localQwen.id).waiting, 1);
@@ -146,14 +142,14 @@ describe("capacity", () => {
     next.release();
   });
 
-  it("spills to another eligible deployment only when allowed", async () => {
+  it("takes the first free deployment in the ranked order", async () => {
     const pool = createCapacityPool();
     const a = pool.tryAcquire(localQwen, "high");
     const b = pool.tryAcquire(localQwen, "high");
     assert.ok(a);
     assert.ok(b);
     const permit = await Effect.runPromise(
-      pool.acquire([localQwen, cloudGlm], "high", { requestId: "spill", waitMs: 0, spill: true }),
+      pool.acquire([localQwen, cloudGlm], "high", { requestId: "ranked", waitMs: 0 }),
     );
     assert.equal(permit.deploymentId, "cloud-glm");
     permit.release();

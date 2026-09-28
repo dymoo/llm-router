@@ -10,17 +10,17 @@ Facts, recommendations, and unknowns are separated below. Cookbook numeric resul
 
 ## Official skill URLs
 
-| What | URL |
-| --- | --- |
-| Live skill page (source of truth for install) | https://docs.typesafe.ai/agent-skill |
-| Skill Markdown | https://docs.typesafe.ai/agent-skill.md |
-| Official GitHub skill (raw) | https://raw.githubusercontent.com/typesafe-ai/skills/main/skills/typesafe-ai/SKILL.md |
-| Official GitHub skill (blob) | https://github.com/typesafe-ai/skills/blob/main/skills/typesafe-ai/SKILL.md |
-| Official skill directory | https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai |
-| Docs index the skill tells agents to read | https://docs.typesafe.ai/llms.txt |
-| HTTP API | https://docs.typesafe.ai/api |
-| Models / price / context | https://docs.typesafe.ai/models |
-| Official JS SDK | https://github.com/typesafe-ai/typesafe-sdk-js (inspected `v0.6.0`) |
+| What                                          | URL                                                                                   |
+| --------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Live skill page (source of truth for install) | https://docs.typesafe.ai/agent-skill                                                  |
+| Skill Markdown                                | https://docs.typesafe.ai/agent-skill.md                                               |
+| Official GitHub skill (raw)                   | https://raw.githubusercontent.com/typesafe-ai/skills/main/skills/typesafe-ai/SKILL.md |
+| Official GitHub skill (blob)                  | https://github.com/typesafe-ai/skills/blob/main/skills/typesafe-ai/SKILL.md           |
+| Official skill directory                      | https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai                    |
+| Docs index the skill tells agents to read     | https://docs.typesafe.ai/llms.txt                                                     |
+| HTTP API                                      | https://docs.typesafe.ai/api                                                          |
+| Models / price / context                      | https://docs.typesafe.ai/models                                                       |
+| Official JS SDK                               | https://github.com/typesafe-ai/typesafe-sdk-js (inspected `v0.6.0`)                   |
 
 The GitHub tree for `skills/typesafe-ai` on `main` contains only `SKILL.md` and `LICENSE`. The live skill page still says to copy “the entire skills/typesafe-ai directory, including its reference files”; those extra files are not present in the inspected tree.
 
@@ -46,8 +46,7 @@ How to build (https://docs.typesafe.ai/concepts/how-to-build-with-system-one):
 
 > System One is TypeSafe's model for building AI-powered software, not agents. It does not generate code or choose its own next action.
 
-**Scope of that quote (primary, not architecture inference):** it contrasts System One with agent loops that pick unconstrained next tools/steps. It does **not** forbid a typed Choice whose options are model or handler IDs. The use-case map explicitly lists “chooses which LLM receives each prompt.” What the same pages *do* keep in code: arithmetic, authorization, lookups, side effects (admission), and composing answers.
-
+**Scope of that quote (primary, not architecture inference):** it contrasts System One with agent loops that pick unconstrained next tools/steps. It does **not** forbid a typed Choice whose options are model or handler IDs. The use-case map explicitly lists “chooses which LLM receives each prompt.” What the same pages _do_ keep in code: arithmetic, authorization, lookups, side effects (admission), and composing answers.
 
 > Keep control flow, deterministic rules, and side effects in code.
 
@@ -89,11 +88,11 @@ Jaggedness for `jev-1.13` (https://docs.typesafe.ai/model-jaggedness/jev-1.13, r
 
 Endpoint: `POST https://api.typesafe.ai/v1/systemone` with `state`, `model`, `questions`. ([API](https://docs.typesafe.ai/api))
 
-| Primitive | Question | Returns | Limits |
-| --- | --- | --- | --- |
-| Choice | one of a defined set | `choice`, `probabilities` (sum to 1), `confidence` 0–1 | max 255 options; add `other` / `none of the above` when coverage is incomplete |
-| Score | ordered rubric | `score` (can land between levels), `legend`, `probabilities`, `confidence` | at least 2 levels, API accepts up to 10 |
-| Noul | yes/no | `noul` in `[0,1]` only | optional `criteria.true` / `criteria.false`; **no** `confidence` |
+| Primitive | Question             | Returns                                                                    | Limits                                                                         |
+| --------- | -------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Choice    | one of a defined set | `choice`, `probabilities` (sum to 1), `confidence` 0–1                     | max 255 options; add `other` / `none of the above` when coverage is incomplete |
+| Score     | ordered rubric       | `score` (can land between levels), `legend`, `probabilities`, `confidence` | at least 2 levels, API accepts up to 10                                        |
+| Noul      | yes/no               | `noul` in `[0,1]` only                                                     | optional `criteria.true` / `criteria.false`; **no** `confidence`               |
 
 All three types may be mixed in one request. Every question sees the **same** `state`, is evaluated **in parallel and in isolation**, and cannot see sibling answers. Question IDs are for code and are **not sent to the model**; complete meaning must live in `instructions` + `criteria`. `instructions` and criteria values may be string, object, array, or (where allowed) `null`. Nested state is referenced with backticked paths such as `` `ticket.messages[0].text` ``.
 
@@ -142,15 +141,15 @@ This repo already documents the concentration semantics on `Assessment` in `src/
 
 Inspected **2026-09-20** from [Models](https://docs.typesafe.ai/models) for `jev-1.13.0` (`jev-latest` and `jev-preview` both currently alias this ID):
 
-| Item | Official value |
-| --- | --- |
-| Price | **$42 / Btok = $0.042 / Mtok input.** Output tokens are **free**. Charged per input token. |
-| Context | **64k tokens per request** covering `state` + all questions combined; **32k tokens for `state` plus the single longest question**. |
-| Ingest | State is ingested once; every question is evaluated against it in parallel. |
-| Rate limits | 250,000 tokens/s and 1,200 rpm; **“adjusting dynamically”** and can change without notice. Over-limit → `429`. |
-| Input | Text only. |
-| Customization | No per-account fine-tune/LoRA. Shape answers via `state` + `instructions`/`criteria`. |
-| Training data | “Jev is not trained on customer requests or responses.” ZDR is **enterprise**, via privacy@. |
+| Item          | Official value                                                                                                                     |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Price         | **$42 / Btok = $0.042 / Mtok input.** Output tokens are **free**. Charged per input token.                                         |
+| Context       | **64k tokens per request** covering `state` + all questions combined; **32k tokens for `state` plus the single longest question**. |
+| Ingest        | State is ingested once; every question is evaluated against it in parallel.                                                        |
+| Rate limits   | 250,000 tokens/s and 1,200 rpm; **“adjusting dynamically”** and can change without notice. Over-limit → `429`.                     |
+| Input         | Text only.                                                                                                                         |
+| Customization | No per-account fine-tune/LoRA. Shape answers via `state` + `instructions`/`criteria`.                                              |
+| Training data | “Jev is not trained on customer requests or responses.” ZDR is **enterprise**, via privacy@.                                       |
 
 **Prompt / KV cache:** not present in the HTTP API, Models page, or official JS `Usage` / `SystemOneRequest` types. The parallel-questions cookbook’s cost saving is **not** a provider cache: it is that `state` is paid once per request, so N questions in one call avoid re-sending the document N times.
 
@@ -166,12 +165,12 @@ Docs inconsistency: primitives.md currently says that same cookbook is “11.5x 
 
 **Errors / retries** ([API](https://docs.typesafe.ai/api); JS SDK `src/retry.ts` `v0.6.0`):
 
-| Status | Meaning |
-| --- | --- |
-| 401 | bad/missing key |
-| 422 | validation |
-| 429 | rate limit |
-| 529 | temporarily overloaded |
+| Status | Meaning                |
+| ------ | ---------------------- |
+| 401    | bad/missing key        |
+| 422    | validation             |
+| 429    | rate limit             |
+| 529    | temporarily overloaded |
 
 SDK defaults: timeout **10_000 ms per attempt** (no total retry budget), `maxRetries: 2`, backoff 500–5000 ms with 0.25 jitter, retry HTTP **408, 429, 500–599** (so **529 is retried**), honor `Retry-After` / `retry-after-ms` up to 60s, retry connection and timeout errors. There is no documented SLA for outage duration.
 
@@ -225,18 +224,17 @@ Therefore: even if Jev ranks candidates, **admission, saturation, affinity, and 
 
 **Architecture inference (this section, not a TypeSafe verdict):** three ways this repo could place the Jev/Laya seam. Official docs do not pick among them. The contested part of seam 3 is embedding **live capacity, slider arithmetic, and admission** in the rubric—not the legality of a model-id Choice.
 
-
 ### 1. Task assessment only (current intended model)
 
 Jev/Laya score the **task**: kind, difficulty, effort, length, local-sufficiency, missing facts. Effect policy then applies per-key sliders, constraints, priority, saturation, queue admission, session/cache affinity, budgets.
 
-| Pros | Cons |
-| --- | --- |
-| Matches “code owns workflow / keep rules in code / change weights without rerunning inference.” | Model never sees the actual candidate IDs, so it cannot express “this prompt is a GLM-class coding job.” |
-| Assessment is cacheable across keys that share the same brief (this repo already keys cache on `keyId` though). | `localSufficiency` is a Noul against a listed local set; it is not a ranking of cloud vs local under a cost slider. |
+| Pros                                                                                                               | Cons                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| Matches “code owns workflow / keep rules in code / change weights without rerunning inference.”                    | Model never sees the actual candidate IDs, so it cannot express “this prompt is a GLM-class coding job.”            |
+| Assessment is cacheable across keys that share the same brief (this repo already keys cache on `keyId` though).    | `localSufficiency` is a Noul against a listed local set; it is not a ranking of cloud vs local under a cost slider. |
 | Small, stable question schema (`ASSESSMENT_QUESTION_SCHEMA_VERSION`). Cheap to batch; state can stay a task brief. | Quality/cost targets that differ per key must be applied **after** the model, which is what KeyPolicy already does. |
-| Operational facts (RPM, wait, cold-cache USD, saturation) stay exact. | If the assessment is wrong, every downstream policy inherits it. |
-| Aligns with intent-routing example: classify intent+complexity, then code routes. | Does not use the use-case-map bullet “chooses which LLM receives each prompt” as a Choice over catalogue IDs. |
+| Operational facts (RPM, wait, cold-cache USD, saturation) stay exact.                                              | If the assessment is wrong, every downstream policy inherits it.                                                    |
+| Aligns with intent-routing example: classify intent+complexity, then code routes.                                  | Does not use the use-case-map bullet “chooses which LLM receives each prompt” as a Choice over catalogue IDs.       |
 
 **COGS:** pay Jev once per distinct brief (plus local TTL cache). Do **not** resend per-key slider text. Best cache preservation of the three seams.
 
@@ -244,13 +242,13 @@ Jev/Laya score the **task**: kind, difficulty, effort, length, local-sufficiency
 
 Keep assessment questions **or** replace/augment with per-eligible-deployment Scores/Nouls (or one Choice over **already-filtered** IDs). Code still filters by allowlist/health/context/cost **before** the call, then uses probabilities to rank; code still `tryReserve`.
 
-| Pros | Cons |
-| --- | --- |
-| Choice over a closed set is a first-class primitive (max 255 options). Skill-suggestion cookbook ranks 182 skills in one request, then a **second** request re-reads top-3 with better evidence. | Eligible set is **request-specific** (allowlist, context fit, health). That **destroys shared-state caching** unless you rank a stable universe and filter after. |
-| Official model-routing use case: “chooses which LLM receives each prompt” + “estimate difficulty and risk.” | Putting slider numbers and live load into criteria **forces a rerun whenever policy or occupancy changes**, contradicting “changing a weight need not rerun inference.” |
-| Probabilities over candidates are reusable; code can apply different key weights without a second Jev call **if** the question did not embed those weights. | Large catalogue descriptions in `state` or criteria inflate the 32k state+longest-question budget and add distractors (jaggedness). |
-| Can keep speculative “is local enough?” Nouls next to a candidate Choice. | Still cannot reserve. Ranking ≠ admission. |
-| `other` / `none of the above` is the documented escape hatch when nothing fits. | If code already filtered to one eligible model, the Choice is vacuous. |
+| Pros                                                                                                                                                                                             | Cons                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Choice over a closed set is a first-class primitive (max 255 options). Skill-suggestion cookbook ranks 182 skills in one request, then a **second** request re-reads top-3 with better evidence. | Eligible set is **request-specific** (allowlist, context fit, health). That **destroys shared-state caching** unless you rank a stable universe and filter after.       |
+| Official model-routing use case: “chooses which LLM receives each prompt” + “estimate difficulty and risk.”                                                                                      | Putting slider numbers and live load into criteria **forces a rerun whenever policy or occupancy changes**, contradicting “changing a weight need not rerun inference.” |
+| Probabilities over candidates are reusable; code can apply different key weights without a second Jev call **if** the question did not embed those weights.                                      | Large catalogue descriptions in `state` or criteria inflate the 32k state+longest-question budget and add distractors (jaggedness).                                     |
+| Can keep speculative “is local enough?” Nouls next to a candidate Choice.                                                                                                                        | Still cannot reserve. Ranking ≠ admission.                                                                                                                              |
+| `other` / `none of the above` is the documented escape hatch when nothing fits.                                                                                                                  | If code already filtered to one eligible model, the Choice is vacuous.                                                                                                  |
 
 **COGS:** higher than assessment-only whenever candidate lists or policy text are in the request. Batching still shares `state`. No TypeSafe prompt cache to preserve catalogue prefixes.
 
@@ -258,15 +256,14 @@ Keep assessment questions **or** replace/augment with per-eligible-deployment Sc
 
 One Choice (or a broad “best course of action” question) whose criteria include human-readable sliders, live queue/capacity, session affinity, and dollar ceilings; deterministic fallback only on timeout/low confidence.
 
-| Pros | Cons |
-| --- | --- |
-| One round trip, one artifact to log. | **Inference, not a ban on Choice:** packing sliders, live occupancy, affinity, and USD ceilings into one “best route” rubric asks for arithmetic, authorization, and side effects the skill says to keep in code. Jaggedness: not a calculator. |
-| Typed Choice over catalogue IDs is valid System One semantics (use-case map). | Broad “analyze and determine the best course of action” is the primitives anti-pattern; a **closed** model-id Choice with stable criteria is not that anti-pattern. |
-| Rubric can be written in English for operators. | Live snapshots cannot atomically reserve (section above). Fallback still needs the control plane. |
-| | Independent questions cannot enforce “if saturated then other.” Stale occupancy in `state` is a read of the past. |
-| | Lowest cache reuse if sliders and load maps enter `state`/criteria: every key and every tick change the token stream. Highest **external API** COGS of the three. |
-| | Typed output guarantees the interface, not truth. A confident wrong model ID is still executed unless code re-validates allowlist/health/budget—which is seam 1/2. |
-
+| Pros                                                                          | Cons                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One round trip, one artifact to log.                                          | **Inference, not a ban on Choice:** packing sliders, live occupancy, affinity, and USD ceilings into one “best route” rubric asks for arithmetic, authorization, and side effects the skill says to keep in code. Jaggedness: not a calculator. |
+| Typed Choice over catalogue IDs is valid System One semantics (use-case map). | Broad “analyze and determine the best course of action” is the primitives anti-pattern; a **closed** model-id Choice with stable criteria is not that anti-pattern.                                                                             |
+| Rubric can be written in English for operators.                               | Live snapshots cannot atomically reserve (section above). Fallback still needs the control plane.                                                                                                                                               |
+|                                                                               | Independent questions cannot enforce “if saturated then other.” Stale occupancy in `state` is a read of the past.                                                                                                                               |
+|                                                                               | Lowest cache reuse if sliders and load maps enter `state`/criteria: every key and every tick change the token stream. Highest **external API** COGS of the three.                                                                               |
+|                                                                               | Typed output guarantees the interface, not truth. A confident wrong model ID is still executed unless code re-validates allowlist/health/budget—which is seam 1/2.                                                                              |
 
 ---
 
@@ -280,45 +277,41 @@ Shared-owner DTO names (FoundationContracts, `src/domain.ts`, not edited here): 
 
 Three **distinct cache counters** must not be collapsed:
 
-| Counter | What it is | TypeSafe source? |
-| --- | --- | --- |
-| Classifier exact-cache | Gateway in-process hit on identical classify key (`CLASSIFICATION_CACHE_TTL_MS`, `reuse: "exact-cache"`) | No. Local to this process. |
-| Session reuse | Pin / continuity reuse of a prior assessment or deployment (`ClassificationReuse` includes `"session"`; classified assessment currently only `"classified" \| "exact-cache"`) | No. |
+| Counter                      | What it is                                                                                                                                                                               | TypeSafe source?                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Classifier exact-cache       | Gateway in-process hit on identical classify key (`CLASSIFICATION_CACHE_TTL_MS`, `reuse: "exact-cache"`)                                                                                 | No. Local to this process.                                              |
+| Session reuse                | Pin / continuity reuse of a prior assessment or deployment (`ClassificationReuse` includes `"session"`; classified assessment currently only `"classified" \| "exact-cache"`)            | No.                                                                     |
 | Observed cached input tokens | Generation prompt-cache hits on `RequestAccounting.cachedInputTokens` (`llamacpp` default local; `openai-compatible` / `openrouter`; `halogen` optional). Never on TypeSafe/Jev `Usage`. | **Not** Jev. Classifier `Usage` is `input_tokens`+`output_tokens` only. |
-
-
 
 Classifier **external token API fee:** Jev input tokens × $0.042/Mtok (output free). Laya has **zero external TypeSafe/token API fee**. Laya **compute / energy / depreciation** is not $0; it is unknown unless an operator configures a local-cost estimate. Separate from generation COGS and from estimated vs reported generation USD.
 
-
-| Analytics need | Seam 1 assessment-only | Seam 2 candidate ranking | Seam 3 full operational routing |
-| --- | --- | --- | --- |
-| `byTask` / `byEffort` / difficulty distributions | Direct: already independent Choice/Noul answers on `Assessment` | Same if assessment questions are kept; a candidate-only Choice does **not** produce effort | Only if extra questions are still asked; a single “pick model” Choice is not an effort histogram |
-| `SelectionReason` + `CandidateExclusion` | Natural: code already denies by allowlist/health/context/quality/cost/reasoning | Code still must log filter-before-Jev and post-rank reserve failures | If Jev “owns” the pick, exclusions happen inside the model; analytics then has a label without a structured reason unless code re-validates and logs anyway |
-| Cost reported vs estimated/unknown | Classifier usage is reported input tokens; generation estimate stays in `selectRoute` (`pricing === "unknown"` already denies a USD ceiling) | Ranking does not create a TypeSafe USD field | Embedding slider text does not produce estimated USD; still unknown unless code computes it |
-| Classifier cache hit rate | Highest: stable questions + brief-only state (aside from `localDeployments`) | Falls if eligible IDs/criteria change per request | Worst: sliders + live load in state bust the exact-cache key every tick |
-| Local–cloud share | Policy after assessment; localityBias remains a **preference**, not a Jev output | Rank can bias; share is still the reserved deployment’s `location` | Jev Choice over locations still needs code to record what actually ran |
-| Task success | Official confidence ≠ task success. Do not use Jev `confidence` as `taskSuccess`. Future opt-in classifier; `taskSuccess` stays `null` now. No transcripts, no paid Jev eval. | Same | Same |
+| Analytics need                                   | Seam 1 assessment-only                                                                                                                                                        | Seam 2 candidate ranking                                                                   | Seam 3 full operational routing                                                                                                                             |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `byTask` / `byEffort` / difficulty distributions | Direct: already independent Choice/Noul answers on `Assessment`                                                                                                               | Same if assessment questions are kept; a candidate-only Choice does **not** produce effort | Only if extra questions are still asked; a single “pick model” Choice is not an effort histogram                                                            |
+| `SelectionReason` + `CandidateExclusion`         | Natural: code already denies by allowlist/health/context/quality/cost/reasoning                                                                                               | Code still must log filter-before-Jev and post-rank reserve failures                       | If Jev “owns” the pick, exclusions happen inside the model; analytics then has a label without a structured reason unless code re-validates and logs anyway |
+| Cost reported vs estimated/unknown               | Classifier usage is reported input tokens; generation estimate stays in `selectRoute` (`pricing === "unknown"` already denies a USD ceiling)                                  | Ranking does not create a TypeSafe USD field                                               | Embedding slider text does not produce estimated USD; still unknown unless code computes it                                                                 |
+| Classifier cache hit rate                        | Highest: stable questions + brief-only state (aside from `localDeployments`)                                                                                                  | Falls if eligible IDs/criteria change per request                                          | Worst: sliders + live load in state bust the exact-cache key every tick                                                                                     |
+| Local–cloud share                                | Policy after assessment; localityBias remains a **preference**, not a Jev output                                                                                              | Rank can bias; share is still the reserved deployment’s `location`                         | Jev Choice over locations still needs code to record what actually ran                                                                                      |
+| Task success                                     | Official confidence ≠ task success. Do not use Jev `confidence` as `taskSuccess`. Future opt-in classifier; `taskSuccess` stays `null` now. No transcripts, no paid Jev eval. | Same                                                                                       | Same                                                                                                                                                        |
 
 Implication for routing (not a decision): the analytics snapshot’s `byTask` / `byEffort` / `bySelectionCode` and `CandidateExclusion` lists are **cheap if the control plane already owns those facts**. Seam 3 makes those series either missing or a second logging path that reimplements seams 1–2.
-
 
 ---
 
 ## Contradictions with current implementation assumptions
 
-| Assumption in this repo | Official / inspected fact |
-| --- | --- |
-| `JEV_MODEL_CONTEXT_TOKENS = 32_000` as “the” window | 64k request total **and** 32k for `state` + longest question. |
-| Informal “Laya 1k / Jev 32k” discussion | Pinned Laya **512 / head 192**; Jev 64k/32k split. |
-| `@compootor/effective-jev` as the Jev client | Unofficial. Official JS is `@typesafe-ai/sdk`. |
-| Jev attempt timeout 1.2s, retries=1, backoff 0 | Official SDK default 10s/attempt, 2 retries, 500–5000 ms backoff, retries 408/429/5xx including 529. Short timeouts are a product choice, not a documented Jev limit. |
-| In-process classification cache as if it were a TypeSafe cache | TypeSafe has **no** documented prompt cache; `Usage` has no cached-token field. This cache is local to the gateway. |
-| Passing `localDeployments` in classifier `state` | Allowed (structured state). Jaggedness warns that irrelevant bulk hurts accuracy; keep only what `localSufficiency` needs. |
-| `jevClassify` omits `model` | SDK default `jev-latest` (today `jev-1.13.0`). Aliases can move; pin if thresholds are tuned. |
-| Confidence stored on difficulty/effort Choices | Semantically aligned with official concentration definition. Not P(task success). |
-| No silent Jev fallback from Laya | Compatible with “code owns workflow”; official docs do not require a cloud fallback. |
-| KeyPolicy cold-cache USD ceiling in `selectRoute` | Correct place for arithmetic. Jev has no estimate or cache-price field. |
+| Assumption in this repo                                        | Official / inspected fact                                                                                                                                             |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JEV_MODEL_CONTEXT_TOKENS = 32_000` as “the” window            | 64k request total **and** 32k for `state` + longest question.                                                                                                         |
+| Informal “Laya 1k / Jev 32k” discussion                        | Pinned Laya **512 / head 192**; Jev 64k/32k split.                                                                                                                    |
+| `@compootor/effective-jev` as the Jev client                   | Unofficial. Official JS is `@typesafe-ai/sdk`.                                                                                                                        |
+| Jev attempt timeout 1.2s, retries=1, backoff 0                 | Official SDK default 10s/attempt, 2 retries, 500–5000 ms backoff, retries 408/429/5xx including 529. Short timeouts are a product choice, not a documented Jev limit. |
+| In-process classification cache as if it were a TypeSafe cache | TypeSafe has **no** documented prompt cache; `Usage` has no cached-token field. This cache is local to the gateway.                                                   |
+| Passing `localDeployments` in classifier `state`               | Allowed (structured state). Jaggedness warns that irrelevant bulk hurts accuracy; keep only what `localSufficiency` needs.                                            |
+| `jevClassify` omits `model`                                    | SDK default `jev-latest` (today `jev-1.13.0`). Aliases can move; pin if thresholds are tuned.                                                                         |
+| Confidence stored on difficulty/effort Choices                 | Semantically aligned with official concentration definition. Not P(task success).                                                                                     |
+| No silent Jev fallback from Laya                               | Compatible with “code owns workflow”; official docs do not require a cloud fallback.                                                                                  |
+| KeyPolicy cold-cache USD ceiling in `selectRoute`              | Correct place for arithmetic. Jev has no estimate or cache-price field.                                                                                               |
 
 ---
 
@@ -334,9 +327,6 @@ Official docs do **not** decide this repo’s seam. Inferences from the programm
 6. **Pin `jev-1.13.0`** if confidence thresholds are tuned; log `response.model`.
 7. **Keep classifier answers and `selectRoute` denials as first-class analytics fields.** Do not use Jev/Laya `confidence` as task success. Do not pay Jev to score transcripts. Count classifier exact-cache, session reuse, and `RequestAccounting.cachedInputTokens` separately; TypeSafe has no prompt-cache usage field.
 
-
-
-
 ---
 
 ## Unknowns (not observed in first-party sources)
@@ -350,7 +340,6 @@ Official docs do **not** decide this repo’s seam. Inferences from the programm
 - Whether TypeSafe will publish the alternative confidence-statistic cookbook promised on the Confidence page.
 - Whether a future TypeSafe `Usage` will report cached/prompt-cache tokens (none in `v0.6.0` types).
 - Task-success measurement on this traffic (explicitly out of scope now; `taskSuccess` stays null).
-
 
 ---
 

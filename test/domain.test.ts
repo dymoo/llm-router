@@ -1,17 +1,14 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { Effect } from "effect";
-import { selectRoute } from "../src/router/select-route.ts";
+import { Effect, Schema } from "effect";
 import {
+  KeyPolicy,
   POLICY_SUGGESTIONS,
   checkCatalogueForInference,
-  checkFeasibility,
   decodeCatalogue,
-  decodeKeyPolicy,
-  explainLocalityBias,
+  decodeStoredKeyPolicy,
   type Deployment,
-  type KeyPolicy,
 } from "../src/domain.ts";
 
 const provenance = {
@@ -20,48 +17,29 @@ const provenance = {
   asOf: null,
 };
 
-const localHalogen: Deployment = {
+const localGufo: Deployment = {
   id: "local-qwen",
   modelId: "qwen3.8-flash-next",
-  endpoint: "http://127.0.0.1:8731/v1",
+  endpoint: "http://127.0.0.1:8000/v1",
   location: "local",
-  transport: "halogen",
+  transport: "gufo",
   credentialEnvVar: null,
   providerRestriction: null,
   contextLimitTokens: 32_768,
   maxOutputTokens: 8_192,
   capabilities: { tools: true, json: true, vision: false },
   capacity: { maxParallel: 2, reservedInteractiveSlots: 1 },
-  quality: {
-    chat: 0.6,
-    coding: 0.7,
-    math: 0.6,
-    analysis: 0.6,
-    writing: 0.5,
-    extraction: 0.6,
-    provenance: { unit: "quality prior 0-1", source: "unverified-sample", asOf: null },
-  },
   prices: {
     inputUsdPerMillion: 0,
     cachedInputUsdPerMillion: 0,
     outputUsdPerMillion: 0,
     provenance,
   },
-  latency: {
-    initialMs: 200,
-    tokensPerSecond: 40,
-    provenance: {
-      unit: "milliseconds / tokens per second",
-      source: "unverified-sample",
-      asOf: null,
-    },
-  },
   reasoning: { kind: "binary" },
-  reasoningTokenEstimates: { none: 0, low: 64, medium: 256, high: 512, xhigh: 1024 },
 };
 
 const cloudGlm: Deployment = {
-  ...localHalogen,
+  ...localGufo,
   id: "cloud-glm",
   modelId: "glm-5.3",
   endpoint: "https://openrouter.ai/api/v1",
@@ -80,15 +58,15 @@ const cloudGlm: Deployment = {
 
 const run = <A, E>(effect: Effect.Effect<A, E>): Promise<A> => Effect.runPromise(effect);
 
-test("decodes a valid halogen catalogue entry", async () => {
-  const catalogue = await run(decodeCatalogue([localHalogen]));
-  assert.equal(catalogue[0]?.transport, "halogen");
+test("decodes a valid Gufo catalogue entry", async () => {
+  const catalogue = await run(decodeCatalogue([localGufo]));
+  assert.equal(catalogue[0]?.transport, "gufo");
   assert.equal(catalogue[0]?.location, "local");
 });
 
-test("the optional Gufo catalogue template decodes but cannot be used before endpoint injection", async () => {
+test("the example catalogue's Gufo entry decodes but cannot be used before endpoint injection", async () => {
   const raw: unknown = JSON.parse(
-    await readFile(new URL("../catalog.gufo.example.json", import.meta.url), "utf8"),
+    await readFile(new URL("../catalog.example.json", import.meta.url), "utf8"),
   );
   const [gufo] = await run(decodeCatalogue(raw));
   assert.equal(gufo?.transport, "gufo");
@@ -98,40 +76,22 @@ test("the optional Gufo catalogue template decodes but cannot be used before end
     kind: "graded",
     levels: ["none", "low", "medium", "xhigh"],
   });
-  assert.deepEqual(gufo?.capacity, { maxParallel: 2, reservedInteractiveSlots: 1 });
+  assert.deepEqual(gufo?.capacity, { maxParallel: 24, reservedInteractiveSlots: 4 });
   assert.deepEqual(gufo?.capabilities, { tools: true, json: false, vision: false });
   assert.equal(gufo?.contextLimitTokens, 131_072);
   assert.equal(gufo?.maxOutputTokens, 8_192);
   await assert.rejects(() => run(checkCatalogueForInference([gufo!])), /placeholder/i);
 });
 
-test("unknown Gufo prices deny requests with a hard estimated-spend ceiling", async () => {
-  const raw: unknown = JSON.parse(
-    await readFile(new URL("../catalog.gufo.example.json", import.meta.url), "utf8"),
-  );
-  const [template] = await run(decodeCatalogue(raw));
-  const gufo = { ...template!, endpoint: "http://127.0.0.1:1/v1" };
-  const result = selectRoute({
-    assessment: {
-      task: "coding",
-      difficulty: { value: "easy", confidence: 1 },
-      effort: { value: "low", confidence: 1 },
-      trivialChat: 0,
-      localSufficiency: 1,
-      freshFacts: 0,
-      expectedLength: "short",
-    },
-    deployments: [gufo],
-    policy: { ...POLICY_SUGGESTIONS.Balanced, maxEstimatedUsd: 0.01 },
-    inputTokens: 100,
-    generationAllowance: 512,
-    tools: true,
-    json: false,
-    vision: false,
-    boundary: "new-task",
-    freshFactsAvailable: false,
-  });
-  assert.equal(result._tag === "Denied" ? result.code : null, "cost");
+test("an old catalogue with ranking fields still loads; the extra keys are ignored", async () => {
+  const legacy = {
+    ...localGufo,
+    quality: { chat: 0.6, coding: 0.7, provenance },
+    latency: { initialMs: 200, tokensPerSecond: 40, provenance },
+    reasoningTokenEstimates: { none: 0, low: 64, medium: 256, high: 512, xhigh: 1024 },
+  };
+  const [decoded] = await run(decodeCatalogue([legacy]));
+  assert.deepEqual(decoded, localGufo);
 });
 
 test("rejects a catalogue missing required deployment fields", async () => {
@@ -146,112 +106,39 @@ test("rejects REPLACE_ placeholders for inference", async () => {
   await assert.rejects(() => run(checkCatalogueForInference([placeholder])));
 });
 
-test("policy suggestions decode as KeyPolicy", async () => {
-  for (const policy of Object.values(POLICY_SUGGESTIONS)) {
-    const decoded = await run(decodeKeyPolicy(policy));
-    assert.equal(
-      decoded.priority === "high" || decoded.priority === "medium" || decoded.priority === "low",
-      true,
-    );
-  }
-  assert.equal(POLICY_SUGGESTIONS.Dylan.priority, "high");
-  assert.equal(POLICY_SUGGESTIONS.Dylan.localityBias, 0.15);
-  assert.equal(POLICY_SUGGESTIONS.Balanced.priority, "medium");
-  assert.equal(POLICY_SUGGESTIONS.Balanced.localityBias, 0.65);
-  assert.equal(POLICY_SUGGESTIONS["Free Vibecode"].localityBias, 0.95);
-});
-test("historical policies default to reporting local overload and invalid actions are rejected", async () => {
-  const { overloadAction: _omitted, ...historical } = POLICY_SUGGESTIONS.Balanced;
-  const decoded = await run(decodeKeyPolicy(historical));
-  assert.equal(decoded.overloadAction, "report");
-  await assert.rejects(() =>
-    run(decodeKeyPolicy({ ...historical, overloadAction: "always-cloud" })),
-  );
-});
-test("explainLocalityBias describes preference not chance", () => {
-  assert.match(explainLocalityBias(0), /Cloud-first/);
-  assert.match(explainLocalityBias(0.15), /Lean cloud/);
-  assert.match(explainLocalityBias(0.65), /Prefer local/);
-  assert.match(explainLocalityBias(0.95), /verified runtime saturation/);
+test("policy suggestions are the three generic presets", () => {
+  for (const policy of Object.values(POLICY_SUGGESTIONS))
+    assert.deepEqual(Schema.decodeUnknownSync(KeyPolicy)(policy), policy);
+  assert.deepEqual(POLICY_SUGGESTIONS, {
+    Interactive: { priority: "high", cloud: true, requestsPerMinute: 120, maxConcurrent: 4 },
+    Standard: { priority: "medium", cloud: false, requestsPerMinute: 60, maxConcurrent: 2 },
+    Background: { priority: "low", cloud: false, requestsPerMinute: 30, maxConcurrent: 2 },
+  });
 });
 
-test("rejects localityBias outside 0-1", async () => {
-  await assert.rejects(() =>
-    run(
-      decodeKeyPolicy({
-        ...POLICY_SUGGESTIONS.Dylan,
-        localityBias: 1.2,
-      }),
-    ),
-  );
-});
-
-test("rejects an all-zero bias", async () => {
-  await assert.rejects(() =>
-    run(
-      decodeKeyPolicy({
-        ...POLICY_SUGGESTIONS.Balanced,
-        bias: { cost: 0, quality: 0, latency: 0 },
-      }),
-    ),
-  );
-});
-
-test("empty allowlist fails closed before ranking", async () => {
-  const policy: KeyPolicy = { ...POLICY_SUGGESTIONS.Balanced, allowedModels: [] };
-  await assert.rejects(() =>
-    run(
-      checkFeasibility({
-        policy,
-        catalogue: [localHalogen, cloudGlm],
-        estimatedInputTokens: 100,
-        requestedCompletionTokens: 64,
-        capabilities: { tools: false, json: false, vision: false },
-      }),
-    ),
-  );
-});
-
-test("unsupported vision fails closed", async () => {
-  await assert.rejects(() =>
-    run(
-      checkFeasibility({
-        policy: POLICY_SUGGESTIONS.Balanced,
-        catalogue: [localHalogen],
-        estimatedInputTokens: 100,
-        requestedCompletionTokens: 64,
-        capabilities: { tools: false, json: false, vision: true },
-      }),
-    ),
-  );
-});
-
-test("impossible completion tokens fail closed", async () => {
-  await assert.rejects(() =>
-    run(
-      checkFeasibility({
-        policy: POLICY_SUGGESTIONS.Balanced,
-        catalogue: [localHalogen],
-        estimatedInputTokens: 100,
-        requestedCompletionTokens: 100_000,
-        capabilities: { tools: false, json: false, vision: false },
-      }),
-    ),
-  );
-});
-
-test("feasible local coding request remains eligible", async () => {
-  const eligible = await run(
-    checkFeasibility({
-      policy: POLICY_SUGGESTIONS.Balanced,
-      catalogue: [localHalogen, cloudGlm],
-      estimatedInputTokens: 800,
-      requestedCompletionTokens: 512,
-      capabilities: { tools: true, json: true, vision: false },
-    }),
-  );
-  assert.equal(
-    eligible.some((deployment) => deployment.id === "local-qwen"),
-    true,
-  );
+test("a stored legacy policy derives cloud from its overload action", () => {
+  const legacy = {
+    priority: "high",
+    localityBias: 0.15,
+    contextLimitTokens: 131_072,
+    maxCompletionTokens: 16_384,
+    allowedModels: null,
+    requestsPerMinute: 120,
+    maxConcurrent: 4,
+    maxWaitMs: 0,
+    maxEstimatedUsd: null,
+    bias: { cost: 0.2, quality: 0.9, latency: 0.3 },
+  };
+  const base = { priority: "high", requestsPerMinute: 120, maxConcurrent: 4 };
+  assert.deepEqual(decodeStoredKeyPolicy({ ...legacy, overloadAction: "failover" }), {
+    ...base,
+    cloud: true,
+  });
+  assert.deepEqual(decodeStoredKeyPolicy({ ...legacy, overloadAction: "report" }), {
+    ...base,
+    cloud: false,
+  });
+  assert.deepEqual(decodeStoredKeyPolicy(legacy), { ...base, cloud: false });
+  assert.deepEqual(decodeStoredKeyPolicy({ ...base, cloud: true }), { ...base, cloud: true });
+  assert.throws(() => decodeStoredKeyPolicy({ ...base, cloud: "yes" }));
 });

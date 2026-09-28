@@ -7,9 +7,6 @@ export type HttpErrorCode =
   | "stale_version"
   | "rate_limited"
   | "unavailable"
-  | "classifier_unavailable"
-  | "classifier_context_exceeded"
-  | "classifier_unqualified"
   | "no_eligible_model"
   | "busy"
   | "local_overloaded"
@@ -17,10 +14,6 @@ export type HttpErrorCode =
   | "provider_failure"
   | "timeout"
   | "cancelled"
-  | "boundary_required"
-  | "missing_session"
-  | "retrieval_required"
-  | "brief_required"
   | "unknown";
 
 export type HttpErrorBody = {
@@ -61,67 +54,15 @@ const TAG_MAP: Record<string, { status: number; code: HttpErrorCode; message: st
   AuthFailed: { status: 401, code: "unauthorized", message: "authentication failed" },
   KeyRevoked: { status: 401, code: "unauthorized", message: "key revoked" },
   KeyExpired: { status: 401, code: "unauthorized", message: "key expired" },
-  EmptyAllowlist: { status: 403, code: "forbidden", message: "no deployments are allowed" },
   KeyNotFound: { status: 404, code: "not_found", message: "key not found" },
   Conflict: { status: 409, code: "conflict", message: "conflict" },
   StaleVersion: { status: 409, code: "stale_version", message: "resource version conflict" },
-  BoundaryRequired: {
-    status: 409,
-    code: "boundary_required",
-    message: "a safe session boundary is required",
-  },
-  MissingSession: {
-    status: 409,
-    code: "missing_session",
-    message: "session pin is missing or expired",
-  },
   RateLimited: { status: 429, code: "rate_limited", message: "rate limit exceeded" },
   ConcurrentLimit: { status: 429, code: "rate_limited", message: "concurrency limit exceeded" },
-  ImpossibleLimits: { status: 422, code: "invalid", message: "request exceeds configured limits" },
-  UnsupportedCapabilities: {
-    status: 422,
-    code: "invalid",
-    message: "requested capabilities are unsupported",
-  },
   NoEligibleModel: { status: 422, code: "no_eligible_model", message: "no eligible deployment" },
-  RetrievalRequired: {
-    status: 422,
-    code: "retrieval_required",
-    message: "trusted retrieval evidence is required",
-  },
-  ClassifierContextExceeded: {
-    status: 422,
-    code: "classifier_context_exceeded",
-    message: "classifier context exceeded; supply routing.taskBrief",
-  },
-  BriefRequired: {
-    status: 422,
-    code: "brief_required",
-    message: "routing.taskBrief is required for this request",
-  },
-  ClassifierInputTooLarge: {
-    status: 422,
-    code: "classifier_context_exceeded",
-    message: "classifier input is too large",
-  },
   DatabaseError: { status: 500, code: "unavailable", message: "persistence unavailable" },
   PepperMismatch: { status: 500, code: "unavailable", message: "control plane unavailable" },
   SchemaVersionMismatch: { status: 500, code: "unavailable", message: "control plane unavailable" },
-  ClassifierUnavailable: {
-    status: 503,
-    code: "classifier_unavailable",
-    message: "classifier unavailable",
-  },
-  ClassifierUnqualified: {
-    status: 503,
-    code: "classifier_unqualified",
-    message: "classifier is not qualified for production routing",
-  },
-  ClassifierInvalidResponse: {
-    status: 503,
-    code: "classifier_unavailable",
-    message: "classifier unavailable",
-  },
   LocalOverloaded: {
     status: 503,
     code: "local_overloaded",
@@ -129,14 +70,12 @@ const TAG_MAP: Record<string, { status: number; code: HttpErrorCode; message: st
   },
   CapacityBusy: { status: 503, code: "busy", message: "deployment capacity is busy" },
   QueueFull: { status: 503, code: "busy", message: "inference queue is full" },
-  LockTimeout: { status: 503, code: "busy", message: "session already has in-flight work" },
   CatalogueInvalid: {
     status: 503,
     code: "unavailable",
     message: "deployment catalogue is not configured for inference",
   },
   ProviderFailure: { status: 502, code: "provider_failure", message: "upstream provider failed" },
-  ClassifierTimeout: { status: 504, code: "timeout", message: "classifier timed out" },
   RequestTimeout: { status: 504, code: "timeout", message: "request timed out" },
   TimeoutError: { status: 504, code: "timeout", message: "request timed out" },
   Cancelled: { status: 499, code: "cancelled", message: "request cancelled" },
@@ -192,29 +131,22 @@ function messageOf(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function retryAfterOf(error: unknown): number {
-  if (typeof error !== "object" || error === null) return 1;
+function localOverloadOf(
+  error: unknown,
+): { retryAfterSeconds: unknown; flexRefused: unknown } | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
   if ("_tag" in error && error._tag === "LocalOverloaded") {
-    const value = "retryAfterSeconds" in error ? error.retryAfterSeconds : null;
-    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 1;
+    return {
+      retryAfterSeconds: "retryAfterSeconds" in error ? error.retryAfterSeconds : null,
+      flexRefused: "flexRefused" in error ? error.flexRefused : undefined,
+    };
   }
-  return "cause" in error ? retryAfterOf(error.cause) : 1;
+  return "cause" in error ? localOverloadOf(error.cause) : undefined;
 }
 
-/**
- * A `service_tier: "flex"` request refused for lack of local capacity, in
- * OpenAI Flex's shape: HTTP 429 `resource_unavailable`. Other failures pass through.
- */
-export function flexFailure(error: unknown): unknown {
-  const failure = toHttpFailure(error);
-  return failure.code === "local_overloaded" || failure.code === "busy"
-    ? new HttpFailure(
-        429,
-        "resource_unavailable",
-        "no spare local capacity for a flex request",
-        failure.retryAfterSeconds ?? 1,
-      )
-    : error;
+function retryAfterOf(error: unknown): number {
+  const value = localOverloadOf(error)?.retryAfterSeconds;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 1;
 }
 
 export function toHttpFailure(error: unknown): HttpFailure {
@@ -222,6 +154,15 @@ export function toHttpFailure(error: unknown): HttpFailure {
     return error;
   }
   const tag = tagOf(error);
+  // Flex found no idle local compute: OpenAI Flex's shape, 429 resource_unavailable.
+  if (tag === "LocalOverloaded" && localOverloadOf(error)?.flexRefused === true) {
+    return new HttpFailure(
+      429,
+      "resource_unavailable",
+      "no spare local capacity for a flex request",
+      retryAfterOf(error),
+    );
+  }
   if (tag !== undefined && tag in TAG_MAP) {
     const mapped = TAG_MAP[tag]!;
     const message = tag === "InvalidInput" ? messageOf(error, mapped.message) : mapped.message;

@@ -24,3 +24,11 @@ export const CONTROL_PLANE_V5_SQL = readFileSync(
   join(migrationsDir, "0005_batch_ledger.sql"),
   "utf8",
 );
+export const CONTROL_PLANE_V6_SQL = readFileSync(
+  join(migrationsDir, "0006_add_app_attribution.sql"),
+  "utf8",
+);
+export const CONTROL_PLANE_V7_SQL = readFileSync(
+  join(migrationsDir, "0007_simple_key_policy.sql"),
+  "utf8",
+);

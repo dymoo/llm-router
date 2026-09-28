@@ -182,7 +182,6 @@ export async function loadRequests(
 export function unavailableHealth(): HealthSnapshot {
   return {
     ready: false,
-    classifier: { ready: false, backend: "unknown", local: false },
     deployments: [],
   };
 }
@@ -218,9 +217,6 @@ function emptyAggregates(): UsageAggregates {
     errorCount: 0,
     cancelCount: null,
     saturationCount: null,
-    classifierCalls: null,
-    exactCacheHits: null,
-    sessionReuse: null,
     promptTokens: null,
     completionTokens: null,
     reasoningTokens: null,
@@ -237,8 +233,6 @@ function emptyAggregates(): UsageAggregates {
     elapsedMs: null,
     localRequests: null,
     cloudRequests: null,
-    classifierInputTokens: null,
-    classifierEstimatedUsd: null,
     cacheSavingsUsd: null,
     p95QueueWaitMs: null,
     p95TtftMs: null,
@@ -252,25 +246,18 @@ function emptyUsage(): UsageSnapshot {
     aggregates: emptyAggregates(),
     series: [],
     breakdowns: { byKey: [], byPriority: [], byDeployment: [] },
-    decisions: [],
-    tasks: [],
     errors: [],
-    exclusions: [],
-    effort: [],
-    complexity: [],
     recent: [],
   };
 }
 
-function writeDraft(draft: KeyDraft): {
-  name: string;
-  expiresAt: number | null;
-  policy: KeyPolicy;
-} {
+function writeDraft(draft: KeyDraft): KeyDraft {
+  // The server rejects unknown policy fields, so send exactly these four.
+  const { priority, cloud, requestsPerMinute, maxConcurrent } = draft.policy;
   return {
     name: draft.name.trim(),
     expiresAt: draft.expiresAt,
-    policy: draft.policy,
+    policy: { priority, cloud, requestsPerMinute, maxConcurrent },
   };
 }
 
@@ -422,81 +409,28 @@ function decodePolicy(payload: unknown, path: string): KeyPolicy {
   if (!isRecord(payload)) {
     throw new AdminApiError(500, "unknown", `Invalid policy at ${path}.`);
   }
-  const priority = payload.priority;
+  const { priority, cloud } = payload;
   if (priority !== "high" && priority !== "medium" && priority !== "low") {
     throw new AdminApiError(500, "unknown", `Invalid priority at ${path}.`);
   }
-  const localityBias = decodeLocalityBias(payload);
-  const overloadAction = payload.overloadAction === undefined ? "report" : payload.overloadAction;
-  if (overloadAction !== "report" && overloadAction !== "failover") {
-    throw new AdminApiError(500, "unknown", "Invalid overloadAction at " + path + ".");
-  }
-  const allowedModels = decodeAllowedModels(payload.allowedModels, path + ".allowedModels");
-  const bias = payload.bias;
-  if (!isRecord(bias)) {
-    throw new AdminApiError(500, "unknown", `Invalid bias at ${path}.`);
+  if (typeof cloud !== "boolean") {
+    throw new AdminApiError(500, "unknown", `Invalid cloud at ${path}.`);
   }
   return {
     priority,
-    localityBias,
-    contextLimitTokens: requiredInt(payload.contextLimitTokens, `${path}.contextLimitTokens`),
-    maxCompletionTokens: requiredInt(payload.maxCompletionTokens, `${path}.maxCompletionTokens`),
-    allowedModels,
+    cloud,
     requestsPerMinute: requiredInt(payload.requestsPerMinute, `${path}.requestsPerMinute`),
     maxConcurrent: requiredInt(payload.maxConcurrent, `${path}.maxConcurrent`),
-    maxWaitMs: requiredInt(payload.maxWaitMs, path + ".maxWaitMs"),
-    overloadAction,
-    maxEstimatedUsd: optionalFinite(payload.maxEstimatedUsd, path + ".maxEstimatedUsd"),
-    bias: {
-      cost: requiredFinite(bias.cost, `${path}.bias.cost`),
-      quality: requiredFinite(bias.quality, `${path}.bias.quality`),
-      latency: requiredFinite(bias.latency, `${path}.bias.latency`),
-    },
   };
-}
-
-function decodeLocalityBias(payload: Record<string, unknown>): number {
-  if (
-    typeof payload.localityBias === "number" &&
-    payload.localityBias >= 0 &&
-    payload.localityBias <= 1
-  ) {
-    return payload.localityBias;
-  }
-  throw new AdminApiError(500, "unknown", "Invalid localityBias.");
-}
-
-function decodeAllowedModels(payload: unknown, path: string): readonly string[] | null {
-  if (payload === null || payload === undefined) {
-    return null;
-  }
-  if (!Array.isArray(payload) || payload.some((item) => typeof item !== "string")) {
-    throw new AdminApiError(500, "unknown", `Invalid allowlist at ${path}.`);
-  }
-  return payload;
 }
 
 export function decodeHealth(payload: unknown): HealthSnapshot {
   if (!isRecord(payload)) {
     return unavailableHealth();
   }
-  const classifierRaw = isRecord(payload.classifier) ? payload.classifier : {};
   const deploymentsRaw = Array.isArray(payload.deployments) ? payload.deployments : [];
   return {
     ready: payload.ready === true,
-    classifier: {
-      ready: classifierRaw.ready === true,
-      backend: typeof classifierRaw.backend === "string" ? classifierRaw.backend : "unknown",
-      local: classifierRaw.local === true,
-      evidence:
-        classifierRaw.evidence === "runtime-probe" ||
-        classifierRaw.evidence === "configuration-only" ||
-        classifierRaw.evidence === "unavailable" ||
-        classifierRaw.evidence === "unqualified" ||
-        classifierRaw.evidence === "deterministic-rules"
-          ? classifierRaw.evidence
-          : undefined,
-    },
     deployments: deploymentsRaw.flatMap((item) => {
       if (!isRecord(item) || typeof item.id !== "string") {
         return [];
@@ -530,9 +464,6 @@ export function decodeUsage(payload: unknown): UsageSnapshot {
       errorCount: requiredInt(totals.errors, "window.errors"),
       cancelCount: nullableCount(totals.cancelled),
       saturationCount: nullableCount(totals.saturation),
-      classifierCalls: nullableCount(totals.classifiedFresh),
-      exactCacheHits: nullableCount(totals.classifierExactCacheHits),
-      sessionReuse: nullableCount(totals.sessionReuse),
       promptTokens: nullableCount(totals.promptTokens),
       completionTokens: nullableCount(totals.completionTokens),
       reasoningTokens: nullableCount(totals.reasoningTokens),
@@ -549,8 +480,6 @@ export function decodeUsage(payload: unknown): UsageSnapshot {
       elapsedMs: nullableNumber(totals.p50GenerationElapsedMs),
       localRequests: nullableCount(totals.localRequests),
       cloudRequests: nullableCount(totals.cloudRequests),
-      classifierInputTokens: nullableCount(totals.classifierInputTokens),
-      classifierEstimatedUsd: nullableNumber(totals.classifierEstimatedUsd),
       cacheSavingsUsd: nullableNumber(totals.estimatedCacheSavingsUsd),
       p95QueueWaitMs: nullableNumber(totals.p95QueueWaitMs),
       p95TtftMs: nullableNumber(totals.p95TtftMs),
@@ -562,11 +491,6 @@ export function decodeUsage(payload: unknown): UsageSnapshot {
       byPriority: decodeBreakdowns(payload.byPriority),
       byDeployment: decodeBreakdowns(payload.byDeploymentId),
     },
-    decisions: decodeCountRows(payload.bySelectionCode),
-    exclusions: decodeCountRows(payload.exclusions),
-    effort: decodeCountRows(payload.byEffort),
-    complexity: decodeCountRows(payload.byDifficulty),
-    tasks: decodeCountRows(payload.byTask),
     errors: decodeCountRows(payload.errors),
     recent: [],
   };
@@ -645,6 +569,8 @@ export function decodeRoutingRow(payload: unknown): RoutingRow | null {
     policyVersion: nullableCount(trace.keyPolicyVersion),
     assessmentDifficulty: nullableString(payload.difficulty),
     catalogueVersion: nullableString(trace.catalogueVersion),
+    appTitle: nullableString(payload.appTitle),
+    appUrl: nullableString(payload.appUrl),
   };
 }
 
@@ -681,8 +607,6 @@ function decodeSeries(payload: unknown): UsageSnapshot["series"] {
         ttftMs: nullableNumber(item.p50TtftMs),
         decodeTps: nullableNumber(item.p50DecodeTokensPerSecond),
         cachedInputTokens: nullableCount(item.cachedInputTokens),
-        classifierExactCache: nullableCount(item.classifierExactCacheHits),
-        sessionReuse: nullableCount(item.sessionReuse),
       },
     ];
   });
@@ -736,7 +660,7 @@ function decodeBreakdowns(payload: unknown): UsageSnapshot["breakdowns"]["byKey"
   });
 }
 
-function decodeCountRows(payload: unknown): UsageSnapshot["decisions"] {
+function decodeCountRows(payload: unknown): UsageSnapshot["errors"] {
   if (Array.isArray(payload)) {
     return payload.flatMap((item) => {
       if (!isRecord(item)) {
@@ -784,13 +708,6 @@ function requiredInt(value: unknown, path: string): number {
   return value;
 }
 
-function requiredFinite(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new AdminApiError(500, "unknown", `Missing number ${path}.`);
-  }
-  return value;
-}
-
 function requiredEpoch(value: unknown, path: string): number {
   return requiredInt(value, path);
 }
@@ -800,13 +717,6 @@ function optionalEpoch(value: unknown, path: string): number | null {
     return null;
   }
   return requiredInt(value, path);
-}
-
-function optionalFinite(value: unknown, path: string): number | null {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  return requiredFinite(value, path);
 }
 
 function optionalCount(value: unknown): number {

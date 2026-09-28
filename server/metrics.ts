@@ -3,6 +3,7 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Effect, Metric } from "effect";
 import { PrometheusMetrics } from "effect/unstable/observability";
 import packageJson from "../package.json" with { type: "json" };
+import { decodeStoredKeyPolicy } from "../src/domain.ts";
 import type { HealthSnapshot } from "../src/http/contracts.ts";
 import type { FinalizeOutcome } from "../src/keys/types.ts";
 import { ROUTE_DECISION_REASONS } from "../src/router/decision.ts";
@@ -42,7 +43,6 @@ const buckets = {
   ttft_seconds: [0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60],
   generation_duration_seconds: [0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 660],
   decode_tokens_per_second: [1, 2, 5, 10, 15, 20, 30, 40, 60, 80, 120, 200],
-  classifier_duration_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
 } as const;
 const histogram = (
   name: keyof typeof buckets,
@@ -77,7 +77,6 @@ const deployment = (value: unknown) =>
     : bounded(value, processState.metricDeployments);
 const priority = (value: unknown) => bounded(value, ["high", "medium", "low"]);
 const location = (value: unknown) => bounded(value, ["local", "cloud"]);
-const backend = (value: unknown) => bounded(value, ["rules", "laya", "jev"]);
 const errorTags = [
   "AuthFailed",
   "KeyRevoked",
@@ -85,22 +84,13 @@ const errorTags = [
   "RateLimited",
   "ConcurrentLimit",
   "InvalidInput",
-  "ImpossibleLimits",
-  "ClassifierUnavailable",
-  "ClassifierUnqualified",
   "LocalOverloaded",
   "QueueFull",
   "CapacityBusy",
   "ProviderFailure",
   "NoEligibleModel",
-  "EmptyAllowlist",
   "Cancelled",
   "DatabaseError",
-  "RetrievalRequired",
-  "UnsupportedCapabilities",
-  "MissingSession",
-  "BoundaryRequired",
-  "LockTimeout",
   "batch_interrupted",
 ];
 const errorTag = (value: unknown) =>
@@ -231,25 +221,6 @@ export function observeFinalized(input: {
             : "unknown",
       deployment: dep,
     });
-  if (outcome.classifierBackend !== undefined && outcome.classifierBackend !== null) {
-    const b = backend(outcome.classifierBackend);
-    counter("classifications", 1, {
-      backend: b,
-      source: bounded(outcome.source, ["full-input", "caller-brief"]),
-      reuse: bounded(outcome.reuse, ["classified", "exact-cache", "session"]),
-      task: bounded(outcome.taskKind, [
-        "chat",
-        "coding",
-        "math",
-        "analysis",
-        "writing",
-        "extraction",
-      ]),
-      difficulty: bounded(outcome.difficulty, ["easy", "moderate", "hard"]),
-    });
-    histogram("classifier_duration_seconds", outcome.classifierElapsedMs, { backend: b }, 0.001);
-    counter("classifier_input_tokens", outcome.classifierInputTokens ?? 0, { backend: b });
-  }
   if (outcome.decisionReason !== undefined && outcome.decisionReason !== null) {
     counter("route_decisions", 1, {
       reason: bounded(outcome.decisionReason, ROUTE_DECISION_REASONS),
@@ -327,27 +298,13 @@ export function observeHealth(snapshot: HealthSnapshot): void {
     "health_snapshot_age_seconds",
     Math.max(0, (Date.now() - (snapshot.checkedAt ?? Date.now())) / 1000),
   );
-  const b = backend(snapshot.classifier.backend);
-  gauge("classifier_ready", Number(snapshot.classifier.ready), { backend: b });
-  if (snapshot.classifier.backend !== "rules") {
-    gauge(
-      "classifier_qualified",
-      Number(
-        snapshot.classifier.evidence !== "unqualified" &&
-          snapshot.classifier.evidence !== undefined,
-      ),
-      { backend: b },
-    );
-  }
   for (const item of snapshot.deployments)
     gauge("deployment_ready", Number(item.ready), {
       deployment: deployment(item.id),
       location: location(item.location),
       transport: bounded(processState.metricTransports.get(item.id), [
-        "llamacpp",
         "openai-compatible",
         "openrouter",
-        "halogen",
         "gufo",
       ]),
     });
@@ -406,20 +363,15 @@ export function observeSqlMetrics(rows: SqlMetrics): void {
     const key_id = uuid(item.id);
     if (key_id === "other") continue;
     try {
-      const policy = JSON.parse(item.policyJson) as {
-        priority?: string;
-        overloadAction?: string;
-        requestsPerMinute?: number;
-        maxConcurrent?: number;
-      };
+      const policy = decodeStoredKeyPolicy(JSON.parse(item.policyJson));
       gauge("key_info", 1, {
         key_id,
         name: item.name.slice(0, 64),
         priority: priority(policy.priority),
-        overload_action: bounded(policy.overloadAction, ["report", "failover"]),
+        cloud: String(policy.cloud),
       });
-      gauge("key_requests_per_minute_limit", policy.requestsPerMinute ?? 0, { key_id });
-      gauge("key_max_concurrent", policy.maxConcurrent ?? 0, { key_id });
+      gauge("key_requests_per_minute_limit", policy.requestsPerMinute, { key_id });
+      gauge("key_max_concurrent", policy.maxConcurrent, { key_id });
     } catch {
       /* Invalid stored policy cannot create a dynamic series. */
     }

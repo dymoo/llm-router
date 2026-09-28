@@ -51,42 +51,6 @@ test(
         const chunks = [];
         for await (const chunk of request) chunks.push(chunk);
         const body = JSON.parse(Buffer.concat(chunks).toString());
-        if (request.url === "/v1/systemone") {
-          const choices = {
-            task: "coding",
-            difficulty: "easy",
-            effort: "low",
-            expectedLength: "short",
-          };
-          const answers = Object.fromEntries(
-            Object.entries(body.questions).map(([id, question]) => {
-              if (question.type === "noul")
-                return [id, { type: "noul", noul: id === "localSufficiency" ? 1 : 0 }];
-              return [
-                id,
-                {
-                  type: "choice",
-                  choice: choices[id],
-                  confidence: 1,
-                  probabilities: Object.fromEntries(
-                    Object.keys(question.criteria).map((label) => [
-                      label,
-                      label === choices[id] ? 1 : 0,
-                    ]),
-                  ),
-                },
-              ];
-            }),
-          );
-          response.end(
-            JSON.stringify({
-              model: body.model,
-              answers,
-              usage: { input_tokens: 100, output_tokens: 0 },
-            }),
-          );
-          return;
-        }
         if (request.url !== "/v1/chat/completions") {
           response.statusCode = 404;
           response.end();
@@ -130,13 +94,14 @@ test(
       Object.assign(catalogue[0], {
         id: "fixture",
         modelId: "fixture-chat",
+        // A generic OpenAI peer: these tests cover router machinery, gufo.test.mjs covers Gufo.
+        transport: "openai-compatible",
+        credentialEnvVar: null,
         endpoint: `http://127.0.0.1:${upstreamPort}/v1`,
         contextLimitTokens: 65536,
         maxOutputTokens: 8192,
         reasoning: { kind: "binary" },
       });
-      for (const key of ["chat", "coding", "math", "analysis", "writing", "extraction"])
-        catalogue[0].quality[key] = 0.9;
       Object.assign(catalogue[0].prices, {
         inputUsdPerMillion: 1,
         cachedInputUsdPerMillion: 1,
@@ -145,56 +110,7 @@ test(
       });
       const cataloguePath = join(directory, "catalog.json");
       const databasePath = join(directory, "control.sqlite");
-      const qualificationPath = join(directory, "classifier-qualification.json");
-      const questionIds = [
-        "task",
-        "difficulty",
-        "effort",
-        "trivialChat",
-        "localSufficiency",
-        "freshFacts",
-        "expectedLength",
-      ];
-      // Drain test evidence: labelled per-question counts, not a quality claim.
-      const metric = { cases: 20, negativeCases: 10, errors: 1, falsePositives: 0 };
-      const threshold = (id) => ({
-        maxErrorRate: 0.2,
-        maxFalsePositiveRate: ["localSufficiency", "trivialChat"].includes(id) ? 0 : null,
-      });
       await writeFile(cataloguePath, JSON.stringify(catalogue), { mode: 0o600 });
-      await writeFile(
-        qualificationPath,
-        JSON.stringify([
-          {
-            backend: "jev",
-            modelRevision: "jev-1.13.0",
-            questionSchemaVersion: "dymoo-assessment-questions/v1",
-            calibration: {
-              evaluationSet: {
-                id: "production-drain-fixture",
-                cases: 20,
-                labelsSource: "test fixture",
-                asOf: "2026-09-22",
-              },
-              measuredAt: "2026-09-22",
-              method: "test fixture",
-              metrics: Object.fromEntries(questionIds.map((id) => [id, { ...metric }])),
-              thresholds: Object.fromEntries(questionIds.map((id) => [id, threshold(id)])),
-              verdict: "pass",
-            },
-            rates: {
-              inputUsdPerMillion: 0.042,
-              outputUsdPerMillion: 0,
-              provenance: {
-                unit: "USD-per-million-tokens",
-                source: "test fixture",
-                asOf: "2026-09-22",
-              },
-            },
-          },
-        ]),
-        { mode: 0o600 },
-      );
       child = spawn(
         process.execPath,
         [
@@ -218,11 +134,6 @@ test(
             MODEL_CATALOG: cataloguePath,
             AUXILIARY_CATALOG: "",
             API_KEY_PEPPER: randomUUID(),
-            CLASSIFIER_MODE: "jev",
-            CLASSIFIER_QUALIFICATION: qualificationPath,
-            TYPESAFE_API_KEY: "fixture-only",
-            TYPESAFE_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
-            TYPESAFE_MODEL: "jev-1.13.0",
           },
         },
       );
@@ -253,18 +164,7 @@ test(
         assert.ok(Date.now() < readyDeadline && child.exitCode === null, logs);
         await delay(25, undefined, { signal: t.signal });
       }
-      const policy = {
-        priority: "medium",
-        localityBias: 0.65,
-        contextLimitTokens: 4096,
-        maxCompletionTokens: 128,
-        allowedModels: null,
-        requestsPerMinute: 60,
-        maxConcurrent: 2,
-        maxWaitMs: 1000,
-        maxEstimatedUsd: null,
-        bias: { cost: 0.7, quality: 0.8, latency: 0.3 },
-      };
+      const policy = { priority: "medium", cloud: false, requestsPerMinute: 60, maxConcurrent: 2 };
       const createdResponse = await fetch(`${origin}/api/admin/keys`, {
         method: "POST",
         headers: { "content-type": "application/json", origin, "x-jev-admin": "1" },

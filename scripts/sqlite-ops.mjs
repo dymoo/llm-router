@@ -10,7 +10,7 @@ const SETTING_VERSION = "schema_version";
 const MIGRATION_FILE = /^\d{4}_.*\.sql$/;
 
 /** Current schema version from the same migrations directory src/db/migrate.ts consumes
- * (version = migration count, currently v5 with the batch ledger). Candidates cover the
+ * (version = migration count, currently v6 with the simple key policy). Candidates cover the
  * repository layout (scripts/../migrations) and the /opt/ops container layout
  * (/opt/ops/../../app/migrations). */
 function migrationsDirectory() {
@@ -33,7 +33,7 @@ export function currentSchemaVersion() {
 
 /** Fail closed on anything the app would refuse to open: corrupt files, foreign databases,
  * inconsistent version stamps, and schemas newer than this binary. Identified older versions
- * (v1..v4) pass through; migrateControlPlane upgrades them on the next app open. */
+ * (v1..v5) pass through; migrateControlPlane upgrades them on the next app open. */
 export function validateDatabase(path) {
   const db = new DatabaseSync(path, { readOnly: true, timeout: 1000 });
   try {

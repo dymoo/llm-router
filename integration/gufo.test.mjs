@@ -1,6 +1,5 @@
-// Public production HTTP regression. Fake loopback Gufo and classifier peers exercise the
-// built gateway; the qualification below is synthetic test data, not measured model quality.
-// The child rejects non-loopback fetches and receives only fixture credentials.
+// Public production HTTP regression. Fake loopback Gufo and OpenRouter peers exercise the
+// built gateway. The child rejects non-loopback fetches and receives only fixture credentials.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -28,80 +27,6 @@ async function listen(server) {
 
 async function close(server) {
   await new Promise((resolve) => server.close(resolve));
-}
-
-function assessment(body) {
-  const choices = { task: "coding", difficulty: "easy", effort: "low", expectedLength: "short" };
-  return {
-    model: body.model,
-    answers: Object.fromEntries(
-      Object.entries(body.questions).map(([id, question]) => [
-        id,
-        question.type === "noul"
-          ? { type: "noul", noul: id === "localSufficiency" ? 1 : 0 }
-          : {
-              type: "choice",
-              choice: choices[id],
-              confidence: 1,
-              probabilities: Object.fromEntries(
-                Object.keys(question.criteria).map((label) => [
-                  label,
-                  label === choices[id] ? 1 : 0,
-                ]),
-              ),
-            },
-      ]),
-    ),
-    usage: { input_tokens: 100, output_tokens: 0 },
-  };
-}
-
-function qualification() {
-  const ids = [
-    "task",
-    "difficulty",
-    "effort",
-    "trivialChat",
-    "localSufficiency",
-    "freshFacts",
-    "expectedLength",
-  ];
-  const provenance = {
-    unit: "USD-per-million-tokens",
-    source: "synthetic test fixture",
-    asOf: "2026-09-22",
-  };
-  return [
-    {
-      backend: "jev",
-      modelRevision: "jev-1.13.0",
-      questionSchemaVersion: "dymoo-assessment-questions/v1",
-      calibration: {
-        evaluationSet: {
-          id: "gufo-software-fixture",
-          cases: 20,
-          labelsSource: "synthetic test fixture",
-          asOf: "2026-09-22",
-        },
-        measuredAt: "2026-09-22",
-        method: "synthetic test fixture",
-        metrics: Object.fromEntries(
-          ids.map((id) => [id, { cases: 20, negativeCases: 10, errors: 1, falsePositives: 0 }]),
-        ),
-        thresholds: Object.fromEntries(
-          ids.map((id) => [
-            id,
-            {
-              maxErrorRate: 0.2,
-              maxFalsePositiveRate: ["localSufficiency", "trivialChat"].includes(id) ? 0 : null,
-            },
-          ]),
-        ),
-        verdict: "pass",
-      },
-      rates: { inputUsdPerMillion: 0.042, outputUsdPerMillion: 0, provenance },
-    },
-  ];
 }
 
 function completion(model, message, finishReason = "stop") {
@@ -190,13 +115,6 @@ test(
           );
           return;
         }
-        if (path === "/v1/systemone" && request.method === "POST") {
-          const chunks = [];
-          for await (const chunk of request) chunks.push(chunk);
-          response.setHeader("content-type", "application/json");
-          response.end(JSON.stringify(assessment(JSON.parse(Buffer.concat(chunks).toString()))));
-          return;
-        }
         if (path === "/v1/chat/completions" && request.method === "POST") {
           assert.equal(request.headers.authorization, `Bearer ${FIXTURE_CREDENTIAL}`);
           const chunks = [];
@@ -220,7 +138,8 @@ test(
           if (peer.failure !== null) {
             response.statusCode = peer.failure === "queue_full" ? 429 : 503;
             response.setHeader("content-type", "application/json");
-            if (peer.failure === "queue_full") response.setHeader("retry-after", "2");
+            // Longer than the high-priority budget: the router falls back at once.
+            if (peer.failure === "queue_full") response.setHeader("retry-after", "6");
             response.end(
               JSON.stringify({ error: { code: peer.failure, message: "fixture refusal" } }),
             );
@@ -325,13 +244,6 @@ test(
         capacity: { maxParallel: 2, reservedInteractiveSlots: 0 },
         reasoning: { kind: "graded", levels: ["none", "low", "medium", "xhigh"] },
       });
-      for (const key of ["chat", "coding", "math", "analysis", "writing", "extraction"])
-        catalogue[0].quality[key] = 0.9;
-      catalogue[0].quality.provenance = {
-        unit: "probability",
-        source: "synthetic routing fixture, not measured quality",
-        asOf: "2026-09-22",
-      };
       Object.assign(catalogue[0].prices, {
         inputUsdPerMillion: 1,
         cachedInputUsdPerMillion: 1,
@@ -355,13 +267,6 @@ test(
         capabilities: { tools: true, json: false, vision: false },
         reasoning: { kind: "graded", levels: ["none", "low", "medium", "high", "xhigh"] },
       });
-      for (const key of ["chat", "coding", "math", "analysis", "writing", "extraction"])
-        catalogue[1].quality[key] = 0.9;
-      catalogue[1].quality.provenance = {
-        unit: "probability",
-        source: "synthetic routing fixture, not measured quality",
-        asOf: "2026-09-22",
-      };
       Object.assign(catalogue[1].prices, {
         inputUsdPerMillion: 1,
         cachedInputUsdPerMillion: 1,
@@ -373,10 +278,8 @@ test(
         },
       });
       const cataloguePath = join(directory, "catalog.json");
-      const qualificationPath = join(directory, "qualification.json");
       const guardPath = join(directory, "loopback-only.mjs");
       await writeFile(cataloguePath, JSON.stringify(catalogue), { mode: 0o600 });
-      await writeFile(qualificationPath, JSON.stringify(qualification()), { mode: 0o600 });
       await writeFile(
         guardPath,
         `const actualFetch = globalThis.fetch;
@@ -421,11 +324,6 @@ globalThis.fetch = (input, init) => {
             MODEL_CATALOG: cataloguePath,
             AUXILIARY_CATALOG: "",
             API_KEY_PEPPER: randomUUID(),
-            CLASSIFIER_MODE: "jev",
-            CLASSIFIER_QUALIFICATION: qualificationPath,
-            TYPESAFE_API_KEY: "fixture-jev-only",
-            TYPESAFE_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
-            TYPESAFE_MODEL: "jev-1.13.0",
             GUFO_API_KEY: FIXTURE_CREDENTIAL,
             OPENROUTER_API_KEY: "fixture-cloud-only",
           },
@@ -452,44 +350,22 @@ globalThis.fetch = (input, init) => {
         assert.ok(Date.now() < deadline && child.exitCode === null, `gateway not ready: ${logs}`);
         await delay(25, undefined, { signal: t.signal });
       }
-      const policy = {
-        priority: "high",
-        localityBias: 1,
-        contextLimitTokens: 4096,
-        maxCompletionTokens: 128,
-        overloadAction: "report",
-        allowedModels: [DEPLOYMENT_ID],
-        requestsPerMinute: 60,
-        maxConcurrent: 2,
-        maxWaitMs: 1000,
-        maxEstimatedUsd: null,
-        bias: { cost: 0.7, quality: 0.8, latency: 0.3 },
-      };
-      const createKey = async (name, allowedModels, overloadAction = "report") => {
+      const createKey = async (name, cloud) => {
         const result = await jsonCall(origin, "/api/admin/keys", {
           method: "POST",
           headers: { "content-type": "application/json", origin, "x-jev-admin": "1" },
           body: JSON.stringify({
             name,
             expiresAt: null,
-            policy: { ...policy, allowedModels, overloadAction },
+            policy: { priority: "high", cloud, requestsPerMinute: 60, maxConcurrent: 2 },
           }),
         });
         assert.equal(result.status, 201, JSON.stringify(result.body));
         return result.body.secret;
       };
-      const permitted = await createKey("gufo permitted", [DEPLOYMENT_ID]);
-      const denied = await createKey("gufo denied", []);
-      const report = await createKey(
-        "gufo overload report",
-        [DEPLOYMENT_ID, "cloud-test"],
-        "report",
-      );
-      const failover = await createKey(
-        "gufo overload failover",
-        [DEPLOYMENT_ID, "cloud-test"],
-        "failover",
-      );
+      const permitted = await createKey("gufo only", false);
+      const report = await createKey("gufo overload report", false);
+      const failover = await createKey("gufo overload to cloud", true);
 
       const models = await jsonCall(origin, "/v1/models", { headers: bearer(permitted) });
       assert.equal(models.status, 200);
@@ -497,13 +373,7 @@ globalThis.fetch = (input, init) => {
         models.body.data.map(({ id }) => id),
         ["auto"],
       );
-      const scoped = await jsonCall(origin, "/v1/models", { headers: bearer(denied) });
-      assert.equal(scoped.status, 200);
-      assert.deepEqual(scoped.body.data, []);
       assert.equal((await jsonCall(origin, "/v1/models")).status, 401);
-      const forbidden = await jsonCall(origin, "/v1/chat/completions", chat({}, denied));
-      assert.equal(forbidden.status, 403);
-      assert.equal(forbidden.body.error.code, "forbidden");
       assert.equal(peer.posts.length, 0);
 
       const ready = await jsonCall(origin, "/health/ready");
@@ -517,7 +387,7 @@ globalThis.fetch = (input, init) => {
       const generated = await jsonCall(
         origin,
         "/v1/chat/completions",
-        chat({ max_tokens: 64 }, permitted),
+        chat({ max_tokens: 64, reasoning_effort: "minimal" }, permitted),
       );
       assert.equal(generated.status, 200, JSON.stringify(generated.body));
       assert.equal(generated.headers.get("x-deployment-id"), DEPLOYMENT_ID);
@@ -560,10 +430,10 @@ globalThis.fetch = (input, init) => {
       const overLimit = await jsonCall(
         origin,
         "/v1/chat/completions",
-        chat({ max_tokens: 129 }, permitted),
+        chat({ max_tokens: 8193 }, permitted),
       );
       assert.equal(overLimit.status, 422);
-      assert.equal(overLimit.body.error.code, "invalid");
+      assert.equal(overLimit.body.error.code, "no_eligible_model");
       const oversizedContext = await jsonCall(
         origin,
         "/v1/chat/completions",
@@ -575,11 +445,11 @@ globalThis.fetch = (input, init) => {
         ),
       );
       assert.equal(oversizedContext.status, 422);
-      assert.equal(oversizedContext.body.error.code, "invalid");
+      assert.equal(oversizedContext.body.error.code, "no_eligible_model");
       assert.equal(
         peer.posts.length,
         postsBeforeLimits,
-        "neither key context nor output limit reaches Gufo",
+        "a request no deployment can serve never reaches Gufo",
       );
       const postsBeforeStream = peer.posts.length;
       const stream = await fetch(`${origin}/v1/chat/completions`, {
@@ -617,13 +487,13 @@ globalThis.fetch = (input, init) => {
       const rejected = await jsonCall(origin, "/v1/chat/completions", chat({}, report));
       assert.equal(rejected.status, 503, JSON.stringify(rejected.body));
       assert.equal(rejected.body.error.code, "local_overloaded");
-      assert.equal(rejected.headers.get("retry-after"), "2");
+      assert.equal(rejected.headers.get("retry-after"), "6");
       assert.equal(cloud.posts.length, 0, "report does not disclose task to cloud peer");
       const overloadedStream = await fetch(`${origin}/v1/chat/completions`, {
         ...chat({ stream: true }, report),
         signal: AbortSignal.timeout(8_000),
       });
-      assert.equal(overloadedStream.status, 200); // stream was committed before dispatch
+      assert.equal(overloadedStream.status, 200); // streams commit the 200 before routing
       assert.match(overloadedStream.headers.get("content-type") ?? "", /text\/event-stream/);
       const terminal = await overloadedStream.text();
       const overloadEvent = /event: router\.error\r?\ndata: ([^\r\n]+)\r?\n/.exec(terminal);
@@ -632,7 +502,7 @@ globalThis.fetch = (input, init) => {
         error: {
           code: "local_overloaded",
           message: "local deployment overloaded",
-          retry_after_seconds: 2,
+          retry_after_seconds: 6,
         },
       });
       assert.doesNotMatch(terminal, /streamed answer|\[DONE\]/);

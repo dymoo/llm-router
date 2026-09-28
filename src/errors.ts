@@ -35,104 +35,13 @@ export class SchemaVersionMismatch extends Schema.TaggedError<SchemaVersionMisma
   Message,
 ) {}
 
-export class EmptyAllowlist extends Schema.TaggedError<EmptyAllowlist>()(
-  "EmptyAllowlist",
-  Message,
-) {}
-
-export class ImpossibleLimits extends Schema.TaggedError<ImpossibleLimits>()(
-  "ImpossibleLimits",
-  Message,
-) {}
-
-export class UnsupportedCapabilities extends Schema.TaggedError<UnsupportedCapabilities>()(
-  "UnsupportedCapabilities",
-  Message,
-) {}
-
 export class NoEligibleModel extends Schema.TaggedError<NoEligibleModel>()(
   "NoEligibleModel",
   Message,
 ) {}
 
-export class ClassifierUnavailable extends Schema.TaggedError<ClassifierUnavailable>()(
-  "ClassifierUnavailable",
-  Message,
-) {}
-
-export class ClassifierTimeout extends Schema.TaggedError<ClassifierTimeout>()(
-  "ClassifierTimeout",
-  {
-    message: Schema.String,
-    timeoutMs: Schema.Finite,
-  },
-) {}
-
-export class ClassifierInvalidResponse extends Schema.TaggedError<ClassifierInvalidResponse>()(
-  "ClassifierInvalidResponse",
-  Message,
-) {}
-
-export class ClassifierInputTooLarge extends Schema.TaggedError<ClassifierInputTooLarge>()(
-  "ClassifierInputTooLarge",
-  {
-    message: Schema.String,
-    maxChars: Schema.Int,
-    actualChars: Schema.Int,
-  },
-) {}
-
-export class ClassifierContextExceeded extends Schema.TaggedError<ClassifierContextExceeded>()(
-  "ClassifierContextExceeded",
-  {
-    message: Schema.String,
-    inputTokens: Schema.NullOr(Schema.Int),
-    maxLen: Schema.NullOr(Schema.Int),
-    headBudget: Schema.NullOr(Schema.Int),
-  },
-) {}
-
-export class ClassifierUnqualified extends Schema.TaggedError<ClassifierUnqualified>()(
-  "ClassifierUnqualified",
-  {
-    message: Schema.String,
-    reason: Schema.Literals([
-      "missing",
-      "identity-mismatch",
-      "placeholder",
-      "not-passed",
-      "metric-invalid",
-      "unmeasured",
-      "error-rate",
-      "false-positive-rate",
-    ]),
-    questionId: Schema.optional(Schema.String),
-  },
-) {}
-
-export class BriefRequired extends Schema.TaggedError<BriefRequired>()("BriefRequired", {
-  message: Schema.String,
-  inputTokens: Schema.NullOr(Schema.Int),
-  maxLen: Schema.NullOr(Schema.Int),
-}) {}
-
-export class RetrievalRequired extends Schema.TaggedError<RetrievalRequired>()(
-  "RetrievalRequired",
-  Message,
-) {}
-
 export class CatalogueInvalid extends Schema.TaggedError<CatalogueInvalid>()(
   "CatalogueInvalid",
-  Message,
-) {}
-
-export class BoundaryRequired extends Schema.TaggedError<BoundaryRequired>()(
-  "BoundaryRequired",
-  Message,
-) {}
-
-export class MissingSession extends Schema.TaggedError<MissingSession>()(
-  "MissingSession",
   Message,
 ) {}
 
@@ -146,7 +55,8 @@ export class ProviderFailure extends Schema.TaggedError<ProviderFailure>()(
 export class LocalOverloaded extends Schema.TaggedError<LocalOverloaded>()("LocalOverloaded", {
   message: Schema.String,
   retryAfterSeconds: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-  /** Gufo refused a `service_tier: "flex"` request for lack of spare capacity. */
+  /** No spare capacity for a `service_tier: "flex"` request: Gufo refused it, or
+   * the router's flex wait ran out. HTTP maps it to 429 `resource_unavailable`. */
   flexRefused: Schema.optional(Schema.Boolean),
 }) {}
 
@@ -156,22 +66,6 @@ export class RequestTimeout extends Schema.TaggedError<RequestTimeout>()(
 ) {}
 
 export class Cancelled extends Schema.TaggedError<Cancelled>()("Cancelled", Message) {}
-
-export type FeasibilityError =
-  | EmptyAllowlist
-  | ImpossibleLimits
-  | UnsupportedCapabilities
-  | NoEligibleModel
-  | CatalogueInvalid;
-
-export type ClassifierError =
-  | ClassifierUnavailable
-  | ClassifierTimeout
-  | ClassifierInvalidResponse
-  | ClassifierInputTooLarge
-  | ClassifierContextExceeded
-  | ClassifierUnqualified
-  | BriefRequired;
 
 export type KeyLifecycleError =
   | DatabaseError
@@ -188,12 +82,9 @@ export type KeyLifecycleError =
 
 export type DomainError =
   | InvalidInput
-  | FeasibilityError
-  | ClassifierError
+  | NoEligibleModel
+  | CatalogueInvalid
   | KeyLifecycleError
-  | RetrievalRequired
-  | BoundaryRequired
-  | MissingSession
   | CapacityBusy
   | ProviderFailure
   | LocalOverloaded

@@ -97,6 +97,9 @@ export const requests = sqliteTable(
     /** 1 while a remote batch owns this authorized request (no ordinary HTTP lease held);
      * 0 for every request that is not remote-deferred. */
     deferred: integer("deferred").notNull().default(0),
+    /** Client-declared app attribution (advisory, unverified). */
+    appUrl: text("app_url"),
+    appTitle: text("app_title"),
   },
   (table) => [
     index("requests_key_status_idx").on(table.keyId, table.status),
@@ -175,6 +178,8 @@ export const batchJobs = sqliteTable(
     createdAt: integer("created_at").notNull(),
     finalizedAt: integer("finalized_at"),
     spillAt: integer("spill_at").notNull(),
+    /** 1 when the submitting key allowed cloud: only then may undispatched items spill. */
+    cloud: integer("cloud").notNull().default(1),
     usageJson: text("usage_json"),
     requestCountsTotal: integer("request_counts_total").notNull(),
     requestCountsCompleted: integer("request_counts_completed").notNull(),

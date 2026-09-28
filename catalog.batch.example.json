@@ -18,19 +18,6 @@
       "maxParallel": 1,
       "reservedInteractiveSlots": 0
     },
-    "quality": {
-      "chat": 0.85,
-      "coding": 0.85,
-      "math": 0.8,
-      "analysis": 0.85,
-      "writing": 0.85,
-      "extraction": 0.85,
-      "provenance": {
-        "unit": "probability",
-        "source": "operator-bootstrap-ranking-prior-not-calibrated-success-probability",
-        "asOf": "2026-09-22"
-      }
-    },
     "prices": {
       "inputUsdPerMillion": 0.06,
       "cachedInputUsdPerMillion": 0.012,
@@ -41,24 +28,8 @@
         "asOf": "2026-09-22"
       }
     },
-    "latency": {
-      "initialMs": 2000,
-      "tokensPerSecond": 30,
-      "provenance": {
-        "unit": "tokens-per-second",
-        "source": "operator-bootstrap-latency-prior-not-measured",
-        "asOf": "2026-09-22"
-      }
-    },
     "reasoning": {
       "kind": "binary"
-    },
-    "reasoningTokenEstimates": {
-      "none": 0,
-      "low": 1024,
-      "medium": 4096,
-      "high": 8192,
-      "xhigh": 16384
     }
   }
 ]

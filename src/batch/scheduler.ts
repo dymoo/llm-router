@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
   batchItemStatusIsTerminal,
   batchStatusIsTerminal,
@@ -10,7 +9,7 @@ import {
 } from "../domain.ts";
 import { createDeadline } from "../deadline.ts";
 import type { RoutedWork } from "../http/contracts.ts";
-import { classifierInputFor, decodeChatCompletion, requestCapabilities } from "../http/decode.ts";
+import { decodeChatCompletion, requestCapabilities } from "../http/decode.ts";
 import { GATEWAY_EFFECT_TIMEOUT_MS } from "../http/limits.ts";
 import { estimateInputTokens } from "../http/tokens.ts";
 import type { Admission, FinalizeOutcome } from "../keys/types.ts";
@@ -145,21 +144,9 @@ const BATCH_DISPATCH_PER_TICK = 8;
 /** OpenRouter polls for 25h from submission: 24h execution plus one hour to observe finalization. */
 const REMOTE_POLL_GRACE_MS = 60 * 60 * 1_000;
 
-const LOCAL_SPILL_CODES = new Set([
-  "NoEligibleModel",
-  "RetrievalRequired",
-  "UnsupportedCapabilities",
-  "EmptyAllowlist",
-  "CatalogueInvalid",
-]);
+const LOCAL_SPILL_CODES = new Set(["NoEligibleModel", "CatalogueInvalid"]);
 
-const RETRY_CODES = new Set([
-  "CapacityBusy",
-  "QueueFull",
-  "LockTimeout",
-  "RateLimited",
-  "ConcurrentLimit",
-]);
+const RETRY_CODES = new Set(["CapacityBusy", "QueueFull", "RateLimited", "ConcurrentLimit"]);
 
 type PollRetry = {
   readonly jobId: string;
@@ -805,21 +792,9 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
     // accepts only auto, so normalize only this private boundary and carry the requested model
     // explicitly on BatchRoutedWork.
     const record: Record<string, unknown> = { ...raw, model: "auto", stream: false };
-    const decoded = decodeChatCompletion(record, { newId: randomUUID });
+    const decoded = decodeChatCompletion(record);
     const capabilities = requestCapabilities(decoded);
     const inputTokens = estimateInputTokens(decoded);
-    if (admission.policy.allowedModels !== null && admission.policy.allowedModels.length === 0) {
-      throw Object.assign(new Error("no deployments are allowed"), { _tag: "EmptyAllowlist" });
-    }
-    if (
-      inputTokens > admission.policy.contextLimitTokens ||
-      (decoded.maxCompletionTokens !== undefined &&
-        decoded.maxCompletionTokens > admission.policy.maxCompletionTokens)
-    ) {
-      throw Object.assign(new Error("request exceeds configured limits"), {
-        _tag: "ImpossibleLimits",
-      });
-    }
     return {
       requestId: admission.requestId,
       keyId: admission.keyId,
@@ -832,13 +807,12 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
       responseFormat: decoded.response_format,
       sampling: decoded.sampling,
       maxCompletionTokens: decoded.maxCompletionTokens,
+      ...(decoded.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: decoded.reasoningEffort }),
       inputTokens,
-      // Every batch item is an isolated new task. A caller's session id cannot pin unrelated
-      // batch rows together, and private ids never collide with an interactive session.
-      routing: { sessionId: `batch:${job.id}:${item.id}`, boundary: "new-task" },
+      // Every batch item is independent: no session stickiness across rows.
       capabilities,
-      classifierInput: classifierInputFor(decoded, capabilities, inputTokens),
-      freshFactsAvailable: false,
       stream: false,
       requestedModel: job.model,
     };
@@ -923,17 +897,19 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
     } catch (error) {
       const code = errorCodeOf(error);
       const latest = deps.ledger.job(job.id);
+      // A down, full or draining Gufo is not hard ineligibility: the item waits
+      // for local capacity like a flex refusal, unless its key may spill.
       const retryable =
         !signal.aborted &&
-        RETRY_CODES.has(code) &&
+        (RETRY_CODES.has(code) || code === "LocalOverloaded") &&
         latest !== undefined &&
         dispatchable(latest.status);
-      // Local overload is not hard ineligibility: only an opted-in key may
-      // accelerate remote batch planning before spillAt. Planning still enforces
-      // the batch catalogue, current key policy, credentials and spend ceiling.
-      const overloadSpill =
-        code === "LocalOverloaded" && activeAdmission.policy.overloadAction === "failover";
-      const spillable = deps.spill !== undefined && (LOCAL_SPILL_CODES.has(code) || overloadSpill);
+      // Only a cloud key leaves for the remote batch path before spillAt: when no
+      // local deployment can ever serve the item, or local is down, full or draining.
+      const spillable =
+        deps.spill !== undefined &&
+        activeAdmission.policy.cloud &&
+        (LOCAL_SPILL_CODES.has(code) || code === "LocalOverloaded");
       if (spillable) {
         trackRemote(() => runRemoteGroup(job, [item], new Map([[item.id, activeAdmission]])));
         return;
@@ -1510,7 +1486,7 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
         }
         continue;
       }
-      if (hasSpilled(job.spillAt, deps.now())) {
+      if (hasSpilled(job, deps.now())) {
         trackRemote(() => runRemoteGroup(job, items));
       } else if (idle) {
         await Promise.allSettled(items.map((item) => runLocalItem(job, item)));

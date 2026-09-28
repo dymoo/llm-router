@@ -13,7 +13,7 @@ function request() {
 }
 
 test(
-  "downstream cancellation aborts a pending classifier and records abandonment once",
+  "downstream cancellation aborts pending routing and records abandonment once",
   { timeout: 2000 },
   async () => {
     const keys = memoryKeys();

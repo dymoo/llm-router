@@ -14,13 +14,9 @@ dist/
 .DS_Store
 /catalog*.json
 !/catalog*.example.json
-/classifier-qualification.json
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
 *.gguf
 *.hgn
-__pycache__/
-*.pyc
-.venv/
 /third_party/

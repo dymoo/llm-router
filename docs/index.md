@@ -1,23 +1,17 @@
 # Operator documentation
 
-Compose runs the gateway and CPU Laya, plus explicitly selected `llamacpp` or `halogen` GPU profiles. The optimized native pwilkin route is also supported. Optional `npu` and `webui` profiles extend the hub. Runtime ports stay private; only gateway and WebUI publish loopback ports by default.
+Compose runs the gateway, plus Open WebUI behind the `webui` profile. The local model runtime is Gufo on the owner's GPU host, reached over HTTP with a bearer key; it is not a Compose service. Only gateway and WebUI publish ports, both loopback by default.
 
-| Document | Use |
-| --- | --- |
-| [setup.md](setup.md) | Secrets, binds and gateway setup |
-| [runtime-selection.md](runtime-selection.md) | llama.cpp/Halogen profiles, matching catalogues and safe switching |
-| [llamacpp.md](llamacpp.md) | Pinned guide fetch, check-only, install, launch, discovery |
-| [routing-policy.md](routing-policy.md) | Locality bias, priority, hard limits (authoritative) |
-| [batch.md](batch.md) | Low-priority batch surface: submit/status/list/delete, deferred lane, spill, result holding |
-| [halogen.md](halogen.md) | Official image, mandatory quality overlay and runtime health |
-| [npu.md](npu.md) | Optional Ryzen AI 1.8 NPU (not default) |
-| [catalogue.md](catalogue.md) | Filling `catalog.json` without invented model IDs or prices |
-| [clients.md](clients.md) | OMP / coding-agent session metadata |
-| [operations.md](operations.md) | Backup, drain, gateway upgrade, analytics, unverified limits |
-| [arrival-readiness.md](arrival-readiness.md) | Strix Halo first-boot and acceptance handoff: smoke order, blockers, arrival-day targets |
-| [ai-hub.md](ai-hub.md) | FastFlowLM NPU services, Open WebUI, API boundaries and privacy |
-| [research/engram-halo.md](research/engram-halo.md) | SSD-backed PLE, EngramHalo pins and caveats |
-| [research/strix-concurrency-comparison.md](research/strix-concurrency-comparison.md) | Toolbox variants, attributed benchmarks and on-box matrix |
-| [research/laya-routing-validation.md](research/laya-routing-validation.md) | Actual CPU diagnostics and the outstanding classifier-quality gate |
+| Document                               | Use                                                                                         |
+| -------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [setup.md](setup.md)                   | Secrets, binds, Gufo endpoint and gateway setup                                             |
+| [routing-policy.md](routing-policy.md) | Key policy, Gufo-first tiers, cloud switch and Flex (authoritative)                         |
+| [batch.md](batch.md)                   | Low-priority batch surface: submit/status/list/delete, deferred lane, spill, result holding |
+| [catalogue.md](catalogue.md)           | Gufo, OpenRouter and System One entries without invented model IDs or prices                |
+| [clients.md](clients.md)               | OMP / coding-agent requests, sessions and effort                                            |
+| [operations.md](operations.md)         | Backup, drain, gateway upgrade, health, metrics, analytics                                  |
+| [ai-hub.md](ai-hub.md)                 | Open WebUI through the gateway, and System One (Kev/Jev)                                    |
 
-AMD generation/NPU performance and paid cloud completions are **unverified** here. Identified SQLite v1→v5 migrations, software contracts and local protocol paths are exercised independently of hardware.
+Files under `research/` are historical research, including the retired task classifier. Gufo host operations live in the owner's infra repository.
+
+Model quality, Gufo throughput and paid cloud completions are **unverified** here. Identified SQLite v1→v6 migrations, software contracts and local protocol paths are exercised by tests.

@@ -1,8 +1,6 @@
-import type { ClassifierHealth } from "./classifier.ts";
-import type { DeploymentHealth, HealthSnapshot } from "./http/contracts.ts";
+import { RULES_CLASSIFIER, type DeploymentHealth, type HealthSnapshot } from "./http/contracts.ts";
 
 export type HealthProbes = {
-  classifier: () => Promise<ClassifierHealth>;
   deployments: () => Promise<DeploymentHealth[]>;
   persistence: () => Promise<boolean>;
   now?: () => number;
@@ -33,27 +31,23 @@ export function createHealthMonitor(probes: HealthProbes): HealthMonitor {
           stopping: true,
           persistence: false,
           checkedAt: now(),
-          classifier: { ready: false, backend: "stopped", local: false },
+          classifier: RULES_CLASSIFIER,
           deployments: [],
         };
       if (cached !== undefined && now() < expiresAt) return cached;
       if (inFlight !== undefined) return inFlight;
       inFlight = Promise.all([
-        probes.classifier().catch(() => ({ ready: false, backend: "unknown", local: false })),
         probes.deployments().catch(() => []),
         probes.persistence().catch(() => false),
       ])
-        .then(([classifier, deployments, persistence]) => {
+        .then(([deployments, persistence]) => {
           const snapshot: HealthSnapshot = {
             ready:
-              !stopping &&
-              persistence &&
-              classifier.ready &&
-              deployments.some((item) => !item.optional && item.ready),
+              !stopping && persistence && deployments.some((item) => !item.optional && item.ready),
             stopping,
             persistence,
             checkedAt: now(),
-            classifier,
+            classifier: RULES_CLASSIFIER,
             deployments,
           };
           cached = snapshot;

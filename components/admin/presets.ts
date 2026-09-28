@@ -1,4 +1,4 @@
-import type { KeyPolicy, PolicyPresetId } from "./types";
+import type { KeyDraft, KeyPolicy, PolicyPresetId } from "./types";
 
 export type PolicyPreset = {
   id: PolicyPresetId;
@@ -7,62 +7,24 @@ export type PolicyPreset = {
   policy: KeyPolicy;
 };
 
-const ALL_DEPLOYMENTS: KeyPolicy["allowedModels"] = null;
-
 export const POLICY_PRESETS: readonly PolicyPreset[] = [
   {
-    id: "dylan",
-    label: "Dylan",
-    summary: "High priority, quality bias, cloud-preferred locality.",
-    policy: {
-      priority: "high",
-      localityBias: 0.15,
-      contextLimitTokens: 131_072,
-      maxCompletionTokens: 16_384,
-      allowedModels: ALL_DEPLOYMENTS,
-      requestsPerMinute: 120,
-      maxConcurrent: 4,
-      maxWaitMs: 0,
-      overloadAction: "report",
-      maxEstimatedUsd: null,
-      bias: { cost: 0.2, quality: 0.9, latency: 0.3 },
-    },
+    id: "interactive",
+    label: "Interactive",
+    summary: "High priority with cloud fallback, for a person waiting on the answer.",
+    policy: { priority: "high", cloud: true, requestsPerMinute: 120, maxConcurrent: 4 },
   },
   {
-    id: "balanced",
-    label: "Balanced",
-    summary: "Medium priority, cost bias, local-preferred locality.",
-    policy: {
-      priority: "medium",
-      localityBias: 0.65,
-      contextLimitTokens: 65_536,
-      maxCompletionTokens: 8_192,
-      allowedModels: ALL_DEPLOYMENTS,
-      requestsPerMinute: 60,
-      maxConcurrent: 2,
-      maxWaitMs: 0,
-      overloadAction: "report",
-      maxEstimatedUsd: null,
-      bias: { cost: 0.7, quality: 0.5, latency: 0.3 },
-    },
+    id: "standard",
+    label: "Standard",
+    summary: "Medium priority on the GPU only.",
+    policy: { priority: "medium", cloud: false, requestsPerMinute: 60, maxConcurrent: 2 },
   },
   {
-    id: "free-vibecode",
-    label: "Free Vibecode",
-    summary: "Low priority, strong cost bias, local until verified saturation.",
-    policy: {
-      priority: "low",
-      localityBias: 0.95,
-      contextLimitTokens: 32_768,
-      maxCompletionTokens: 4_096,
-      allowedModels: ALL_DEPLOYMENTS,
-      requestsPerMinute: 30,
-      maxConcurrent: 1,
-      maxWaitMs: 5_000,
-      overloadAction: "report",
-      maxEstimatedUsd: null,
-      bias: { cost: 1, quality: 0.3, latency: 0.05 },
-    },
+    id: "background",
+    label: "Background",
+    summary: "Low priority on idle GPU time only.",
+    policy: { priority: "low", cloud: false, requestsPerMinute: 30, maxConcurrent: 2 },
   },
 ];
 
@@ -74,22 +36,6 @@ export function presetById(id: PolicyPresetId): PolicyPreset {
   return preset;
 }
 
-export function clonePolicy(policy: KeyPolicy): KeyPolicy {
-  return {
-    ...policy,
-    allowedModels: policy.allowedModels === null ? null : [...policy.allowedModels],
-    bias: { ...policy.bias },
-  };
-}
-
-export function defaultDraft(): {
-  name: string;
-  expiresAt: number | null;
-  policy: KeyPolicy;
-} {
-  return {
-    name: "",
-    expiresAt: null,
-    policy: clonePolicy(presetById("balanced").policy),
-  };
+export function defaultDraft(): KeyDraft {
+  return { name: "", expiresAt: null, policy: { ...presetById("standard").policy } };
 }

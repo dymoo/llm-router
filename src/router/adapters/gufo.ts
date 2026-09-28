@@ -1,7 +1,6 @@
 import { Clock, Effect, Schema } from "effect";
 import type { Deployment } from "../../domain.ts";
 import { LocalOverloaded, ProviderFailure } from "../../errors.ts";
-import { UNKNOWN_SATURATION, type SaturationEvidence } from "../locality.ts";
 import type { AdapterRequest, ProviderAdapter } from "./types.ts";
 import {
   bearerHeaders,
@@ -19,7 +18,7 @@ const GufoChunk = Schema.Struct({ model: Schema.String, choices: Schema.Array(Sc
 const decodeGufoChunk = Schema.decodeUnknownSync(GufoChunk);
 const MAX_SSE_EVENT_BYTES = 256 * 1024;
 const GUFO_NO_QUEUE = { "X-Gufo-No-Queue": "1" };
-const SATURATION_TTL_MS = 1_000;
+const FLEX_LIMIT_TTL_MS = 30_000;
 
 const NamedTool = Schema.Struct({
   type: Schema.Literals(["function"]),
@@ -41,7 +40,7 @@ const GufoDraining = Schema.Struct({
 const decodeGufoDraining = Schema.decodeUnknownSync(GufoDraining);
 const GufoRuntime = Schema.Struct({
   contract_version: Schema.Number,
-  accepting: Schema.Struct({ default: Schema.Boolean }),
+  sessions: Schema.Struct({ flex_limit: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
 });
 const decodeGufoRuntime = Schema.decodeUnknownEffect(GufoRuntime);
 
@@ -333,21 +332,19 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
     return !available;
   });
 
-  // Runtime evidence for locality spill: saturated when Gufo would refuse a
-  // default-tier request. Unknown (not saturated) when the runtime cannot say.
-  // One observation per deployment serves for a second, so a slow Gufo adds
-  // at most one probe delay per second rather than one per request.
-  const observed = new Map<string, { readonly at: number; readonly value: SaturationEvidence }>();
-  const readSaturation = Effect.fn("Gufo.readSaturation")(function* (
+  // How many flex requests Gufo admits at once. One observation per
+  // deployment serves for 30 s; a failed read stays unknown (the caller's default).
+  const observed = new Map<string, { readonly at: number; readonly value: number | undefined }>();
+  const readFlexLimit = Effect.fn("Gufo.readFlexLimit")(function* (
     deployment: Deployment,
     credential: string | undefined,
   ) {
     if (credential === undefined || credential.trim().length === 0 || /[\r\n]/.test(credential)) {
-      return UNKNOWN_SATURATION;
+      return undefined;
     }
     const now = yield* Clock.currentTimeMillis;
     const cached = observed.get(deployment.id);
-    if (cached !== undefined && now - cached.at < SATURATION_TTL_MS) return cached.value;
+    if (cached !== undefined && now - cached.at < FLEX_LIMIT_TTL_MS) return cached.value;
     const value = yield* Effect.gen(function* () {
       const response = yield* fetchResponse(
         fetchImpl,
@@ -366,17 +363,15 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
       const runtime = yield* decodeGufoRuntime(parsed).pipe(
         Effect.mapError(() => new ProviderFailure({ message: "Gufo runtime response is invalid" })),
       );
-      return runtime.contract_version === 1
-        ? { verified: true, saturated: !runtime.accepting.default }
-        : UNKNOWN_SATURATION;
+      return runtime.contract_version === 1 ? runtime.sessions.flex_limit : undefined;
     }).pipe(
       Effect.timeout("1500 millis"),
-      Effect.catch(() => Effect.succeed(UNKNOWN_SATURATION)),
+      Effect.catch(() => Effect.succeed(undefined)),
     );
     observed.set(deployment.id, { at: yield* Clock.currentTimeMillis, value });
     return value;
   });
-  return { complete, stream, probeUnavailable, readSaturation };
+  return { complete, stream, probeUnavailable, readFlexLimit };
 }
 
 function gufoHeaders(request: AdapterRequest): Record<string, string> {

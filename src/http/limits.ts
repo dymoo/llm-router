@@ -2,7 +2,6 @@ export const INFERENCE_MAX_BYTES = 1 * 1024 * 1024;
 export const ADMIN_MAX_BYTES = 32 * 1024;
 export const LOGIN_ROTATE_MAX_BYTES = 1024;
 export const BODY_READ_TIMEOUT_MS = 15_000;
-export const CLASSIFIER_BRIEF_MAX_CHARS = 24_000;
 export const UPSTREAM_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 export const GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
 export const GATEWAY_EFFECT_TIMEOUT_MS = 11 * 60 * 1000;

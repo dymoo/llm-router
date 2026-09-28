@@ -76,44 +76,38 @@ describe("Gufo ProviderAdapter", () => {
     assert.equal(await Effect.runPromise(malformed.probeUnavailable(gufo, "fixture-key")), true);
     assert.equal(await Effect.runPromise(invalid.probeUnavailable(gufo, "fixture-key")), true);
     assert.equal(await Effect.runPromise(unauthorized.probeUnavailable(gufo, "fixture-key")), true);
-    assert.equal(typeof healthy.readSaturation, "function");
+    assert.equal(typeof healthy.readFlexLimit, "function");
   });
 
-  it("reads verified saturation only from a known runtime contract", async () => {
+  it("reads flex_limit only from a known runtime contract", async () => {
     const reader = (body: unknown, status = 200) =>
       gufoAdapter(async (url, init) => {
         assert.equal(String(url), "http://127.0.0.1:9/v1/runtime");
         assert.equal(init?.method, "GET");
         return Response.json(body, { status });
-      }).readSaturation!;
-    const runtime = (accepting: boolean, version = 1) => ({
+      }).readFlexLimit!;
+    const runtime = (flexLimit: number, version = 1) => ({
       contract_version: version,
-      accepting: { default: accepting, flex: false },
+      sessions: { capacity: 24, flex_limit: flexLimit },
     });
     const read = (body: unknown, status?: number) =>
       Effect.runPromise(reader(body, status)(gufo, "fixture-key"));
-    assert.deepEqual(await read(runtime(false)), { verified: true, saturated: true });
-    assert.deepEqual(await read(runtime(true)), { verified: true, saturated: false });
-    assert.deepEqual(await read(runtime(false, 2)), { verified: false, saturated: false });
-    assert.deepEqual(await read({ error: { code: "not_found" } }, 404), {
-      verified: false,
-      saturated: false,
-    });
-    assert.deepEqual(await Effect.runPromise(reader(runtime(false))(gufo, undefined)), {
-      verified: false,
-      saturated: false,
-    });
+    assert.equal(await read(runtime(3)), 3);
+    assert.equal(await read(runtime(0)), 0);
+    assert.equal(await read(runtime(3, 2)), undefined);
+    assert.equal(await read({ error: { code: "not_found" } }, 404), undefined);
+    assert.equal(await Effect.runPromise(reader(runtime(3))(gufo, undefined)), undefined);
   });
 
-  it("reuses one runtime observation for a second", async () => {
+  it("caches one runtime observation", async () => {
     let calls = 0;
     const adapter = gufoAdapter(async () => {
       calls += 1;
-      return Response.json({ contract_version: 1, accepting: { default: false, flex: false } });
+      return Response.json({ contract_version: 1, sessions: { flex_limit: 4 } });
     });
-    const read = () => Effect.runPromise(adapter.readSaturation!(gufo, "fixture-key"));
-    assert.deepEqual(await read(), { verified: true, saturated: true });
-    assert.deepEqual(await read(), { verified: true, saturated: true });
+    const read = () => Effect.runPromise(adapter.readFlexLimit!(gufo, "fixture-key"));
+    assert.equal(await read(), 4);
+    assert.equal(await read(), 4);
     assert.equal(calls, 1);
   });
 
@@ -136,6 +130,29 @@ describe("Gufo ProviderAdapter", () => {
     await Effect.runPromise(adapter.complete(request()));
     assert.equal("service_tier" in (seen?.body ?? {}), false);
     assert.equal(seen?.requestId, null);
+  });
+
+  it("never forwards client app attribution to Gufo", async () => {
+    let names: string[] = [];
+    const adapter = gufoAdapter(async (_url, init) => {
+      names = [...new Headers(init?.headers).keys()];
+      return Response.json({
+        model: gufo.modelId,
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" } }],
+      });
+    });
+    await Effect.runPromise(
+      adapter.complete(
+        request({ appAttribution: { url: "https://vibe.example", title: "Free Vibecode" } }),
+      ),
+    );
+    assert.ok(names.includes("authorization"));
+    assert.deepEqual(
+      names.filter(
+        (name) => name === "http-referer" || name === "x-title" || name.startsWith("x-openrouter-"),
+      ),
+      [],
+    );
   });
 
   it("sends Gufo's exact completion protocol and returns tool and usage data", async () => {

@@ -273,6 +273,8 @@ describe("openrouter batch spill", () => {
     const gets = upstream.calls.filter((call) => call.method === "GET");
     assert.ok(gets.every((call) => call.url.startsWith("https://openrouter.ai/api/v1/batches/")));
     assert.ok(gets.every((call) => call.headers.authorization === "Bearer sk-test"));
+    for (const call of [post, ...gets])
+      assert.equal(call.headers["X-OpenRouter-Title"], "llm-router");
 
     // custom_id round trip: we submit our globally unique item id, rows come back keyed by it,
     // and the served row restores the caller's custom_id with our item id as the row id.

@@ -1,26 +1,25 @@
 "use client";
 
 import { useId, useMemo, useState, type FormEvent } from "react";
-import { Dialog } from "./Dialog";
-import {
-  explainCostBias,
-  explainLatencyBias,
-  explainLocalityBias,
-  explainPriority,
-  explainQualityBias,
-  explainQueueWait,
-  localityLabel,
-} from "./explain";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { AdminSheet } from "./AdminSheet";
+import { PRIORITY_LABEL, explainPriority, usesCloud } from "./explain";
 import { fromDateTimeLocal, toDateTimeLocal } from "./format";
-import { POLICY_PRESETS, clonePolicy } from "./presets";
-import {
-  allowedModelsMode,
-  allowedModelsToText,
-  parseAllowedModels,
-  validateDraft,
-} from "./policy";
-import type { KeyDraft, KeyPolicy, PolicyPresetId } from "./types";
-import { MAX_WAIT_MS } from "./types";
+import { POLICY_PRESETS } from "./presets";
+import { validateDraft } from "./policy";
+import type { KeyDraft, KeyPolicy, PolicyPresetId, Priority } from "./types";
+
+const PRIORITIES: readonly Priority[] = ["high", "medium", "low"];
+const labelClass = "type-footnote font-semibold text-glass-label-2";
+const hintClass = "type-footnote mt-2 text-glass-label-2";
+const fieldClass =
+  "mt-2 h-11 rounded-xl border-0 bg-white/8 px-3 text-[1rem] text-glass-label placeholder:text-glass-label-3 focus-visible:bg-white/12 focus-visible:ring-0 focus-visible:inset-ring-[1.5px] focus-visible:inset-ring-white/40 disabled:bg-white/5 md:text-[1rem]";
+const chipClass =
+  "h-11 rounded-full px-4 type-subhead font-semibold text-glass-label hover:bg-white/14 hover:text-glass-label";
 
 export function KeyEditor({
   mode,
@@ -31,6 +30,8 @@ export function KeyEditor({
   onChange,
   onClose,
   onSubmit,
+  onRotate,
+  onRevoke,
 }: {
   mode: "create" | "edit";
   draft: KeyDraft;
@@ -40,20 +41,27 @@ export function KeyEditor({
   onChange: (draft: KeyDraft) => void;
   onClose: () => void;
   onSubmit: () => void;
+  onRotate?: () => void;
+  onRevoke?: () => void;
 }) {
   const [preset, setPreset] = useState<PolicyPresetId | null>(
-    mode === "create" ? "balanced" : null,
+    mode === "create" ? "standard" : null,
   );
   const validation = useMemo(() => validateDraft(draft), [draft]);
-  const allowMode = allowedModelsMode(draft.policy.allowedModels);
-  const title = mode === "create" ? "Create Key" : "Edit Key";
-  const localityId = useId();
-  const costId = useId();
-  const qualityId = useId();
-  const latencyId = useId();
-  const waitId = useId();
-  const priorityId = useId();
-  const overloadId = useId();
+  const ids = {
+    name: useId(),
+    suggestion: useId(),
+    priority: useId(),
+    priorityHint: useId(),
+    cloud: useId(),
+    cloudHint: useId(),
+    rpm: useId(),
+    concurrent: useId(),
+    expires: useId(),
+  };
+  const low = draft.policy.priority === "low";
+  // An empty name only disables Save; don't greet a new key with an error.
+  const shownValidation = draft.name.trim().length === 0 ? null : validation;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -68,369 +76,231 @@ export function KeyEditor({
     onChange({ ...draft, policy: { ...draft.policy, ...patch } });
   };
 
-  const waitSeconds = draft.policy.maxWaitMs / 1000;
-
   return (
-    <Dialog
-      open
-      title={title}
-      size="lg"
+    <AdminSheet
+      title={mode === "create" ? "Create Key" : "Edit Key"}
       description={
         mode === "create"
-          ? "Suggestions fill policy. They do not name the key. Save writes the server policy."
-          : "Saving replaces the current server policy. The secret is not shown again."
+          ? "Pick a suggestion, then adjust. The secret is shown once, after you create the key."
+          : "Saving replaces this key’s policy. The secret stays the same."
       }
       onClose={busy ? undefined : onClose}
-      closeOnEscape={!busy}
-      closeOnBackdrop={!busy}
       footer={
         <>
-          <button className="btn btn-secondary" type="button" onClick={onClose} disabled={busy}>
+          <Button variant="secondary" type="button" onClick={onClose} disabled={busy}>
             Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            type="submit"
-            form="key-editor-form"
-            disabled={busy || validation !== null}
-          >
+          </Button>
+          <Button type="submit" form="key-editor-form" disabled={busy || validation !== null}>
             {busy ? "Saving…" : mode === "create" ? "Create Key" : "Save Key"}
-          </button>
+          </Button>
         </>
       }
     >
-      <form id="key-editor-form" className="form-grid" onSubmit={submit}>
+      <form id="key-editor-form" className="space-y-6" onSubmit={submit}>
         {conflict ? (
-          <div className="banner" data-tone="warn" role="status">
-            <div>
-              <h2>This key was updated elsewhere</h2>
-              <p>Your draft is still here. Save again to apply it.</p>
-            </div>
+          <div role="status" className="rounded-2xl bg-white/7 p-4">
+            <p className="type-headline">This key was changed elsewhere</p>
+            <p className="type-footnote mt-1 text-glass-label-2">
+              Your draft is still here. Save again to apply it.
+            </p>
           </div>
         ) : null}
         {error ? (
-          <p className="field-error" role="alert">
+          <p role="alert" className="type-footnote text-[#ff8a82]">
             {error}
           </p>
         ) : null}
-        <label className="field">
-          <span>Name</span>
-          <input
+
+        <div>
+          <Label htmlFor={ids.name} className={labelClass}>
+            Name
+          </Label>
+          <Input
+            id={ids.name}
+            className={fieldClass}
             value={draft.name}
             onChange={(event) => onChange({ ...draft, name: event.target.value })}
+            placeholder="e.g. Open WebUI"
             maxLength={80}
             required
             autoComplete="off"
             disabled={busy}
           />
-        </label>
-        <fieldset className="field fieldset-plain">
-          <legend className="field-label">Policy suggestion</legend>
-          <div className="chips">
+        </div>
+
+        <div>
+          <p id={ids.suggestion} className={labelClass}>
+            Suggestion
+          </p>
+          <ToggleGroup
+            aria-labelledby={ids.suggestion}
+            className="mt-2 flex-wrap gap-2"
+            value={preset ? [preset] : []}
+            onValueChange={(value: string[]) => {
+              const item = POLICY_PRESETS.find((candidate) => candidate.id === value[0]);
+              if (!item) return; // Pressing the chosen suggestion again keeps it.
+              setPreset(item.id);
+              onChange({ ...draft, policy: { ...item.policy } });
+            }}
+          >
             {POLICY_PRESETS.map((item) => (
-              <button
+              <ToggleGroupItem
                 key={item.id}
-                type="button"
-                className="chip"
-                aria-pressed={preset === item.id}
-                disabled={busy}
+                value={item.id}
                 title={item.summary}
-                onClick={() => {
-                  setPreset(item.id);
-                  onChange({ ...draft, policy: clonePolicy(item.policy) });
-                }}
+                disabled={busy}
+                className={`${chipClass} bg-white/10 aria-pressed:bg-white/22 aria-pressed:inset-ring-[1.5px] aria-pressed:inset-ring-white/50`}
               >
                 {item.label}
-              </button>
+              </ToggleGroupItem>
             ))}
-          </div>
-        </fieldset>
-        <div className="field">
-          <span id={priorityId}>Priority</span>
-          <div className="segmented" role="radiogroup" aria-labelledby={priorityId}>
-            {(["high", "medium", "low"] as const).map((value) => (
-              <button
+          </ToggleGroup>
+        </div>
+
+        <div>
+          <p id={ids.priority} className={labelClass}>
+            Priority
+          </p>
+          <ToggleGroup
+            role="radiogroup"
+            aria-labelledby={ids.priority}
+            aria-describedby={ids.priorityHint}
+            className="mt-2 grid w-full grid-cols-3 gap-1 rounded-full bg-white/8 p-1"
+            value={[draft.policy.priority]}
+            onValueChange={(value: string[]) => {
+              const next = PRIORITIES.find((priority) => priority === value[0]);
+              if (next) editPolicy({ priority: next });
+            }}
+          >
+            {PRIORITIES.map((value) => (
+              <ToggleGroupItem
                 key={value}
-                type="button"
+                value={value}
                 role="radio"
                 aria-checked={draft.policy.priority === value}
+                aria-pressed={undefined}
                 disabled={busy}
-                onClick={() => editPolicy({ priority: value })}
+                className={`${chipClass} text-glass-label-2 hover:bg-transparent aria-checked:bg-white/16 aria-checked:text-glass-label aria-checked:shadow-sm`}
               >
-                {value === "high" ? "High" : value === "medium" ? "Medium" : "Low"}
-              </button>
+                {PRIORITY_LABEL[value]}
+              </ToggleGroupItem>
             ))}
-          </div>
-          <p className="hint" aria-live="polite">
+          </ToggleGroup>
+          <p id={ids.priorityHint} className={hintClass} aria-live="polite">
             {explainPriority(draft.policy.priority)}
           </p>
         </div>
-        <LabeledSlider
-          label={`Locality · ${localityLabel(draft.policy.localityBias)}`}
-          min={0}
-          max={1}
-          step={0.05}
-          value={draft.policy.localityBias}
-          display={draft.policy.localityBias.toFixed(2)}
-          disabled={busy}
-          describedBy={localityId}
-          explanation={explainLocalityBias(draft.policy.localityBias)}
-          onChange={(localityBias) => editPolicy({ localityBias })}
-        />
-        <LabeledSlider
-          label="Cost bias"
-          min={0}
-          max={1}
-          step={0.05}
-          value={draft.policy.bias.cost}
-          display={draft.policy.bias.cost.toFixed(2)}
-          disabled={busy}
-          describedBy={costId}
-          explanation={explainCostBias(draft.policy.bias.cost)}
-          onChange={(cost) => editPolicy({ bias: { ...draft.policy.bias, cost } })}
-        />
-        <LabeledSlider
-          label="Quality bias"
-          min={0}
-          max={1}
-          step={0.05}
-          value={draft.policy.bias.quality}
-          display={draft.policy.bias.quality.toFixed(2)}
-          disabled={busy}
-          describedBy={qualityId}
-          explanation={explainQualityBias(draft.policy.bias.quality)}
-          onChange={(quality) => editPolicy({ bias: { ...draft.policy.bias, quality } })}
-        />
-        <LabeledSlider
-          label="Latency bias"
-          min={0}
-          max={1}
-          step={0.05}
-          value={draft.policy.bias.latency}
-          display={draft.policy.bias.latency.toFixed(2)}
-          disabled={busy}
-          describedBy={latencyId}
-          explanation={explainLatencyBias(draft.policy.bias.latency)}
-          onChange={(latency) => editPolicy({ bias: { ...draft.policy.bias, latency } })}
-        />
-        <LabeledSlider
-          label="Queue wait"
-          min={0}
-          max={MAX_WAIT_MS}
-          step={250}
-          value={draft.policy.maxWaitMs}
-          display={`${Number.isInteger(waitSeconds) ? waitSeconds : waitSeconds.toFixed(1)}s`}
-          disabled={busy}
-          describedBy={waitId}
-          explanation={explainQueueWait(draft.policy.maxWaitMs)}
-          onChange={(maxWaitMs) => editPolicy({ maxWaitMs })}
-        />
-        <div className="field">
-          <span id={overloadId}>Local overload</span>
-          <div className="segmented" role="radiogroup" aria-labelledby={overloadId}>
-            {(["report", "failover"] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={draft.policy.overloadAction === value}
-                disabled={busy}
-                onClick={() => editPolicy({ overloadAction: value })}
-              >
-                {value === "report" ? "Report overload" : "Fail over to eligible cloud"}
-              </button>
-            ))}
+
+        <label className="flex min-h-11 items-center gap-4 rounded-2xl bg-white/7 px-4 py-3">
+          <span className="min-w-0 flex-1">
+            <span id={ids.cloud} className="type-headline block">
+              Cloud
+            </span>
+            <span id={ids.cloudHint} className="type-footnote block text-glass-label-2">
+              {low
+                ? "Low priority never uses cloud."
+                : "May use OpenRouter (paid) when the GPU can’t take the request."}
+            </span>
+          </span>
+          <Switch
+            aria-labelledby={ids.cloud}
+            aria-describedby={ids.cloudHint}
+            checked={usesCloud(draft.policy)}
+            disabled={busy || low}
+            onCheckedChange={(cloud) => editPolicy({ cloud })}
+          />
+        </label>
+
+        <div>
+          <div className="grid grid-cols-2 gap-3">
+            <NumberField
+              id={ids.rpm}
+              label="Requests / minute"
+              value={draft.policy.requestsPerMinute}
+              disabled={busy}
+              onChange={(requestsPerMinute) => editPolicy({ requestsPerMinute })}
+            />
+            <NumberField
+              id={ids.concurrent}
+              label="Max concurrent"
+              value={draft.policy.maxConcurrent}
+              disabled={busy}
+              onChange={(maxConcurrent) => editPolicy({ maxConcurrent })}
+            />
           </div>
-          <p className="hint">
-            {draft.policy.overloadAction === "report"
-              ? "After the local wait, report overload. Overload-triggered paid cloud failover is off by default."
-              : "Before dispatch, an eligible cloud deployment may be used when local capacity is unavailable. This may incur provider charges; allowlist, capability, context, credentials and estimated-spend limits still apply. A continue pin never switches silently."}
-          </p>
+          <p className={hintClass}>Abuse limits. 0 means unlimited.</p>
         </div>
-        <label className="field">
-          <span>Expires</span>
-          <input
+
+        <div>
+          <Label htmlFor={ids.expires} className={labelClass}>
+            Expires
+          </Label>
+          <Input
+            id={ids.expires}
             type="datetime-local"
+            className={fieldClass}
             value={toDateTimeLocal(draft.expiresAt)}
             onChange={(event) =>
               onChange({ ...draft, expiresAt: fromDateTimeLocal(event.target.value) })
             }
             disabled={busy}
           />
-          <span className="hint">Leave empty for no expiry.</span>
-        </label>
-        <details className="advanced">
-          <summary>Limits and allowlist</summary>
-          <div className="form-grid">
-            <div className="form-row split">
-              <NumberField
-                label="Context cap"
-                value={draft.policy.contextLimitTokens}
-                disabled={busy}
-                onChange={(contextLimitTokens) => editPolicy({ contextLimitTokens })}
-              />
-              <NumberField
-                label="Completion cap"
-                value={draft.policy.maxCompletionTokens}
-                disabled={busy}
-                onChange={(maxCompletionTokens) => editPolicy({ maxCompletionTokens })}
-              />
-            </div>
-            <div className="form-row split">
-              <NumberField
-                label="Requests per minute"
-                value={draft.policy.requestsPerMinute}
-                disabled={busy}
-                onChange={(requestsPerMinute) => editPolicy({ requestsPerMinute })}
-              />
-              <NumberField
-                label="Concurrent requests"
-                value={draft.policy.maxConcurrent}
-                disabled={busy}
-                onChange={(maxConcurrent) => editPolicy({ maxConcurrent })}
-              />
-            </div>
-            <label className="field">
-              <span>Estimate ceiling (USD)</span>
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={draft.policy.maxEstimatedUsd ?? ""}
-                disabled={busy}
-                onChange={(event) => {
-                  const raw = event.target.value;
-                  editPolicy({
-                    maxEstimatedUsd: raw.trim().length === 0 ? null : Number(raw),
-                  });
-                }}
-              />
-              <span className="hint">Empty means no ceiling. This is not a monthly budget.</span>
-            </label>
-            <div className="field">
-              <span>Allowed deployments</span>
-              <div className="segmented" role="group" aria-label="Allowed deployments">
-                {(
-                  [
-                    ["all", "All"],
-                    ["specific", "Specific"],
-                    ["deny", "Deny all"],
-                  ] as const
-                ).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    aria-pressed={allowMode === value}
-                    disabled={busy}
-                    onClick={() =>
-                      editPolicy({
-                        allowedModels: parseAllowedModels(
-                          value,
-                          allowedModelsToText(draft.policy.allowedModels),
-                        ),
-                      })
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {allowMode === "specific" ? (
-                <textarea
-                  aria-label="Deployment IDs"
-                  value={allowedModelsToText(draft.policy.allowedModels)}
-                  disabled={busy}
-                  onChange={(event) =>
-                    editPolicy({
-                      allowedModels: parseAllowedModels("specific", event.target.value),
-                    })
-                  }
-                />
-              ) : (
-                <p className="hint">
-                  {allowMode === "all"
-                    ? "All current and future deployments."
-                    : "An empty allowlist denies every deployment."}
-                </p>
-              )}
+          <p className={hintClass}>Leave empty and the key never expires.</p>
+        </div>
+
+        {shownValidation ? (
+          <p role="alert" className="type-footnote text-[#ff8a82]">
+            {shownValidation}
+          </p>
+        ) : null}
+
+        {onRotate && onRevoke ? (
+          <div className="border-t border-white/10 pt-5">
+            <p className={labelClass}>Secret and access</p>
+            <div className="mt-2 flex gap-2 *:flex-1">
+              <Button variant="secondary" type="button" onClick={onRotate} disabled={busy}>
+                Rotate Secret
+              </Button>
+              <Button variant="destructive" type="button" onClick={onRevoke} disabled={busy}>
+                Revoke Key
+              </Button>
             </div>
           </div>
-        </details>
-        {validation ? <p className="field-error">{validation}</p> : null}
+        ) : null}
       </form>
-    </Dialog>
-  );
-}
-
-function LabeledSlider({
-  label,
-  min,
-  max,
-  step,
-  value,
-  display,
-  disabled,
-  describedBy,
-  explanation,
-  onChange,
-}: {
-  label: string;
-  min: number;
-  max: number;
-  step: number;
-  value: number;
-  display: string;
-  disabled: boolean;
-  describedBy: string;
-  explanation: string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="field">
-      <span className="range-readout">
-        {label}
-        <span>{display}</span>
-      </span>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        disabled={disabled}
-        aria-valuetext={display}
-        aria-describedby={describedBy}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-      <p id={describedBy} className="hint" aria-live="polite">
-        {explanation}
-      </p>
-    </label>
+    </AdminSheet>
   );
 }
 
 function NumberField({
+  id,
   label,
   value,
   disabled,
   onChange,
 }: {
+  id: string;
   label: string;
   value: number;
   disabled: boolean;
   onChange: (value: number) => void;
 }) {
   return (
-    <label className="field">
-      <span>{label}</span>
-      <input
+    <div>
+      <Label htmlFor={id} className={labelClass}>
+        {label}
+      </Label>
+      <Input
+        id={id}
         type="number"
+        inputMode="numeric"
         min={0}
         step={1}
+        className={`${fieldClass} tabular-nums`}
         value={Number.isFinite(value) ? value : ""}
         disabled={disabled}
         onChange={(event) => onChange(Number(event.target.value))}
       />
-    </label>
+    </div>
   );
 }

@@ -2,97 +2,75 @@
 
 ## What runs
 
-| Service | Image | Published | Default backend |
-| --- | --- | --- | --- |
-| `gateway` | built from `Dockerfile` | `127.0.0.1:3000` only | Next.js standalone |
-| `laya` | optional `COMPOSE_PROFILES=laya`, built from `Dockerfile.laya` | none | CPU (`LAYA_BACKEND=cpu`), only for explicitly selected Laya mode |
-| `llamacpp` | selected `COMPOSE_PROFILES=llamacpp`, pinned Vulkan compatibility image | none | alternative to the optimized native host path |
-| `halogen` | selected `COMPOSE_PROFILES=halogen`, unmodified pinned image | none | official HGN + required quality overlay |
-| `fastflowlm` | optional `COMPOSE_PROFILES=npu` | none | NPU embeddings + Whisper |
-| `open-webui` | optional `COMPOSE_PROFILES=webui` | `127.0.0.1:3001` | chat/RAG/STT through gateway |
+| Service      | Image                                   | Published             | Role                                           |
+| ------------ | --------------------------------------- | --------------------- | ---------------------------------------------- |
+| `gateway`    | built from `Dockerfile`                 | `127.0.0.1:3000` only | Next.js standalone                             |
+| `open-webui` | `ghcr.io/open-webui/open-webui:v0.11.3` | `127.0.0.1:3001`      | optional `webui` profile; chat through gateway |
 
-Do not bake a generator into the gateway image. Select one GPU runtime with [runtime selection](runtime-selection.md); the optimized native host route remains supported.
+The model runtime is Gufo on the owner's GPU host. It is reached over HTTP with a bearer key and is not a Compose service. Gufo host operations live in the owner's infra repository.
 
 There is **no UI login**. Reachability grants administration; gate the console with an authenticating reverse proxy (for example Authentik forward auth) when it leaves loopback. Inference still requires `jrv_` API keys. Default binds are loopback. Mutations require exact `APP_ORIGIN` and `X-Jev-Admin: 1`.
 
-## Clean machine (Rules routing, no classifier or local generator)
+## Compose
 
-Needs Docker, Node 22.16+, and this tree. Does **not** need AMD GPU, NPU, or paid keys.
+Needs Docker, Node 22.16+, and this tree.
 
 ```bash
-node scripts/setup.mjs
+node scripts/setup.mjs --gufo-endpoint https://gufo.example/v1
 docker compose up -d --build gateway
 docker compose ps
 ```
 
-Only the gateway starts by default: no Laya build, container or model download. The console loads without a classifier; readiness still needs persistence and at least one healthy chat deployment.
+`scripts/setup.mjs` writes mode-0600 `.env` with a generated `API_KEY_PEPPER` and `WEBUI_SECRET_KEY`, and `catalog.json` from `catalog.example.json`: Gufo (24 permits, 4 reserved for high keys) plus OpenRouter `cloud-glm`. It refuses to overwrite either file and creates `./data` mode 0700. `--gufo-endpoint` must be an HTTP(S) URL without credentials, query or fragment; setup appends `/v1` when missing. Without it the catalogue keeps `REPLACE_GUFO_ENDPOINT`, and the router refuses inference until the endpoint is set. Compose catalogues are readable metadata (0644), never secret stores.
 
-`scripts/setup.mjs` writes mode-0600 `.env` with generated secrets and a matching catalogue, refuses overwrite, and creates `./data` mode 0700. Compose catalogues are readable metadata (0644), never secret stores. Use `--runtime cloud` for an explicit cloud-only catalogue and configure an OpenRouter key before inference.
+Then set `GUFO_API_KEY` (Gufo's `--api-key-file` value) and `OPENROUTER_API_KEY` in `.env`. The console loads without them; readiness needs persistence and at least one healthy chat deployment. For a cloud-only install, delete the Gufo entry from `catalog.json`.
 
-The no-argument default retains the native llama.cpp layout without starting a GPU container. Use `--runtime halogen` or `--runtime llamacpp` when the AMD host and corresponding model files are ready. Generated aliases/limits must match the running engine; bootstrap quality/latency values are not measurements.
+Gufo must advertise the catalogued model ID on its authenticated `GET /v1/models`; see [catalogue.md](catalogue.md#gufo-chat).
 
-To opt into **Laya**, set `CLASSIFIER_MODE=laya` in `.env`, add `laya` to `COMPOSE_PROFILES` (preserving the chosen GPU/NPU/WebUI profiles), select real qualification evidence, then run `docker compose up -d --build`. Laya remains CPU by default and unqualified evidence still blocks routing. **Jev** needs its configured key and qualification record, but never the `laya` profile. Changing only `CLASSIFIER_MODE` does not start a Compose service.
+Routing needs no further configuration: each key's `priority` and `cloud` decide it ([routing-policy.md](routing-policy.md)). Only keys with `cloud` ever reach OpenRouter.
 
 ## Native (no Docker)
 
 ```bash
-node scripts/setup.mjs --native
+node scripts/setup.mjs --native --gufo-endpoint https://gufo.example/v1
 set -a && . ./.env.native && set +a
 ```
 
-`.env.native` uses `SQLITE_PATH=./data/control.sqlite`, `MODEL_CATALOG=./catalog.native.json`, and optional `LAYA_URL=http://127.0.0.1:8090`. Rules mode starts no classifier. It does not overwrite Compose configuration. If explicitly choosing Laya, start the separate local service and qualify its root checkpoint (max_len 512 / head 192); see the [classifier quality gate](research/laya-routing-validation.md).
-
-## Strix Halo host (after guide install)
-
-Hardware + pwilkin prefixes first ([llamacpp.md](llamacpp.md)). Then:
-
-```bash
-qwen3.8-strix-halo-server --host 0.0.0.0 --port 8080 --alias local-llamacpp   # private bind + firewall
-node scripts/setup.mjs --runtime llamacpp-native
-docker compose up -d
-docker compose exec gateway node /opt/ops/discover-local.mjs http://host.docker.internal:8080
-```
-
-This tree does not change bootloaders. Keep IOMMU enabled when using FastFlowLM/XDNA2. Historical IOMMU-off GPU benchmarks are not a requirement for this hub.
+`.env.native` uses `SQLITE_PATH=./data/control.sqlite`, `MODEL_CATALOG=./catalog.native.json` and `BATCH_CATALOG=./catalog.batch.example.json`. It does not overwrite Compose configuration.
 
 ## Binding the UI
 
-| Intent | `GATEWAY_BIND` | `APP_ORIGIN` |
-| --- | --- | --- |
-| This machine only (default) | `127.0.0.1` | `http://127.0.0.1:3000` |
-| Private LAN | the LAN IP | `http://<that-ip>:3000` exactly |
+| Intent                      | `GATEWAY_BIND` | `APP_ORIGIN`                    |
+| --------------------------- | -------------- | ------------------------------- |
+| This machine only (default) | `127.0.0.1`    | `http://127.0.0.1:3000`         |
+| Private LAN                 | the LAN IP     | `http://<that-ip>:3000` exactly |
 
 Never publish `0.0.0.0` on a public interface. LAN reachability is admin access: expose only `/v1` and `/health` directly and put everything else behind an authenticating proxy. Enable HTTPS if the hop is not a trusted private network.
 
 ## Environment
 
-| Name | Role |
-| --- | --- |
-| `APP_ORIGIN` | Exact UI origin for CSRF / same-origin checks |
-| `API_KEY_PEPPER` | HMAC pepper for inference API keys; generated |
-| `SQLITE_PATH` | Control-plane SQLite |
-| `MODEL_CATALOG` | Runtime catalogue path |
-| `MODEL_CATALOG_FILE` | Host file bound into the Compose gateway as its chat catalogue |
-| `COMPOSE_PROFILES` | Selected GPU runtime and optional `npu,webui` services |
-| `LAYA_URL` | `http://laya:8090` on Compose; `http://127.0.0.1:8090` native |
-| `CLASSIFIER_MODE` | `rules` (classifier-free; example default), `laya` or `jev`. Explicit selection; no automatic fallback. |
-| `CLASSIFIER_QUALIFICATION_FILE` | Host selector for the qualification record bound read-only into the gateway (default `./classifier-qualification.example.json` — keep the `./` prefix in short syntax; the mount itself is long-syntax bind, so bare-relative or absolute paths are safe). The shipped example has `verdict: fail` + `REPLACE_` placeholders so the default can never pass the gate. A real record is never generated: keep it outside the repository or under the ignored `./data/` directory, verify the chosen path is excluded from Git and the Docker build context, and never stage it. Only the literal root `classifier-qualification.json` is ignored by default; an arbitrary custom path is **not** automatically excluded |
-| `CLASSIFIER_QUALIFICATION` | Native-only local path to qualification records; absent = fail-closed `unqualified` in Laya/Jev modes. Ignored in Rules mode. On Compose the gateway uses `/etc/llm-router/classifier-qualification.json`, overriding any `.env` value, mounted read-only from `CLASSIFIER_QUALIFICATION_FILE` |
-| `TYPESAFE_API_KEY` | Required only for `jev` |
-| `LAYA_MODEL_REVISION` | Pinned snapshot `1c5edc17a7acd8701df6fc341c0d179f1c62c982` |
-| `HALOGEN_DOWNLOAD` | First-boot weights repo; passed into the unmodified Halogen image |
-| Catalogue `credentialEnvVar` | Secret variable name, e.g. `OPENROUTER_API_KEY`; never put the credential itself in a catalogue |
-| `AUXILIARY_CATALOG` | Optional NPU deployment catalogue; absent disables modality deployments |
-| `BATCH_RESULTS_DIR` | Optional batch result-holding directory override; unset defaults to `dirname(SQLITE_PATH)/batch-content` beside the metadata DB — dedicated store outside `control.sqlite`/Analytics, see [batch.md](batch.md) |
-| `BATCH_CATALOG` | In-gateway path of the batch-only deployment catalogue (`/etc/llm-router/batch-catalog.json` on Compose, `./catalog.batch.example.json` native; `cloud-glm-batch` → `z-ai/glm-5.3-flash` via `deepinfra/fp4`) — [batch.md](batch.md) |
-| `BATCH_CATALOG_FILE` | Host file bound read-only into the gateway as the batch catalogue (`${BATCH_CATALOG_FILE:-./catalog.batch.example.json}:/etc/llm-router/batch-catalog.json:ro`); never merged into the synchronous chat catalogue |
-| Batch limits (no env) | Fixed code constants: 1000 items/job, 512 KiB/item, 32 MiB/job, 4 in-flight jobs/key, `deadline_at` = spill + 24 h provider window, 24 h result TTL after terminal, 64/256 MiB result budgets — [batch.md](batch.md) |
-| `WEBUI_GATEWAY_KEY`, `WEBUI_SECRET_KEY` | Dedicated inference credential and stable WebUI secret |
+| Name                                    | Role                                                                                                                                                                                                                                 |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `APP_ORIGIN`                            | Exact UI origin for CSRF / same-origin checks                                                                                                                                                                                        |
+| `API_KEY_PEPPER`                        | HMAC pepper for inference API keys; generated                                                                                                                                                                                        |
+| `SQLITE_PATH`                           | Control-plane SQLite                                                                                                                                                                                                                 |
+| `MODEL_CATALOG`                         | Chat catalogue path                                                                                                                                                                                                                  |
+| `MODEL_CATALOG_FILE`                    | Host file bound into the Compose gateway as its chat catalogue                                                                                                                                                                       |
+| `COMPOSE_PROFILES`                      | `webui` to add Open WebUI; empty for the gateway alone                                                                                                                                                                               |
+| `GUFO_API_KEY`                          | Gufo bearer key, named by the Gufo chat and Kev deployments' `credentialEnvVar`                                                                                                                                                      |
+| Catalogue `credentialEnvVar`            | Secret variable name, e.g. `GUFO_API_KEY` or `OPENROUTER_API_KEY`; never put the credential itself in a catalogue                                                                                                                    |
+| `AUXILIARY_CATALOG`                     | Optional System One catalogue (Kev on Gufo, Jev on TypeSafe); absent disables `/v1/systemone`. `/etc/llm-router/auxiliary.json` on Compose                                                                                           |
+| `AUXILIARY_CATALOG_FILE`                | Host file, relative to the checkout, bound read-only at `/etc/llm-router/auxiliary.json` (default `catalog.auxiliary.example.json`)                                                                                                  |
+| `BATCH_RESULTS_DIR`                     | Optional batch result-holding directory override; unset defaults to `dirname(SQLITE_PATH)/batch-content` beside the metadata DB — dedicated store outside `control.sqlite`/Analytics, see [batch.md](batch.md)                       |
+| `BATCH_CATALOG`                         | In-gateway path of the batch-only deployment catalogue (`/etc/llm-router/batch-catalog.json` on Compose, `./catalog.batch.example.json` native; `cloud-glm-batch` → `z-ai/glm-5.3-flash` via `deepinfra/fp4`) — [batch.md](batch.md) |
+| `BATCH_CATALOG_FILE`                    | Host file bound read-only into the gateway as the batch catalogue (`${BATCH_CATALOG_FILE:-./catalog.batch.example.json}:/etc/llm-router/batch-catalog.json:ro`); never merged into the synchronous chat catalogue                    |
+| Batch limits (no env)                   | Fixed code constants: 1000 items/job, 512 KiB/item, 32 MiB/job, 4 in-flight jobs/key, `deadline_at` = spill + 24 h provider window, 24 h result TTL after terminal, 64/256 MiB result budgets — [batch.md](batch.md)                 |
+| `WEBUI_GATEWAY_KEY`, `WEBUI_SECRET_KEY` | Dedicated inference credential and stable WebUI secret                                                                                                                                                                               |
 
-## Optional AI hub services
+## Open WebUI and System One
 
-Follow [ai-hub.md](ai-hub.md) for FastFlowLM host prerequisites, NPU profile activation, supported embedding/transcription formats, Open WebUI configuration and separate conversation retention.
+Follow [ai-hub.md](ai-hub.md) for Open WebUI configuration, its separate conversation retention, and enabling System One.
 
 ## Local verification
 
-`npm run format && npm run check-all`, Python service tests, and `docker compose --profile llamacpp --profile halogen --profile npu --profile webui config --quiet` validate software/configuration. The last command validates syntax only: do not launch both full-size GPU profiles together. Build the gateway and optional FastFlowLM image separately. Hardware acceptance remains on-box after the AMD machine arrives.
+`npm run format && npm run check-all` and `docker compose --profile webui config --quiet` validate software and configuration. Neither measures Gufo.

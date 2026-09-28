@@ -1,17 +1,6 @@
+import { COMPANION_NAME } from "@/components/admin/Companion";
+import { StatusScreen } from "@/components/admin/StatusScreen";
+
 export default function Loading() {
-  return (
-    <div className="page" aria-busy="true" aria-live="polite">
-      <header className="chrome">
-        <h1>Keys</h1>
-      </header>
-      <main className="main">
-        <div className="skeleton">
-          <div className="skel title" />
-          <div className="skel line" />
-          <div className="skel line" />
-          <div className="skel line" />
-        </div>
-      </main>
-    </div>
-  );
+  return <StatusScreen mood="sleepy" title={`${COMPANION_NAME} is fetching your keys…`} busy />;
 }

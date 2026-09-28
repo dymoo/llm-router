@@ -1,38 +1,20 @@
 # Deployment catalogues
 
-`MODEL_CATALOG` selects the chat catalogue. `AUXILIARY_CATALOG` optionally selects explicit NPU embedding/transcription deployments. Catalogues contain endpoint/model facts and ranking/accounting configuration, never provider secrets. Restart the gateway after changing them; catalogue content hashes invalidate assessment reuse.
+`MODEL_CATALOG` selects the chat catalogue. `AUXILIARY_CATALOG` optionally selects System One deployments. Catalogues contain endpoint/model facts and accounting configuration, never provider secrets. Restart the gateway after changing them. Older catalogues with `quality`, `latency` or `reasoningTokenEstimates` still load; those keys are ignored.
 
-## Local chat
+## Gufo chat
 
-The raw `catalog.example.json` intentionally retains unresolved model sentinels. `setup.mjs --runtime llamacpp|halogen|llamacpp-native|cloud` generates a usable-shaped catalogue from explicit runtime settings, including model alias, endpoint, slots and context. This does not verify installed weights or measured quality. The gateway still refuses unresolved sentinels rather than silently bypassing a broken local entry.
+`catalog.example.json` holds one Gufo deployment and the OpenRouter `cloud-glm` deployment. `scripts/setup.mjs` copies it into the live catalogue and sets the Gufo endpoint from `--gufo-endpoint`. Without that flag the entry keeps `REPLACE_GUFO_ENDPOINT`, and the gateway refuses the whole catalogue for inference rather than silently skipping a broken local entry. Never commit the private endpoint or credential. A missing `GUFO_API_KEY` makes the Gufo deployment unavailable rather than sending unauthenticated requests.
 
-After starting the selected runtime, confirm its API identity and limits. For the native llama.cpp path:
+The deployment ID is `gufo-qwen3.8-flash-next`; the **exact provider model alias** is `qwen3.8-flash-next-gufo` with transport `gufo`. Gufo's authenticated `GET /v1/models` must advertise that exact ID; the health probe checks it, and the adapter rejects any response whose `model` differs from the catalogued alias. Context 131,072 and maximum output 8,192 tokens are catalogue limits, not measurements. The adapter caps output with `max_tokens`.
 
-```bash
-docker compose exec gateway node /opt/ops/discover-local.mjs http://host.docker.internal:8080
-```
+`capacity.maxParallel: 24` matches Gufo's 24 sessions and is the **router admission permit cap**. `reservedInteractiveSlots: 4` keeps four permits for **high** keys; medium and low keys share the other twenty. Router permits cannot see load from clients that call Gufo directly. Gufo advertises tools, but not JSON mode or vision: `capabilities: { tools: true, json: false, vision: false }`. Tool fields are only sent for tool requests. No cache or disk-cache capability is claimed.
 
-Use `/v1/models` for the actual model ID and the running server's configuration for context, output, tools/JSON and reasoning controls. The endpoint is `http://host.docker.internal:8080/v1`, transport `llamacpp`. Runtime health and slot probes correctly use root `/health` and `/slots`.
+Gufo exposes graded `reasoning_effort` `off`, `low`, `medium`, `xhigh`: catalogue `reasoning.levels` are `none`, `low`, `medium`, `xhigh`; `none` maps to `off`. There is no native `high` level (a client's `reasoning_effort: "high"` maps upward to `xhigh`), and no `enable_thinking` switch. Without `reasoning_effort`, Gufo runs with thinking off. All three numeric price fields are zero only as schema-compatible placeholders with `prices.provenance.source: "unknown"`: these are **not** a claim of zero operating cost.
 
-The model path is a runtime setting, not a gateway deployment field. llama.cpp starts with one slot; Halogen uses its configured runtime slot count. Slot changes must be reflected in both the runtime and catalogue. [Runtime selection](runtime-selection.md) covers matching profiles and safe switching without resetting API-key secrets.
+Direct checks on 2026-09-24 observed: unauthenticated `GET /v1/models` 401; authenticated 200 with only `qwen3.8-flash-next-gufo`; an unknown model 404 `model_not_found`; exact-alias non-streaming and SSE responses reporting that model with final usage; and tool calls with `tool_choice` `auto` or `required`. Gufo rejects OpenAI's named `{type:"function",function:{name}}` form with 400 `invalid_tools`, so the adapter sends exactly the named tool with `tool_choice: "required"`, which is equivalent. During an earlier restart window, the same address briefly returned responses labelled with another model; this is why the adapter checks the served model name. These are protocol checks, not quality, latency, or router-routed evidence.
 
-## Optional local Gufo chat
-
-The standalone `catalog.gufo.example.json` is a **schema-decodable template, not an active deployment**. It is not selected by `setup.mjs` or the default `MODEL_CATALOG`. After approval, an operator must merge its entry into the private chat catalogue, replace `REPLACE_GUFO_ENDPOINT` with the approved reachable `/v1` base URL, and inject `GUFO_API_KEY` as a secret environment variable. Never commit the private endpoint or credential. The unresolved sentinel is rejected for inference; a missing credential makes the selected Gufo deployment unavailable rather than silently sending unauthenticated requests. No Gufo deployment or live model-quality qualification is implied by this template.
-
-The deployment ID is `gufo-qwen3.8-flash-next`; the **exact provider model alias** is `qwen3.8-flash-next-gufo` with transport `gufo`, not `llamacpp`, `halogen` or generic `openai-compatible`. Gufo's authenticated `GET /v1/models` must advertise that exact ID; a different alias is not acceptable. Gufo does not inherit llama.cpp root `/health` or `/slots` probes. Context 131,072 and maximum output 8,192 tokens are **provisional catalogue limits** to verify against the approved deployment, not measurements. The adapter caps output with `max_tokens`.
-
-Catalogue `capacity.maxParallel: 2` is a **router admission permit cap**, not evidence of two GPU slots or verified runtime saturation; `reservedInteractiveSlots: 1` caps concurrent medium/low-priority admissions at one, retaining room for high-priority work under the existing gate. It is not a physical GPU lane. Do not infer four slots, machine fullness, or a failover decision from gateway permit occupancy. Gufo advertises tools, but not JSON mode or vision: `capabilities: { tools: true, json: false, vision: false }`. Tool fields are only sent for tool requests. No cache or disk-cache capability is claimed.
-
-Gufo exposes graded `reasoning_effort` `off`, `low`, `medium`, `xhigh`: catalogue `reasoning.levels` are `none`, `low`, `medium`, `xhigh`; `none` maps to `off`. There is no native `high` level (a requested `high` maps upward to `xhigh` under existing effort routing), and no `enable_thinking` switch. Reasoning-token estimates are provisional ranking allowances, not observed usage. The template's quality and latency values are explicitly **unmeasured operator bootstrap priors**, not benchmarks or calibrated task-success probabilities. All three numeric price fields are zero only as schema-compatible placeholders with `prices.provenance.source: "unknown"`: these are **not** a claim of zero operating cost. A key's non-null `maxEstimatedUsd` rejects this candidate until meaningful rates with provenance are configured.
-
-Direct CT134 checks on 2026-09-24, after the backend finished loading, observed: unauthenticated `GET /v1/models` 401; authenticated 200 with only `qwen3.8-flash-next-gufo`; an unknown model 404 `model_not_found`; exact-alias non-streaming and SSE responses reporting that model with final usage; and tool calls with `tool_choice` `auto` or `required`. Gufo rejects OpenAI's named `{type:"function",function:{name}}` form with 400 `invalid_tools`, so the adapter sends exactly the named tool with `tool_choice: "required"`, which is equivalent. During an earlier restart window, the same address briefly returned responses labelled `qwen2.5-0.5b-vulkan-2k`; the adapter therefore rejects any response whose `model` differs from the catalogued alias. The live process had 4 × 131,072 sessions configured at that time; the router still permits two until four-client headroom is verified. These are protocol checks, not quality, latency, or router-routed evidence.
-
-Infra confirmed on 2026-09-24 that the four-session setting was a trial and has been reverted. The live launch is `--sessions 2 --context 131072 --speculative mtp --cache-disk /mnt/ai/gufo-cache`. Four sessions with MTP speculation failed the pve4 memory-headroom gate (7.7 GiB free against an 8 GiB minimum); four without speculation is untested under load. Keep `maxParallel: 2` and `reservedInteractiveSlots: 1` until infra verifies more. The disk-cache flag is set but its benefit is not verified. Open WebUI and the workstation OMP provider also call CT134 directly, so the router's permits cannot see all load on the model. The brief `qwen2.5-0.5b-vulkan-2k` responses came from an infra model-switch restart; the key proxy does not check the served model name, so the router's model check remains necessary.
-
-Gufo chat completions, including streams, send `X-Gufo-No-Queue: 1` under the dylans-infra PR #210 fast-rejection contract. When proxy in-flight requests occupy all Gufo sessions, it rejects before forwarding to Gufo with empty-body HTTP 429, `Content-Length: 0` and `Retry-After: 301`. This makes load from other direct clients such as Open WebUI and OMP visible as typed local overload despite Router permit counts: each Key's existing `overloadAction` reports it or fails over to an eligible cloud Deployment before dispatch. The `301` is Gufo's Retry-After value passed through, not a Router estimate. Gufo builds with the router contract (Gufo `docs/ROUTER.md`, contract version 1) implement the same header natively, return 429 `resource_unavailable` to refused `service_tier: "flex"` batch items and 503 `draining` during maintenance, and serve `GET /v1/runtime` for verified saturation; each request carries the Router request id as `X-Request-ID`. Unknown non-empty HTTP 429/503 responses remain provider failures.
-
-The synchronous Sail OpenRouter entry remains in `catalog.example.json`, and the DeepInfra batch entry remains in `catalog.batch.example.json`. Neither is replaced by this optional Gufo chat entry.
+Gufo chat completions, including streams, send `X-Gufo-No-Queue: 1` and carry the Router request id as `X-Request-ID`, under Gufo's router contract (Gufo `docs/ROUTER.md`, contract version 1). Gufo refuses before enqueueing with HTTP 429 `queue_full` or `client_queue_full` when it is full, 429 `resource_unavailable` when it has no idle compute for a flex request, and 503 `draining` during maintenance; an empty-body 429 from the key proxy in front of Gufo means the same as a full queue. The Router retries these after `Retry-After` within the key's wait budget, then falls back or reports local overload. Low keys and `service_tier: "flex"` requests are sent as flex, at most `GET /v1/runtime` `sessions.flex_limit` at once; see [routing policy](routing-policy.md#flex-tier-low-or-service_tier-flex). Unknown non-empty HTTP 429/503 responses remain provider failures.
 
 ## OpenRouter GLM-5.3-Flash
 
@@ -91,23 +73,17 @@ not `/models`. A ready cloud deployment confirms the credential and network
 path, not that InferenceNet is presently serving this model. The provider
 metadata above comes from a separate public endpoints-catalogue request.
 
-Reasoning is configured as binary thinking-on/off, because exact graded backend semantics were not independently established. The gateway reports applied `on`, not an invented high/xhigh execution level. Reasoning-token counts in the catalogue are estimates for ranking, not measured usage.
+Reasoning is configured as binary thinking-on/off, because exact graded backend semantics were not independently established. The gateway reports applied `on`, not an invented high/xhigh execution level.
 
-Cloud quality and latency numbers are explicitly labelled **operator bootstrap priors**, not benchmarks or calibrated success probabilities. `node scripts/setup.mjs --runtime cloud` selects that cloud entry on a fresh installation; it never overwrites an existing catalogue.
+Only keys with `cloud: true` reach this deployment. For a cloud-only installation, delete the Gufo entry from the generated catalogue.
+
+The router identifies itself on every OpenRouter call, including health checks and batch requests, with `HTTP-Referer: https://github.com/dymoo/llm-router`, `X-OpenRouter-Title: llm-router` and `X-OpenRouter-App-Visibility: hidden`.
 
 ## Local accounting and unknown values
 
 The local example's price provenance is `unknown`. Its numeric zeros are not configured COGS. Set input, cached-input and output rates with a meaningful source/date before treating local accounting as known. Explicit configured zero is supported; absent accounting remains null.
 
 Accounting uses observed token counts. Reasoning tokens are already part of completion tokens and are not added twice. Missing cached counts prevent a discount calculation unless cached/uncached rates are equal, in which case the known total does not imply a cache hit. Session affinity and provider pinning are never cache evidence.
-
-A `maxEstimatedUsd` ceiling fails closed when candidate pricing is unknown. Ranking estimates are not invoices and exclude classifier/tool spend.
-
-## Optional NPU catalogue
-
-`catalog.auxiliary.example.json` names `npu-embedding-gemma` and `npu-whisper-turbo`, both sharing `resourceId: strix-halo-npu`. They use the same one-slot admission pool without occupying a GPU permit. Their explicit IDs participate in key allowlists.
-
-The embedding `inputUsdPerMillion` and transcription `requestUsd` accounting rates default to null. The latter is a fixed internal request rate, not an audio-minute price. See [AI hub boundaries](ai-hub.md) for FastFlowLM's placeholder token usage, cancellation and logging limitations.
 
 ## System One (Kev and Jev)
 
@@ -127,6 +103,11 @@ the request body. `requestUsd` is a per-request rate; otherwise
 deployment id, or `kev-latest` / `jev-latest` for the first Kev or Jev
 deployment. The router never substitutes one for the other: their
 probabilities differ.
+
+`catalog.auxiliary.example.json` holds this Kev entry with
+`REPLACE_GUFO_ENDPOINT` in place of the endpoint shown below. Copy it to a private file, set the endpoint, and
+point `AUXILIARY_CATALOG` at it (on Compose, set `AUXILIARY_CATALOG_FILE`
+and `AUXILIARY_CATALOG=/etc/llm-router/auxiliary.json`).
 
 ```json
 {

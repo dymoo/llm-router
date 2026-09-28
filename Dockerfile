@@ -1,6 +1,4 @@
-# Gateway only. Do not bake Halogen into this image (upstream license forbids
-# redistributing a modified combined image; cheap gateway rebuilds must not
-# reload the generator).
+# Gateway only: the model runtime (Gufo) runs on the GPU host.
 # Requires next.config output: "standalone" and a committed package-lock.json.
 
 FROM node:24-bookworm-slim AS deps
@@ -42,7 +40,7 @@ COPY --from=builder --chown=node:node /app/public ./public
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 COPY --from=builder --chown=node:node /app/migrations ./migrations
-COPY --chown=node:node scripts/backup.mjs scripts/restore.mjs scripts/sqlite-ops.mjs scripts/discover-local.mjs scripts/discover-halogen.mjs /opt/ops/
+COPY --chown=node:node scripts/backup.mjs scripts/restore.mjs scripts/sqlite-ops.mjs /opt/ops/
 
 USER node
 EXPOSE 3000
