@@ -1,22 +1,14 @@
 export type Priority = "high" | "medium" | "low";
-export type OverloadAction = "report" | "failover";
 
+/** A key's whole policy. The server rejects any other field. */
 export type KeyPolicy = {
   priority: Priority;
-  localityBias: number;
-  contextLimitTokens: number;
-  maxCompletionTokens: number;
-  allowedModels: readonly string[] | null;
+  /** May use OpenRouter when the GPU can't take the request. Ignored for low priority. */
+  cloud: boolean;
+  /** 0 = unlimited. */
   requestsPerMinute: number;
+  /** 0 = unlimited. */
   maxConcurrent: number;
-  maxWaitMs: number;
-  overloadAction: OverloadAction;
-  maxEstimatedUsd: number | null;
-  bias: {
-    cost: number;
-    quality: number;
-    latency: number;
-  };
 };
 
 export type PublicKey = {
@@ -52,18 +44,6 @@ export type RevealedSecret = {
   reason: "created" | "rotated";
 };
 
-export type ClassifierHealth = {
-  ready: boolean;
-  backend: string;
-  local: boolean;
-  evidence?:
-    | "runtime-probe"
-    | "configuration-only"
-    | "unavailable"
-    | "unqualified"
-    | "deterministic-rules";
-};
-
 export type DeploymentHealth = {
   id: string;
   ready: boolean;
@@ -75,7 +55,6 @@ export type DeploymentHealth = {
 
 export type HealthSnapshot = {
   ready: boolean;
-  classifier: ClassifierHealth;
   deployments: DeploymentHealth[];
 };
 
@@ -85,9 +64,6 @@ export type UsageAggregates = {
   errorCount: number;
   cancelCount: number | null;
   saturationCount: number | null;
-  classifierCalls: number | null;
-  exactCacheHits: number | null;
-  sessionReuse: number | null;
   promptTokens: number | null;
   completionTokens: number | null;
   reasoningTokens: number | null;
@@ -104,8 +80,6 @@ export type UsageAggregates = {
   elapsedMs: number | null;
   localRequests: number | null;
   cloudRequests: number | null;
-  classifierInputTokens: number | null;
-  classifierEstimatedUsd: number | null;
   cacheSavingsUsd: number | null;
   p95QueueWaitMs: number | null;
   p95TtftMs: number | null;
@@ -125,8 +99,6 @@ export type TrendPoint = {
   ttftMs: number | null;
   decodeTps: number | null;
   cachedInputTokens: number | null;
-  classifierExactCache: number | null;
-  sessionReuse: number | null;
 };
 
 export type BreakdownRow = {
@@ -192,11 +164,6 @@ export type UsageSnapshot = {
     byPriority: BreakdownRow[];
     byDeployment: BreakdownRow[];
   };
-  decisions: CountRow[];
-  exclusions: CountRow[];
-  effort: CountRow[];
-  complexity: CountRow[];
-  tasks: CountRow[];
   errors: CountRow[];
   recent: RoutingRow[];
 };
@@ -226,6 +193,4 @@ export type AdminErrorCode =
   | "unavailable"
   | "unknown";
 
-export type PolicyPresetId = "balanced" | "dylan" | "free-vibecode";
-
-export const MAX_WAIT_MS = 30_000;
+export type PolicyPresetId = "interactive" | "standard" | "background";

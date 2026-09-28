@@ -2,25 +2,11 @@
 
 import { useId, useMemo, useState, type FormEvent } from "react";
 import { Dialog } from "./Dialog";
-import {
-  explainCostBias,
-  explainLatencyBias,
-  explainLocalityBias,
-  explainPriority,
-  explainQualityBias,
-  explainQueueWait,
-  localityLabel,
-} from "./explain";
+import { PRIORITY_LABEL, explainPriority, usesCloud } from "./explain";
 import { fromDateTimeLocal, toDateTimeLocal } from "./format";
-import { POLICY_PRESETS, clonePolicy } from "./presets";
-import {
-  allowedModelsMode,
-  allowedModelsToText,
-  parseAllowedModels,
-  validateDraft,
-} from "./policy";
+import { POLICY_PRESETS } from "./presets";
+import { validateDraft } from "./policy";
 import type { KeyDraft, KeyPolicy, PolicyPresetId } from "./types";
-import { MAX_WAIT_MS } from "./types";
 
 export function KeyEditor({
   mode,
@@ -42,18 +28,13 @@ export function KeyEditor({
   onSubmit: () => void;
 }) {
   const [preset, setPreset] = useState<PolicyPresetId | null>(
-    mode === "create" ? "balanced" : null,
+    mode === "create" ? "standard" : null,
   );
   const validation = useMemo(() => validateDraft(draft), [draft]);
-  const allowMode = allowedModelsMode(draft.policy.allowedModels);
-  const title = mode === "create" ? "Create Key" : "Edit Key";
-  const localityId = useId();
-  const costId = useId();
-  const qualityId = useId();
-  const latencyId = useId();
-  const waitId = useId();
   const priorityId = useId();
-  const overloadId = useId();
+  const priorityHintId = useId();
+  const cloudHintId = useId();
+  const low = draft.policy.priority === "low";
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -68,17 +49,15 @@ export function KeyEditor({
     onChange({ ...draft, policy: { ...draft.policy, ...patch } });
   };
 
-  const waitSeconds = draft.policy.maxWaitMs / 1000;
-
   return (
     <Dialog
       open
-      title={title}
+      title={mode === "create" ? "Create Key" : "Edit Key"}
       size="lg"
       description={
         mode === "create"
-          ? "Suggestions fill policy. They do not name the key. Save writes the server policy."
-          : "Saving replaces the current server policy. The secret is not shown again."
+          ? "A suggestion fills in the policy; it doesn’t name the key."
+          : "Saving replaces this key’s policy. The secret isn’t shown again."
       }
       onClose={busy ? undefined : onClose}
       closeOnEscape={!busy}
@@ -125,7 +104,7 @@ export function KeyEditor({
           />
         </label>
         <fieldset className="field fieldset-plain">
-          <legend className="field-label">Policy suggestion</legend>
+          <legend className="field-label">Suggestion</legend>
           <div className="chips">
             {POLICY_PRESETS.map((item) => (
               <button
@@ -137,7 +116,7 @@ export function KeyEditor({
                 title={item.summary}
                 onClick={() => {
                   setPreset(item.id);
-                  onChange({ ...draft, policy: clonePolicy(item.policy) });
+                  onChange({ ...draft, policy: { ...item.policy } });
                 }}
               >
                 {item.label}
@@ -147,7 +126,12 @@ export function KeyEditor({
         </fieldset>
         <div className="field">
           <span id={priorityId}>Priority</span>
-          <div className="segmented" role="radiogroup" aria-labelledby={priorityId}>
+          <div
+            className="segmented"
+            role="radiogroup"
+            aria-labelledby={priorityId}
+            aria-describedby={priorityHintId}
+          >
             {(["high", "medium", "low"] as const).map((value) => (
               <button
                 key={value}
@@ -157,96 +141,47 @@ export function KeyEditor({
                 disabled={busy}
                 onClick={() => editPolicy({ priority: value })}
               >
-                {value === "high" ? "High" : value === "medium" ? "Medium" : "Low"}
+                {PRIORITY_LABEL[value]}
               </button>
             ))}
           </div>
-          <p className="hint" aria-live="polite">
+          <p id={priorityHintId} className="hint" aria-live="polite">
             {explainPriority(draft.policy.priority)}
           </p>
         </div>
-        <LabeledSlider
-          label={`Locality · ${localityLabel(draft.policy.localityBias)}`}
-          min={0}
-          max={1}
-          step={0.05}
-          value={draft.policy.localityBias}
-          display={draft.policy.localityBias.toFixed(2)}
-          disabled={busy}
-          describedBy={localityId}
-          explanation={explainLocalityBias(draft.policy.localityBias)}
-          onChange={(localityBias) => editPolicy({ localityBias })}
-        />
-        <LabeledSlider
-          label="Cost bias"
-          min={0}
-          max={1}
-          step={0.05}
-          value={draft.policy.bias.cost}
-          display={draft.policy.bias.cost.toFixed(2)}
-          disabled={busy}
-          describedBy={costId}
-          explanation={explainCostBias(draft.policy.bias.cost)}
-          onChange={(cost) => editPolicy({ bias: { ...draft.policy.bias, cost } })}
-        />
-        <LabeledSlider
-          label="Quality bias"
-          min={0}
-          max={1}
-          step={0.05}
-          value={draft.policy.bias.quality}
-          display={draft.policy.bias.quality.toFixed(2)}
-          disabled={busy}
-          describedBy={qualityId}
-          explanation={explainQualityBias(draft.policy.bias.quality)}
-          onChange={(quality) => editPolicy({ bias: { ...draft.policy.bias, quality } })}
-        />
-        <LabeledSlider
-          label="Latency bias"
-          min={0}
-          max={1}
-          step={0.05}
-          value={draft.policy.bias.latency}
-          display={draft.policy.bias.latency.toFixed(2)}
-          disabled={busy}
-          describedBy={latencyId}
-          explanation={explainLatencyBias(draft.policy.bias.latency)}
-          onChange={(latency) => editPolicy({ bias: { ...draft.policy.bias, latency } })}
-        />
-        <LabeledSlider
-          label="Queue wait"
-          min={0}
-          max={MAX_WAIT_MS}
-          step={250}
-          value={draft.policy.maxWaitMs}
-          display={`${Number.isInteger(waitSeconds) ? waitSeconds : waitSeconds.toFixed(1)}s`}
-          disabled={busy}
-          describedBy={waitId}
-          explanation={explainQueueWait(draft.policy.maxWaitMs)}
-          onChange={(maxWaitMs) => editPolicy({ maxWaitMs })}
-        />
         <div className="field">
-          <span id={overloadId}>Local overload</span>
-          <div className="segmented" role="radiogroup" aria-labelledby={overloadId}>
-            {(["report", "failover"] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={draft.policy.overloadAction === value}
-                disabled={busy}
-                onClick={() => editPolicy({ overloadAction: value })}
-              >
-                {value === "report" ? "Report overload" : "Fail over to eligible cloud"}
-              </button>
-            ))}
-          </div>
-          <p className="hint">
-            {draft.policy.overloadAction === "report"
-              ? "After the local wait, report overload. Overload-triggered paid cloud failover is off by default."
-              : "Before dispatch, an eligible cloud deployment may be used when local capacity is unavailable. This may incur provider charges; allowlist, capability, context, credentials and estimated-spend limits still apply. A continue pin never switches silently."}
+          <label className="switch">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={usesCloud(draft.policy)}
+              disabled={busy || low}
+              aria-describedby={cloudHintId}
+              onChange={(event) => editPolicy({ cloud: event.target.checked })}
+            />
+            <span>Cloud</span>
+          </label>
+          <p id={cloudHintId} className="hint">
+            {low
+              ? "Low priority never uses cloud."
+              : "May use OpenRouter (paid) when the GPU can’t take the request."}
           </p>
         </div>
+        <div className="form-row split">
+          <NumberField
+            label="Requests / minute"
+            value={draft.policy.requestsPerMinute}
+            disabled={busy}
+            onChange={(requestsPerMinute) => editPolicy({ requestsPerMinute })}
+          />
+          <NumberField
+            label="Max concurrent"
+            value={draft.policy.maxConcurrent}
+            disabled={busy}
+            onChange={(maxConcurrent) => editPolicy({ maxConcurrent })}
+          />
+        </div>
+        <p className="hint">Abuse limits. 0 means unlimited.</p>
         <label className="field">
           <span>Expires</span>
           <input
@@ -259,153 +194,9 @@ export function KeyEditor({
           />
           <span className="hint">Leave empty for no expiry.</span>
         </label>
-        <details className="advanced">
-          <summary>Limits and allowlist</summary>
-          <div className="form-grid">
-            <div className="form-row split">
-              <NumberField
-                label="Context cap"
-                value={draft.policy.contextLimitTokens}
-                disabled={busy}
-                onChange={(contextLimitTokens) => editPolicy({ contextLimitTokens })}
-              />
-              <NumberField
-                label="Completion cap"
-                value={draft.policy.maxCompletionTokens}
-                disabled={busy}
-                onChange={(maxCompletionTokens) => editPolicy({ maxCompletionTokens })}
-              />
-            </div>
-            <div className="form-row split">
-              <NumberField
-                label="Requests per minute"
-                value={draft.policy.requestsPerMinute}
-                disabled={busy}
-                onChange={(requestsPerMinute) => editPolicy({ requestsPerMinute })}
-              />
-              <NumberField
-                label="Concurrent requests"
-                value={draft.policy.maxConcurrent}
-                disabled={busy}
-                onChange={(maxConcurrent) => editPolicy({ maxConcurrent })}
-              />
-            </div>
-            <label className="field">
-              <span>Estimate ceiling (USD)</span>
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={draft.policy.maxEstimatedUsd ?? ""}
-                disabled={busy}
-                onChange={(event) => {
-                  const raw = event.target.value;
-                  editPolicy({
-                    maxEstimatedUsd: raw.trim().length === 0 ? null : Number(raw),
-                  });
-                }}
-              />
-              <span className="hint">Empty means no ceiling. This is not a monthly budget.</span>
-            </label>
-            <div className="field">
-              <span>Allowed deployments</span>
-              <div className="segmented" role="group" aria-label="Allowed deployments">
-                {(
-                  [
-                    ["all", "All"],
-                    ["specific", "Specific"],
-                    ["deny", "Deny all"],
-                  ] as const
-                ).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    aria-pressed={allowMode === value}
-                    disabled={busy}
-                    onClick={() =>
-                      editPolicy({
-                        allowedModels: parseAllowedModels(
-                          value,
-                          allowedModelsToText(draft.policy.allowedModels),
-                        ),
-                      })
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {allowMode === "specific" ? (
-                <textarea
-                  aria-label="Deployment IDs"
-                  value={allowedModelsToText(draft.policy.allowedModels)}
-                  disabled={busy}
-                  onChange={(event) =>
-                    editPolicy({
-                      allowedModels: parseAllowedModels("specific", event.target.value),
-                    })
-                  }
-                />
-              ) : (
-                <p className="hint">
-                  {allowMode === "all"
-                    ? "All current and future deployments."
-                    : "An empty allowlist denies every deployment."}
-                </p>
-              )}
-            </div>
-          </div>
-        </details>
         {validation ? <p className="field-error">{validation}</p> : null}
       </form>
     </Dialog>
-  );
-}
-
-function LabeledSlider({
-  label,
-  min,
-  max,
-  step,
-  value,
-  display,
-  disabled,
-  describedBy,
-  explanation,
-  onChange,
-}: {
-  label: string;
-  min: number;
-  max: number;
-  step: number;
-  value: number;
-  display: string;
-  disabled: boolean;
-  describedBy: string;
-  explanation: string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="field">
-      <span className="range-readout">
-        {label}
-        <span>{display}</span>
-      </span>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        disabled={disabled}
-        aria-valuetext={display}
-        aria-describedby={describedBy}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-      <p id={describedBy} className="hint" aria-live="polite">
-        {explanation}
-      </p>
-    </label>
   );
 }
 
@@ -425,6 +216,7 @@ function NumberField({
       <span>{label}</span>
       <input
         type="number"
+        inputMode="numeric"
         min={0}
         step={1}
         value={Number.isFinite(value) ? value : ""}

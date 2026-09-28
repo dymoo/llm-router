@@ -157,11 +157,6 @@ export function UsageView({
               hint={`Cancel ${formatUnknown(usage.aggregates.cancelCount)} · Saturation ${formatUnknown(usage.aggregates.saturationCount)}`}
             />
             <Stat
-              label="Classifier"
-              value={formatUnknown(usage.aggregates.classifierCalls)}
-              hint={`Exact cache ${formatUnknown(usage.aggregates.exactCacheHits)} · Session reuse ${formatUnknown(usage.aggregates.sessionReuse)}`}
-            />
-            <Stat
               label="Cached input"
               value={formatRatio(ratio)}
               hint="Observed cached input / prompt tokens"
@@ -171,7 +166,7 @@ export function UsageView({
               value={formatRatio(
                 localShare(usage.aggregates.localRequests, usage.aggregates.cloudRequests),
               )}
-              hint="Known locations only. Not a localityBias percentage."
+              hint="Known locations only."
             />
             <Stat
               label="Token estimate"
@@ -209,11 +204,6 @@ export function UsageView({
               hint="Observed cached tokens × configured rate difference; not affinity."
             />
             <Stat
-              label="Classifier input"
-              value={formatUnknown(usage.aggregates.classifierInputTokens)}
-              hint={`Jev estimate ${formatUsd(usage.aggregates.classifierEstimatedUsd)}; exact-cache and session reuse make no new classifier call.`}
-            />
-            <Stat
               label="Decode TPS"
               value={formatUnknown(usage.aggregates.decodeTps, (value) => value.toFixed(1))}
             />
@@ -228,31 +218,6 @@ export function UsageView({
           />
           <BreakdownTable title="By priority" rows={usage.breakdowns.byPriority} />
           <BreakdownTable title="By deployment" rows={usage.breakdowns.byDeployment} />
-          <CountTable
-            title="Selection reasons"
-            rows={usage.decisions}
-            empty="No decision-reason aggregates for this window."
-          />
-          <CountTable
-            title="Candidate exclusions"
-            rows={usage.exclusions}
-            empty="No exclusion aggregates for this window."
-          />
-          <CountTable
-            title="Requested effort"
-            rows={usage.effort}
-            empty="No effort distribution for this window."
-          />
-          <CountTable
-            title="Difficulty"
-            rows={usage.complexity}
-            empty="No difficulty distribution for this window."
-          />
-          <CountTable
-            title="Task or modality"
-            rows={usage.tasks}
-            empty="No task distribution for this window."
-          />
           <CountTable
             title="Errors"
             rows={usage.errors}
@@ -358,9 +323,6 @@ export function UsageView({
             <Item label="Location" value={selected.location ?? "—"} />
             <Item label="HTTP outcome" value={selected.outcome} />
             <Item label="Task success" value="—" />
-            <Item label="Task" value={selected.task ?? "—"} />
-            <Item label="Difficulty" value={selected.assessmentDifficulty ?? "—"} />
-            <Item label="Effort" value={selected.appliedEffort ?? "—"} />
             <Item label="Decision" value={selected.decisionReason ?? "—"} />
             <Item
               label="Exclusions"
@@ -373,12 +335,6 @@ export function UsageView({
               value={selected.policyVersion === null ? "—" : String(selected.policyVersion)}
             />
             <Item label="Catalogue" value={selected.catalogueVersion ?? "—"} />
-            <Item label="Classifier" value={selected.classificationBackend ?? "—"} />
-            <Item label="Classifier source" value={selected.classificationSource ?? "—"} />
-            <Item
-              label="Exact cache"
-              value={selected.cacheHit === null ? "—" : selected.cacheHit ? "Yes" : "No"}
-            />
             <Item label="Queue wait" value={formatUnknown(selected.queueWaitMs, ms)} />
             <Item label="TTFT" value={formatUnknown(selected.ttftMs, ms)} />
             <Item

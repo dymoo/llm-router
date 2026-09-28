@@ -250,13 +250,6 @@ svg {
   font-weight: 600;
 }
 
-.health-note {
-  flex-basis: 100%;
-  margin: 0;
-  font-size: 0.75rem;
-  color: var(--warn);
-}
-
 .pill {
   display: inline-flex;
   align-items: center;
@@ -381,13 +374,6 @@ svg {
   min-height: 6.5rem;
   resize: vertical;
   line-height: 1.4;
-}
-
-.field input[type="range"] {
-  min-height: 1.5rem;
-  padding: 0;
-  border: 0;
-  background: transparent;
 }
 
 .field-error {
@@ -661,7 +647,8 @@ svg {
   color: var(--label-secondary);
 }
 
-.segmented button[aria-pressed="true"] {
+.segmented button[aria-pressed="true"],
+.segmented button[aria-checked="true"] {
   background: var(--bg-elevated);
   color: var(--label);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
@@ -687,21 +674,24 @@ svg {
   color: var(--accent);
 }
 
-details.advanced {
-  border-top: 1px solid var(--separator);
-  padding-top: var(--space-3);
-}
-
-details.advanced summary {
-  cursor: pointer;
-  font-weight: 650;
-  min-height: var(--target);
+.switch {
   display: flex;
   align-items: center;
+  gap: var(--space-3);
+  min-height: var(--target);
+  font-weight: 600;
 }
 
-details.advanced .form-grid {
-  margin-top: var(--space-3);
+.field .switch input {
+  width: 1.25rem;
+  min-height: 0;
+  height: 1.25rem;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.switch:has(input:disabled) {
+  color: var(--label-tertiary);
 }
 
 .secret {
@@ -760,12 +750,6 @@ details.advanced .form-grid {
 .center-status h1 {
   margin: 0 0 0.5rem;
   letter-spacing: -0.02em;
-}
-
-.range-readout {
-  display: flex;
-  justify-content: space-between;
-  font-variant-numeric: tabular-nums;
 }
 
 .error-page,
