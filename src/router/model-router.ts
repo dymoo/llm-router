@@ -28,6 +28,7 @@ import {
   createCapacityPool,
   DEFAULT_FLEX_LIMIT,
   FLEX_MAX_WAIT_MS,
+  FLEX_PROMOTE_AFTER_MS,
   LOCAL_WAIT_MS,
   type CapacityPool,
   type Permit,
@@ -135,7 +136,13 @@ export interface RouterOptions {
   readonly sessionCapacity?: number;
   readonly queueSlots?: number;
   /** Wait budgets; defaults are LOCAL_WAIT_MS and FLEX_MAX_WAIT_MS. */
-  readonly waitMs?: { readonly high?: number; readonly medium?: number; readonly flex?: number };
+  readonly waitMs?: {
+    readonly high?: number;
+    readonly medium?: number;
+    readonly flex?: number;
+    /** When a waiting flex request is promoted; default FLEX_PROMOTE_AFTER_MS. */
+    readonly promote?: number;
+  };
 }
 
 export class ModelRouter extends Context.Service<
@@ -203,6 +210,7 @@ function createRouter(options: RouterOptions) {
     high: options.waitMs?.high ?? LOCAL_WAIT_MS.high,
     medium: options.waitMs?.medium ?? LOCAL_WAIT_MS.medium,
     flex: options.waitMs?.flex ?? FLEX_MAX_WAIT_MS,
+    promote: options.waitMs?.promote ?? FLEX_PROMOTE_AFTER_MS,
   };
   let foreground = 0;
   const enterForeground = () => {
@@ -579,7 +587,15 @@ function createRouter(options: RouterOptions) {
         for (;;) {
           const now = yield* Clock.currentTimeMillis;
           if (now >= deadline) break;
-          const permit = yield* acquire(work, [target], deadline - now, "low", markQueued);
+          // Aged past the promotion point: default tier, ranked with high traffic.
+          const promoted = now - startedAt >= waits.promote;
+          const permit = yield* acquire(
+            work,
+            [target],
+            deadline - now,
+            promoted ? "high" : "low",
+            markQueued,
+          );
           if (permit === undefined) {
             yield* Effect.sleep(Duration.millis(RETRY_MIN_MS));
             continue;
@@ -598,7 +614,7 @@ function createRouter(options: RouterOptions) {
                 release();
                 onEnd();
               },
-              "flex",
+              promoted ? undefined : "flex",
             ),
             (seconds) => {
               retryAfterSeconds = seconds;

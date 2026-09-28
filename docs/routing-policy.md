@@ -50,6 +50,7 @@ Low keys always run as flex; any key may ask for it per request. Flex is **local
 
 - Requests wait in a Router-side **FIFO flex queue per deployment**. At most `flex_limit` of them hold a slot and may be dispatched to Gufo at once, where `flex_limit` is Gufo's `GET /v1/runtime` `sessions.flex_limit` (cached 30 s; `DEFAULT_FLEX_LIMIT` = 2 when unknown).
 - The slot holder sends `service_tier: "flex"`. On Gufo's 429 `resource_unavailable` it keeps its slot, waits `Retry-After` (floor 250 ms) and retries, so waiting requests never all poll Gufo.
+- **No starvation:** a flex request that has waited 60 s (`FLEX_PROMOTE_AFTER_MS`) is promoted. It dispatches on Gufo's default tier and takes a permit ranked with high traffic by arrival, so a steady stream of high-priority work still lets it through. Only flex-slot holders (Gufo's `flex_limit`) are promoted, which caps what low work takes from interactive traffic. It still never goes to cloud.
 - The wait is capped at **10 minutes** (`FLEX_MAX_WAIT_MS`, under the 11-minute gateway deadline); then **429 `resource_unavailable`** with `Retry-After`. A flex request no local deployment could ever serve fails 422 `no_eligible_model`.
 
 ## Streams

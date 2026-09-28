@@ -1,7 +1,7 @@
 import type { Effect } from "effect";
 import type { SamplingOptions } from "../../sampling.ts";
 import type { AppAttribution, AppliedEffort, Deployment, RequestedEffort } from "../../domain.ts";
-import type { LocalOverloaded, ProviderFailure } from "../../errors.ts";
+import type { InvalidInput, LocalOverloaded, ProviderFailure } from "../../errors.ts";
 import type { ProviderUsage } from "../accounting.ts";
 import type { ChatMessage } from "../messages.ts";
 
@@ -33,10 +33,10 @@ export interface AdapterCompletion {
 export interface ProviderAdapter {
   readonly complete: (
     request: AdapterRequest,
-  ) => Effect.Effect<AdapterCompletion, ProviderFailure | LocalOverloaded>;
+  ) => Effect.Effect<AdapterCompletion, ProviderFailure | LocalOverloaded | InvalidInput>;
   readonly stream: (
     request: AdapterRequest,
-  ) => Effect.Effect<Response, ProviderFailure | LocalOverloaded>;
+  ) => Effect.Effect<Response, ProviderFailure | LocalOverloaded | InvalidInput>;
   readonly probeUnavailable: (
     deployment: Deployment,
     credential: string | undefined,
