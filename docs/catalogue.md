@@ -108,3 +108,42 @@ A `maxEstimatedUsd` ceiling fails closed when candidate pricing is unknown. Rank
 `catalog.auxiliary.example.json` names `npu-embedding-gemma` and `npu-whisper-turbo`, both sharing `resourceId: strix-halo-npu`. They use the same one-slot admission pool without occupying a GPU permit. Their explicit IDs participate in key allowlists.
 
 The embedding `inputUsdPerMillion` and transcription `requestUsd` accounting rates default to null. The latter is a fixed internal request rate, not an audio-minute price. See [AI hub boundaries](ai-hub.md) for FastFlowLM's placeholder token usage, cancellation and logging limitations.
+
+## System One (Kev and Jev)
+
+`modality: "systemone"` deployments serve TypeSafe's `POST /v1/systemone`.
+They name a `transport`:
+
+- `gufo`: local Kev-4B on Gufo (`gufo serve llm --systemone-model`).
+  `endpoint` is Gufo's `/v1` base; `credentialEnvVar` names the Gufo key.
+  Gufo batches queued requests into one packed pass, so give it a
+  `maxParallel` near its `/v1/runtime` `systemone.max_pending`.
+- `typesafe`: cloud Jev (`location: "cloud"`, endpoint
+  `https://api.typesafe.ai/v1`, `credentialEnvVar: "TYPESAFE_API_KEY"`).
+
+`maxBatchSize` caps questions per request (at most 128) and `maxBodyBytes`
+the request body. `requestUsd` is a per-request rate; otherwise
+`inputUsdPerMillion` prices reported input tokens. Clients may name a
+deployment id, or `kev-latest` / `jev-latest` for the first Kev or Jev
+deployment. The router never substitutes one for the other: their
+probabilities differ.
+
+```json
+{
+  "id": "gufo-kev-4b",
+  "modality": "systemone",
+  "transport": "gufo",
+  "location": "local",
+  "credentialEnvVar": "GUFO_API_KEY",
+  "modelId": "kev-4b",
+  "endpoint": "http://192.168.6.62:8000/v1",
+  "resourceId": "gufo-kev",
+  "capacity": { "maxParallel": 32, "reservedInteractiveSlots": 0 },
+  "maxInputTokens": 32768,
+  "maxBatchSize": 128,
+  "maxBodyBytes": 4194304,
+  "inputUsdPerMillion": 0,
+  "requestUsd": null,
+  "priceVersion": "local-free"
+}
+```
