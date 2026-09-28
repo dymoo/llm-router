@@ -20,12 +20,12 @@ const provenance = {
   asOf: null,
 };
 
-const localHalogen: Deployment = {
+const localGufo: Deployment = {
   id: "local-qwen",
   modelId: "qwen3.8-flash-next",
-  endpoint: "http://127.0.0.1:8731/v1",
+  endpoint: "http://127.0.0.1:8000/v1",
   location: "local",
-  transport: "halogen",
+  transport: "gufo",
   credentialEnvVar: null,
   providerRestriction: null,
   contextLimitTokens: 32_768,
@@ -61,7 +61,7 @@ const localHalogen: Deployment = {
 };
 
 const cloudGlm: Deployment = {
-  ...localHalogen,
+  ...localGufo,
   id: "cloud-glm",
   modelId: "glm-5.3",
   endpoint: "https://openrouter.ai/api/v1",
@@ -80,15 +80,15 @@ const cloudGlm: Deployment = {
 
 const run = <A, E>(effect: Effect.Effect<A, E>): Promise<A> => Effect.runPromise(effect);
 
-test("decodes a valid halogen catalogue entry", async () => {
-  const catalogue = await run(decodeCatalogue([localHalogen]));
-  assert.equal(catalogue[0]?.transport, "halogen");
+test("decodes a valid Gufo catalogue entry", async () => {
+  const catalogue = await run(decodeCatalogue([localGufo]));
+  assert.equal(catalogue[0]?.transport, "gufo");
   assert.equal(catalogue[0]?.location, "local");
 });
 
-test("the optional Gufo catalogue template decodes but cannot be used before endpoint injection", async () => {
+test("the example catalogue's Gufo entry decodes but cannot be used before endpoint injection", async () => {
   const raw: unknown = JSON.parse(
-    await readFile(new URL("../catalog.gufo.example.json", import.meta.url), "utf8"),
+    await readFile(new URL("../catalog.example.json", import.meta.url), "utf8"),
   );
   const [gufo] = await run(decodeCatalogue(raw));
   assert.equal(gufo?.transport, "gufo");
@@ -98,7 +98,7 @@ test("the optional Gufo catalogue template decodes but cannot be used before end
     kind: "graded",
     levels: ["none", "low", "medium", "xhigh"],
   });
-  assert.deepEqual(gufo?.capacity, { maxParallel: 2, reservedInteractiveSlots: 1 });
+  assert.deepEqual(gufo?.capacity, { maxParallel: 24, reservedInteractiveSlots: 4 });
   assert.deepEqual(gufo?.capabilities, { tools: true, json: false, vision: false });
   assert.equal(gufo?.contextLimitTokens, 131_072);
   assert.equal(gufo?.maxOutputTokens, 8_192);
@@ -107,7 +107,7 @@ test("the optional Gufo catalogue template decodes but cannot be used before end
 
 test("unknown Gufo prices deny requests with a hard estimated-spend ceiling", async () => {
   const raw: unknown = JSON.parse(
-    await readFile(new URL("../catalog.gufo.example.json", import.meta.url), "utf8"),
+    await readFile(new URL("../catalog.example.json", import.meta.url), "utf8"),
   );
   const [template] = await run(decodeCatalogue(raw));
   const gufo = { ...template!, endpoint: "http://127.0.0.1:1/v1" };
@@ -203,7 +203,7 @@ test("empty allowlist fails closed before ranking", async () => {
     run(
       checkFeasibility({
         policy,
-        catalogue: [localHalogen, cloudGlm],
+        catalogue: [localGufo, cloudGlm],
         estimatedInputTokens: 100,
         requestedCompletionTokens: 64,
         capabilities: { tools: false, json: false, vision: false },
@@ -217,7 +217,7 @@ test("unsupported vision fails closed", async () => {
     run(
       checkFeasibility({
         policy: POLICY_SUGGESTIONS.Balanced,
-        catalogue: [localHalogen],
+        catalogue: [localGufo],
         estimatedInputTokens: 100,
         requestedCompletionTokens: 64,
         capabilities: { tools: false, json: false, vision: true },
@@ -231,7 +231,7 @@ test("impossible completion tokens fail closed", async () => {
     run(
       checkFeasibility({
         policy: POLICY_SUGGESTIONS.Balanced,
-        catalogue: [localHalogen],
+        catalogue: [localGufo],
         estimatedInputTokens: 100,
         requestedCompletionTokens: 100_000,
         capabilities: { tools: false, json: false, vision: false },
@@ -244,7 +244,7 @@ test("feasible local coding request remains eligible", async () => {
   const eligible = await run(
     checkFeasibility({
       policy: POLICY_SUGGESTIONS.Balanced,
-      catalogue: [localHalogen, cloudGlm],
+      catalogue: [localGufo, cloudGlm],
       estimatedInputTokens: 800,
       requestedCompletionTokens: 512,
       capabilities: { tools: true, json: true, vision: false },

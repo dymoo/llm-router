@@ -35,5 +35,3 @@ jobs:
         run: python -m unittest discover -s services/laya/tests -v
         env:
           PYTHONPATH: services/laya
-      - name: NPU driver-verify script is host-only and must not run here
-        run: test -x scripts/npu-verify.sh

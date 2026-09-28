@@ -27,6 +27,5 @@ docs
 **/.pytest_cache
 **/.mypy_cache
 services/laya/.cache
-halogen-models
 *.hgn
 .DS_Store

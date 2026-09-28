@@ -63,7 +63,7 @@ export function deployment(
 export const localQwen = deployment({
   id: "local-qwen",
   location: "local",
-  transport: "llamacpp",
+  transport: "openai-compatible",
   quality: {
     chat: 0.7,
     coding: 0.55,

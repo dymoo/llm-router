@@ -344,10 +344,8 @@ export function observeHealth(snapshot: HealthSnapshot): void {
       deployment: deployment(item.id),
       location: location(item.location),
       transport: bounded(processState.metricTransports.get(item.id), [
-        "llamacpp",
         "openai-compatible",
         "openrouter",
-        "halogen",
         "gufo",
       ]),
     });

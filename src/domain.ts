@@ -50,13 +50,8 @@ export const serviceTierFor = (
 export const OverloadAction = Schema.Literals(["report", "failover"]);
 export type OverloadAction = typeof OverloadAction.Type;
 
-export const Transport = Schema.Literals([
-  "llamacpp",
-  "openai-compatible",
-  "openrouter",
-  "halogen",
-  "gufo",
-]);
+/** Gufo is the local runtime; openai-compatible is the generic escape hatch. */
+export const Transport = Schema.Literals(["gufo", "openai-compatible", "openrouter"]);
 export type Transport = typeof Transport.Type;
 
 export const SessionBoundary = Schema.Literals(["new-task", "continue", "checkpoint"]);

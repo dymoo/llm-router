@@ -64,7 +64,7 @@ describe("reasoning policy", () => {
     assert.equal(mapAppliedEffort("none", binary), "none");
   });
 
-  it("maps Halogen high onto xhigh", () => {
+  it("maps high onto the next graded level the deployment supports", () => {
     assert.equal(mapAppliedEffort("high", localQwen), "xhigh");
     assert.equal(mapAppliedEffort("xhigh", localQwen), "xhigh");
     assert.equal(mapAppliedEffort("medium", localQwen), "medium");

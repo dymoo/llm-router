@@ -38,11 +38,8 @@ export type { SaturationEvidence } from "./locality.ts";
 export {
   adaptersFor,
   gufoAdapter,
-  halogenAdapter,
-  llamaCppAdapter,
   openAiCompatibleAdapter,
   openRouterAdapter,
-  halogenEffort,
 } from "./adapters/index.ts";
 export type { ProviderAdapter, AdapterRequest, AdapterCompletion } from "./adapters/index.ts";
 export { QueueFull, LockTimeout } from "./failures.ts";

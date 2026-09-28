@@ -27,7 +27,7 @@ async function boundedFetch(
     deadline.clear();
   }
 }
-// Runtime adapters own their probe budgets; Halogen's documented PONG can take 30 seconds.
+// Runtime adapters own their probe budgets.
 const adapters = adaptersFor(fetch);
 
 async function classifier(): Promise<ClassifierHealth> {
