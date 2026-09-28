@@ -112,6 +112,11 @@ export interface RouterWork {
   readonly freshFactsAvailable: boolean;
   readonly cacheEvidence?: CacheEvidence;
   readonly stream: boolean;
+  /**
+   * Client `service_tier: "flex"`: local spare capacity only. Never waits for a
+   * Router permit, never spills or fails over to cloud; a refusal is returned.
+   */
+  readonly serviceTier?: "flex";
 }
 
 export interface RouteHeaders {
@@ -515,6 +520,7 @@ function executeLocked(
     if (
       localUnavailable &&
       (work.policy.overloadAction === "report" ||
+        work.serviceTier === "flex" ||
         work.routing.boundary === "continue" ||
         selected._tag === "Denied")
     ) {
@@ -564,6 +570,7 @@ function executeLocked(
     }
     const spill =
       mode.kind === "interactive" &&
+      work.serviceTier !== "flex" &&
       (classified.assessment === null
         ? chosen.candidates[0]?.deployment.location === "cloud"
         : cloudSpillPermitted(
@@ -614,6 +621,7 @@ function executeLocked(
 
     const overloadFailover =
       mode.kind === "interactive" &&
+      work.serviceTier !== "flex" &&
       work.policy.overloadAction === "failover" &&
       work.routing.boundary !== "continue" &&
       rankedDeployments[0]?.location === "local";
@@ -644,7 +652,7 @@ function executeLocked(
       permit = yield* pool
         .acquire(rankedDeployments, work.policy.priority, {
           requestId: work.requestId,
-          waitMs: overloadFailover ? 0 : waitBudgetMs(work.policy),
+          waitMs: overloadFailover || work.serviceTier === "flex" ? 0 : waitBudgetMs(work.policy),
           spill: spill && work.routing.boundary !== "continue",
           onQueue: (event) => {
             if (event.state === "queued") {
@@ -816,7 +824,7 @@ function executeLocked(
             pin,
             routeDecision,
             // Batch work runs only on runtime-verified spare capacity.
-            mode.kind === "batch-local" ? "flex" : undefined,
+            mode.kind === "batch-local" ? "flex" : work.serviceTier,
           ),
         (held, exit) =>
           Effect.sync(() => {
@@ -857,6 +865,7 @@ function executeLocked(
           }
           if (
             mode.kind !== "interactive" ||
+            work.serviceTier === "flex" ||
             work.policy.overloadAction !== "failover" ||
             work.routing.boundary === "continue" ||
             candidate.deployment.location !== "local"

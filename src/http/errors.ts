@@ -13,6 +13,7 @@ export type HttpErrorCode =
   | "no_eligible_model"
   | "busy"
   | "local_overloaded"
+  | "resource_unavailable"
   | "provider_failure"
   | "timeout"
   | "cancelled"
@@ -200,6 +201,22 @@ function retryAfterOf(error: unknown): number {
   return "cause" in error ? retryAfterOf(error.cause) : 1;
 }
 
+/**
+ * A `service_tier: "flex"` request refused for lack of local capacity, in
+ * OpenAI Flex's shape: HTTP 429 `resource_unavailable`. Other failures pass through.
+ */
+export function flexFailure(error: unknown): unknown {
+  const failure = toHttpFailure(error);
+  return failure.code === "local_overloaded" || failure.code === "busy"
+    ? new HttpFailure(
+        429,
+        "resource_unavailable",
+        "no spare local capacity for a flex request",
+        failure.retryAfterSeconds ?? 1,
+      )
+    : error;
+}
+
 export function toHttpFailure(error: unknown): HttpFailure {
   if (error instanceof HttpFailure) {
     return error;
@@ -251,7 +268,7 @@ export function failureResponse(error: unknown): Response {
   return jsonResponse(
     status,
     errorBody(failure),
-    failure.code === "local_overloaded"
+    failure.code === "local_overloaded" || failure.code === "resource_unavailable"
       ? { "retry-after": String(failure.retryAfterSeconds ?? 1) }
       : undefined,
   );

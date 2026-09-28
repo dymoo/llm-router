@@ -175,6 +175,8 @@ export type ChatCompletionRequest = {
   response_format?: unknown;
   maxCompletionTokens?: number;
   routing: RoutingHint;
+  /** OpenAI `service_tier: "flex"`: local spare capacity only, refused otherwise. */
+  serviceTier?: "flex";
 };
 
 export type RequestCapabilities = {
@@ -213,6 +215,7 @@ export type RoutedWork = {
   classifierInput: ClassifierInput;
   freshFactsAvailable: false;
   stream: boolean;
+  serviceTier?: "flex";
 };
 
 export type SessionHeaders = {

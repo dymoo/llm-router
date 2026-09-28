@@ -745,3 +745,80 @@ test("tool schemas consume key context budget before any model dispatch", async 
   assert.equal(dispatched, false);
   assert.equal(keys.finalizes[0]?.status, "error");
 });
+
+test("flex requests carry the tier and a local refusal is OpenAI's 429 resource_unavailable", async () => {
+  for (const stream of [false, true]) {
+    const keys = memoryKeys();
+    const tiers: unknown[] = [];
+    const overloaded = () => {
+      throw new GatewayFailure(
+        Object.assign(new Error("private overload detail"), {
+          _tag: "LocalOverloaded",
+          retryAfterSeconds: 2,
+          flexRefused: true,
+        }),
+        { deploymentId: "local-qwen" },
+      );
+    };
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: {
+          model: "auto",
+          stream,
+          service_tier: "flex",
+          messages: [{ role: "user", content: "hi" }],
+        },
+      }),
+      inferenceDeps(keys, {
+        complete: async (work) => {
+          tiers.push(work.serviceTier);
+          return overloaded();
+        },
+        stream: async (work) => {
+          tiers.push(work.serviceTier);
+          return overloaded();
+        },
+      }),
+    );
+    // Streams are dispatched before the 200 is committed, so they get a real 429 too.
+    assert.equal(response.status, 429, `stream=${stream}`);
+    assert.equal(response.headers.get("retry-after"), "2");
+    assert.deepEqual(await response.json(), {
+      error: {
+        code: "resource_unavailable",
+        message: "no spare local capacity for a flex request",
+      },
+    });
+    assert.deepEqual(tiers, ["flex"]);
+    assert.equal(keys.finalizes[0]?.errorCode, "LocalOverloaded");
+    assert.equal(keys.finalizes[0]?.deploymentId, "local-qwen");
+  }
+});
+
+test("other service tiers route normally and keep the local overload shape", async () => {
+  for (const tier of ["auto", "default", "priority"]) {
+    const keys = memoryKeys();
+    let seen: unknown = "unset";
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: { model: "auto", service_tier: tier, messages: [{ role: "user", content: "hi" }] },
+      }),
+      inferenceDeps(keys, {
+        complete: async (work) => {
+          seen = work.serviceTier;
+          throw Object.assign(new Error("busy"), { _tag: "LocalOverloaded", retryAfterSeconds: 1 });
+        },
+        stream: async () => {
+          throw new Error("unexpected stream");
+        },
+      }),
+    );
+    assert.equal(seen, undefined, tier);
+    assert.equal(response.status, 503, tier);
+    assert.equal((await response.json()).error.code, "local_overloaded");
+  }
+});

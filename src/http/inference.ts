@@ -10,7 +10,7 @@ import type {
   StreamSuccess,
 } from "./contracts.ts";
 import { classifierInputFor, decodeChatCompletion, requestCapabilities } from "./decode.ts";
-import { errorBody, failureResponse, jsonResponse, toHttpFailure } from "./errors.ts";
+import { errorBody, failureResponse, flexFailure, jsonResponse, toHttpFailure } from "./errors.ts";
 import { sessionResponseHeaders, sseHeaders } from "./headers.ts";
 import { BODY_READ_TIMEOUT_MS, GATEWAY_EFFECT_TIMEOUT_MS, INFERENCE_MAX_BYTES } from "./limits.ts";
 import { bearerToken } from "./security.ts";
@@ -47,6 +47,7 @@ export async function handleChatCompletions(
   const deadline = createDeadline(GATEWAY_EFFECT_TIMEOUT_MS, [request.signal, cancellation.signal]);
   const signal = deadline.signal;
   let streaming = false;
+  let flex = false;
   const finalize: Finalize = (outcome, state) => {
     if (admission === undefined) return Promise.resolve();
     if (finalization !== undefined) return finalization;
@@ -71,6 +72,7 @@ export async function handleChatCompletions(
       timeoutMs: BODY_READ_TIMEOUT_MS,
     });
     const decoded = decodeChatCompletion(body, { newId });
+    flex = decoded.serviceTier === "flex";
     // Open WebUI's chat id is advisory continuity, never user identity or authorization.
     // Explicit routing always wins; namespacing by the authenticated key happens in the router.
     const webuiChat = request.headers.get("x-openwebui-chat-id");
@@ -127,8 +129,19 @@ export async function handleChatCompletions(
       classifierInput: classifierInputFor(decoded, capabilities, inputTokens),
       freshFactsAvailable: false,
       stream: decoded.stream,
+      ...(decoded.serviceTier === undefined ? {} : { serviceTier: decoded.serviceTier }),
     };
     if (decoded.stream) {
+      // Flex never queues, so dispatch before committing the 200: a refusal is
+      // then a real HTTP 429 resource_unavailable, as OpenAI clients expect.
+      const preflighted =
+        work.serviceTier === "flex"
+          ? await deps.gateway.stream(
+              work,
+              { onQueued: () => undefined, onDispatched: () => undefined },
+              signal,
+            )
+          : undefined;
       const response = streamCompletion(
         deps,
         work,
@@ -138,6 +151,7 @@ export async function handleChatCompletions(
         cancellation,
         signal,
         deadline.clear,
+        preflighted,
       );
       streaming = true;
       return response;
@@ -182,7 +196,7 @@ export async function handleChatCompletions(
         Object.assign(new Error("persistence unavailable"), { _tag: "DatabaseError" }),
       );
     }
-    return failureResponse(error);
+    return failureResponse(flex ? flexFailure(error) : error);
   } finally {
     if (!streaming) deadline.clear();
   }
@@ -197,6 +211,7 @@ function streamCompletion(
   cancellation: AbortController,
   signal: AbortSignal,
   clearDeadline: () => void,
+  preflighted?: StreamSuccess,
 ): Response {
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
@@ -240,12 +255,14 @@ function streamCompletion(
   const pump = async (): Promise<void> => {
     try {
       signal.throwIfAborted();
-      await deps.keys.recheck(admission);
-      result = await deps.gateway.stream(
-        work,
-        { onQueued: (ms) => event("queued", ms), onDispatched: (ms) => event("dispatched", ms) },
-        signal,
-      );
+      if (preflighted === undefined) await deps.keys.recheck(admission);
+      result =
+        preflighted ??
+        (await deps.gateway.stream(
+          work,
+          { onQueued: (ms) => event("queued", ms), onDispatched: (ms) => event("dispatched", ms) },
+          signal,
+        ));
       dispatched = true;
       clearInterval(keepalive);
       reader = result.body.getReader();
