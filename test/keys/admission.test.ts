@@ -151,6 +151,25 @@ describe("admission", () => {
     await runtime.dispose();
   });
 
+  it("treats a zero limit as unlimited", async () => {
+    const path = tempDb();
+    const runtime = ManagedRuntime.make(live(path));
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const keys = yield* ApiKeys;
+        const created = yield* keys.createKey({
+          name: "unlimited",
+          expiresAt: null,
+          policy: { ...POLICY_SUGGESTIONS.Standard, maxConcurrent: 0, requestsPerMinute: 0 },
+        });
+        const leases = [];
+        for (let i = 0; i < 5; i += 1) leases.push(yield* keys.admit(created.secret));
+        for (const lease of leases) yield* keys.finalize(lease, { status: "success" });
+      }),
+    );
+    await runtime.dispose();
+  });
+
   it("recovers stale leases from another connection", async () => {
     const path = tempDb();
     const runtime = ManagedRuntime.make(live(path));

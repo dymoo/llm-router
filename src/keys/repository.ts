@@ -759,12 +759,7 @@ export const keyRepositoryLayer = (options: {
       ): Admission {
         {
           const policy = decodePolicyJson(row.policyJson);
-          if (policy.maxConcurrent <= 0) {
-            throw new ConcurrentLimit({ message: "concurrent request limit reached" });
-          }
-          if (policy.requestsPerMinute <= 0) {
-            throw new RateLimited({ message: "request rate limit reached" });
-          }
+          // 0 means unlimited for both abuse limits; revoke a key to block it.
           const running = tx
             .select({ n: sql<number>`count(*)` })
             .from(requests)
@@ -776,7 +771,7 @@ export const keyRepositoryLayer = (options: {
               ),
             )
             .get();
-          if ((running?.n ?? 0) >= policy.maxConcurrent) {
+          if (policy.maxConcurrent > 0 && (running?.n ?? 0) >= policy.maxConcurrent) {
             throw new ConcurrentLimit({ message: "concurrent request limit reached" });
           }
           const minute = utcMinute(now);
@@ -786,7 +781,7 @@ export const keyRepositoryLayer = (options: {
             .where(and(eq(rateLimits.keyId, row.id), eq(rateLimits.minute, minute)))
             .get();
           const count = bucket?.count ?? 0;
-          if (count >= policy.requestsPerMinute) {
+          if (policy.requestsPerMinute > 0 && count >= policy.requestsPerMinute) {
             throw new RateLimited({ message: "request rate limit reached" });
           }
           if (bucket === undefined) {
