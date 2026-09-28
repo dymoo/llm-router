@@ -891,7 +891,7 @@ it("tries every eligible local permit before escalating to cloud", async () => {
 });
 for (const mode of ["classifier", "rules"] as const) {
   describe(`${mode} Gufo admission safety`, () => {
-    it("keeps client flex requests local: no permit wait, no cloud failover", async () => {
+    it("keeps flex local: retries refusals within the wait budget, never fails over", async () => {
       const local = {
         ...localQwen,
         transport: "gufo" as const,
@@ -918,7 +918,7 @@ for (const mode of ["classifier", "rules"] as const) {
           tiers.push((JSON.parse(String(init?.body)) as Record<string, unknown>).service_tier);
           return Response.json(
             { error: { code: "resource_unavailable" } },
-            { status: 429, headers: { "retry-after": "1" } },
+            { status: 429, headers: { "retry-after": "0" } },
           );
         },
       });
@@ -934,7 +934,7 @@ for (const mode of ["classifier", "rules"] as const) {
                     ...balancedPolicy,
                     overloadAction: "failover",
                     localityBias: 1,
-                    maxWaitMs: 1_000,
+                    maxWaitMs: 600,
                   },
                   routing: { sessionId: "flex", boundary: "new-task" },
                 }),
@@ -949,8 +949,56 @@ for (const mode of ["classifier", "rules"] as const) {
           }),
         ).pipe(Effect.provide(layer)),
       );
-      assert.deepEqual(tiers, ["flex"]);
+      // 600 ms of budget at the 250 ms retry floor: attempts at about 0, 250 and 500 ms.
+      assert.ok(tiers.length >= 2 && tiers.length <= 3, `attempts: ${tiers.length}`);
+      assert.ok(tiers.every((tier) => tier === "flex"));
       assert.equal(contacts.filter((address) => address.includes(cloudGlm.id)).length, 0);
+    });
+
+    it("admits a waiting flex request once Gufo has idle compute", async () => {
+      const local = {
+        ...localQwen,
+        transport: "gufo" as const,
+        credentialEnvVar: "GUFO_KEY",
+        modelId: "gufo-local",
+      };
+      let attempts = 0;
+      const layer = modelRouterLayer({
+        catalogue: [{ ...local, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } }],
+        catalogueVersion: "gufo-flex-admit",
+        ...(mode === "rules"
+          ? { mode }
+          : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+        credentials: () => "fixture-key",
+        fetch: async (url) => {
+          const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
+          if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
+          attempts += 1;
+          if (attempts < 3)
+            return Response.json(
+              { error: { code: "resource_unavailable" } },
+              { status: 429, headers: { "retry-after": "0" } },
+            );
+          return Response.json({ ...completionBody, model: local.modelId });
+        },
+      });
+      const admitted = await Effect.runPromise(
+        ModelRouter.use((router) =>
+          router.complete(
+            work({
+              requestId: "flex-admit",
+              serviceTier: "flex",
+              policy: { ...balancedPolicy, priority: "low", localityBias: 1, maxWaitMs: 5_000 },
+              routing: { sessionId: "flex-admit", boundary: "new-task" },
+            }),
+          ),
+        ).pipe(Effect.provide(layer)),
+      );
+      assert.equal(attempts, 3);
+      assert.equal(admitted.headers.deploymentId, local.id);
+      assert.equal(admitted.headers.queued, true);
+      assert.ok(admitted.headers.waitedMs >= 500);
     });
 
     it("handles Gufo pre-enqueue overload per key action and releases its permit", async () => {

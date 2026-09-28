@@ -4,12 +4,12 @@ Both runtimes are supported through the same gateway API, key policies, task ses
 
 ## Supported layouts
 
-| Choice | Generator location | Gateway endpoint | Setup |
-| --- | --- | --- | --- |
-| `llamacpp` | Compose `llamacpp` profile | `http://llamacpp:8080/v1` | Container compatibility lane |
-| `halogen` | Compose `halogen` profile | `http://halogen:8731/v1` | Official HGN + required quality overlay |
-| `llamacpp-native` | Native optimized host process | `http://host.docker.internal:8080/v1` | Existing pwilkin isolated-prefix flow |
-| `cloud` | No local generator | OpenRouter | Explicit cloud-only configuration |
+| Choice            | Generator location            | Gateway endpoint                      | Setup                                   |
+| ----------------- | ----------------------------- | ------------------------------------- | --------------------------------------- |
+| `llamacpp`        | Compose `llamacpp` profile    | `http://llamacpp:8080/v1`             | Container compatibility lane            |
+| `halogen`         | Compose `halogen` profile     | `http://halogen:8731/v1`              | Official HGN + required quality overlay |
+| `llamacpp-native` | Native optimized host process | `http://host.docker.internal:8080/v1` | Existing pwilkin isolated-prefix flow   |
+| `cloud`           | No local generator            | OpenRouter                            | Explicit cloud-only configuration       |
 
 **Run one full-size GPU runtime at a time on the Strix Halo host.** The profiles are alternatives, not a recommendation to load both large models simultaneously. Laya stays in its own process. NPU/WebUI profiles may be added, subject to shared RAM/bandwidth headroom. Keep IOMMU enabled when using the NPU.
 

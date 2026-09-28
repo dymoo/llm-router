@@ -113,8 +113,9 @@ export interface RouterWork {
   readonly cacheEvidence?: CacheEvidence;
   readonly stream: boolean;
   /**
-   * Client `service_tier: "flex"`: local spare capacity only. Never waits for a
-   * Router permit, never spills or fails over to cloud; a refusal is returned.
+   * Gufo `service_tier: "flex"` (see `serviceTierFor`): local idle compute only.
+   * The router retries a refusal until the key's wait budget runs out; flex
+   * never spills or fails over to cloud.
    */
   readonly serviceTier?: "flex";
 }
@@ -648,6 +649,8 @@ function executeLocked(
     let queued = false;
     let waitedMs = 0;
     let permit: Permit | undefined;
+    const routeStartedAt = yield* Clock.currentTimeMillis;
+    const flexDeadline = routeStartedAt + waitBudgetMs(work.policy);
     if (mode.kind === "batch-spill") {
       permit = undefined;
     } else if (mode.kind === "batch-local") {
@@ -662,7 +665,7 @@ function executeLocked(
       permit = yield* pool
         .acquire(rankedDeployments, work.policy.priority, {
           requestId: work.requestId,
-          waitMs: overloadFailover || work.serviceTier === "flex" ? 0 : waitBudgetMs(work.policy),
+          waitMs: overloadFailover ? 0 : waitBudgetMs(work.policy),
           spill: spill && work.routing.boundary !== "continue",
           onQueue: (event) => {
             if (event.state === "queued") {
@@ -843,7 +846,40 @@ function executeLocked(
           }),
       );
 
-    return yield* send(candidate, permit, headers, reservation, decision).pipe(
+    // Gufo admits flex only on idle compute and never holds it waiting; the
+    // router does, retrying after Gufo's Retry-After within the key's budget.
+    const sendRetryingFlex = (
+      held: Permit,
+      routeHeaders: RouteHeaders,
+    ): Effect.Effect<RoutedCompletion | RoutedStream, RouterFailure> =>
+      send(candidate, held, routeHeaders, reservation, decision).pipe(
+        Effect.catchTag("LocalOverloaded", (error) =>
+          Effect.gen(function* () {
+            if (mode.kind !== "interactive" || work.serviceTier !== "flex" || !error.flexRefused)
+              return yield* error;
+            const pause = Math.max(FLEX_RETRY_MIN_MS, (error.retryAfterSeconds ?? 1) * 1_000);
+            const now = yield* Clock.currentTimeMillis;
+            if (now + pause > flexDeadline) return yield* error;
+            yield* Effect.sleep(pause);
+            const next = yield* pool
+              .acquire([candidate.deployment], work.policy.priority, {
+                requestId: work.requestId,
+                waitMs: Math.max(0, flexDeadline - now - pause),
+                spill: false,
+                onOutcome: options.onQueueOutcome,
+              })
+              .pipe(Effect.mapError(() => error));
+            const waited = (yield* Clock.currentTimeMillis) - routeStartedAt;
+            return yield* sendRetryingFlex(next, {
+              ...routeHeaders,
+              queued: true,
+              waitedMs: waited,
+            });
+          }),
+        ),
+      );
+
+    return yield* sendRetryingFlex(permit, headers).pipe(
       Effect.catchTag("LocalOverloaded", (error) =>
         Effect.gen(function* () {
           const reportRejected = () => {
@@ -939,6 +975,9 @@ function executeLocked(
     );
   });
 }
+
+/** Floor on the pause between flex attempts, so a zero Retry-After cannot spin. */
+const FLEX_RETRY_MIN_MS = 250;
 
 function planSpill(
   work: RouterWork,

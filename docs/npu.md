@@ -82,9 +82,9 @@ Compile must print assignment ≥ 0.95 before `LAYA_BACKEND=npu`. Anything less 
 
 ## Mutually exclusive with a Halogen IOMMU-off host
 
-| Host | Halogen candidate | Laya |
-| --- | --- | --- |
-| `amd_iommu=off` (Halogen-only trade, if applied) | that candidate's previous host setting | CPU only |
-| IOMMU enabled | may run, without that Halogen-specific trade | NPU possible after probe |
+| Host                                             | Halogen candidate                            | Laya                     |
+| ------------------------------------------------ | -------------------------------------------- | ------------------------ |
+| `amd_iommu=off` (Halogen-only trade, if applied) | that candidate's previous host setting       | CPU only                 |
+| IOMMU enabled                                    | may run, without that Halogen-specific trade | NPU possible after probe |
 
 Do not treat `amd_iommu=off` as a generic router default. Do not enable NPU on a host that has IOMMU off.

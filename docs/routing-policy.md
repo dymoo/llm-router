@@ -16,9 +16,9 @@ Stack (given, not re-argued here): Effect 4 RC, Drizzle on SQLite, Next.js, T3 E
 
 ## Authority and superseded handoff controls
 
-| Status | Control |
-| --- | --- |
-| **In force** | Explicit classifier-free Rules mode or qualified Laya/Jev assessment followed by deterministic chat routing; locality bias `[0,1]`; high/medium/low priority; hard limits; pinned task continuations; tenant-scoped exact classifier cache in assessed modes; explicit briefs without silent truncation; no classifier fallback; internal admin with optional Basic; metadata-only accounting/analytics; first-class llama.cpp and Halogen choices; SSD-backed PLE table; IOMMU enabled for optional FastFlowLM NPU embeddings/STT; Open WebUI routes through the gateway. |
+| Status         | Control                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **In force**   | Explicit classifier-free Rules mode or qualified Laya/Jev assessment followed by deterministic chat routing; locality bias `[0,1]`; high/medium/low priority; hard limits; pinned task continuations; tenant-scoped exact classifier cache in assessed modes; explicit briefs without silent truncation; no classifier fallback; internal admin with optional Basic; metadata-only accounting/analytics; first-class llama.cpp and Halogen choices; SSD-backed PLE table; IOMMU enabled for optional FastFlowLM NPU embeddings/STT; Open WebUI routes through the gateway.                                                                                                                                                                                                                                                                                                                                    |
 | **Superseded** | Mandatory admin login / `admin_sessions`; priority `interactive \| background`; privacy `local-only \| cloud-allowed`; `routingPreference`; binary `allowCloudOverflow`; silent cloud spill; silent Laya/Jev fallback; silent classifier truncation; NPU while IOMMU is off; sample catalogue numbers as measurements; automatic paid classifier fallback; counters-only admin; treating HTTP 200 as task success; collecting chat transcripts by default; Halogen as required/default local generator; llama.cpp as merely-under-evaluation or not-adopted; treating `.hgn` as portable to llama.cpp; IOMMU-off as a llama.cpp or Router-wide requirement; HumanEval+ thinking-off as thinking-enabled coding proof; generic Vulkan image pin as gfx1151 Qwen3.8-Next-Flash proof; omitting `usage.cost` on local; treating local API price 0 as COGS zero; inventing zero for unknown token counts or rates |
 
 The handoff remains useful for stack intent, reservation-through-execution, and “do not invent live model ids.” It is not authority for the superseded rows.
@@ -39,19 +39,28 @@ Locality bias, cost/quality/latency weights, and priority **cannot** compensate 
 
 Per-key slider in `[0, 1]`. Preference, not a percentage of traffic, not a privacy mode, not a location lock.
 
-| Region | Intent |
-| --- | --- |
-| **0 (less local / cloud-first)** | Complexity may escalate to cloud. Local stays eligible when it meets hard limits. |
-| **Intermediate** | Prefer local. Highly complex work may still use cloud. Verified saturation may also use cloud. |
-| **1 (maximum local)** | Stay local until **verified saturation**. Complexity alone does not escalate. Gateway permit counts and unknown telemetry are not saturation. |
+| Region                           | Intent                                                                                                                                        |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **0 (less local / cloud-first)** | Complexity may escalate to cloud. Local stays eligible when it meets hard limits.                                                             |
+| **Intermediate**                 | Prefer local. Highly complex work may still use cloud. Verified saturation may also use cloud.                                                |
+| **1 (maximum local)**            | Stay local until **verified saturation**. Complexity alone does not escalate. Gateway permit counts and unknown telemetry are not saturation. |
 
 Live UI copy must describe the current value (slider plus sentence), not a hidden enum. Escalation still waits for a **checkpoint** on an existing Session; `continue` does not silently migrate.
 
 ## Priority and queues
 
-Admission and wait order is **high, then medium, then low**. Non-preemptive: in-flight work is not cancelled for a higher key. A deployment reserve for interactive capacity, if configured, is **not** key priority — see [operations.md](operations.md).
+Admission and wait order is **high, then medium, then low**. Non-preemptive: in-flight work is not cancelled for a higher key. A deployment's `reservedInteractiveSlots` keep that many permits for **high** keys only — see [operations.md](operations.md).
 
-Low-priority, high-locality work that is waiting for local capacity must surface a **visible queued notice** to the client. It must not silently spill to cloud.
+Priority also sets the Gufo service tier (Gufo `docs/ROUTER.md`):
+
+| Priority     | Tier     | Behaviour                                                                                                                                                                                                                                                     |
+| ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| high, medium | default  | Router permits and queue; overload per `overloadAction`                                                                                                                                                                                                       |
+| low          | **flex** | Idle local compute only. Gufo refuses flex while default work is queued or prefilling; the Router retries after its `Retry-After` until `maxWaitMs`, then returns 429 `resource_unavailable`. Never spills or fails over to cloud, whatever the locality bias |
+
+Any key can ask for flex per request with `service_tier: "flex"`; a low key cannot ask for more. Gufo measured flex as a trickle beside agent load, so keep medium for work that must finish while the machine is busy, and low for work that can wait for idle time. Deferred bulk work belongs on `/v1/batches`.
+
+Work waiting for local capacity must surface a **visible queued notice** to the client. It must not silently spill to cloud.
 
 Do not claim a per-stream TPS floor or a measured host throughput. Those are unverified on this hardware.
 
@@ -70,11 +79,11 @@ This action is separate from continuous Locality bias and must not turn incident
 
 Every field is editable. Biases and locality use sliders with live descriptions. Names are starting points for Dylan’s keys, a balanced key, and a cheap background key — not locked profiles.
 
-| Suggestion | Priority | Ranking intent | Locality intent | Queue |
-| --- | --- | --- | --- | --- |
-| Dylan | high | Quality-biased; usually cloud | Low locality bias; complexity may escalate | Does not sit behind low work |
-| Balanced | medium | Cost-biased; usually local | Mid-high locality; complexity or verified saturation may use cloud | After high |
-| Free Vibecode | low | Strong cost | Near-maximum local; escalate only on verified saturation | Local wait with a visible notice |
+| Suggestion    | Priority | Ranking intent                | Locality intent                                                    | Queue                                 |
+| ------------- | -------- | ----------------------------- | ------------------------------------------------------------------ | ------------------------------------- |
+| Dylan         | high     | Quality-biased; usually cloud | Low locality bias; complexity may escalate                         | Does not sit behind low work          |
+| Balanced      | medium   | Cost-biased; usually local    | Mid-high locality; complexity or verified saturation may use cloud | After high                            |
+| Free Vibecode | low      | Strong cost                   | Local idle compute only (flex)                                     | Up to 30 s for idle compute, then 429 |
 
 Context, completion, RPM, concurrency, wait, allowlist, and `maxEstimatedUsd` remain operator-chosen. Earlier handoff tables (65k/131k/32k caps, 0.6/0.7 cost weights, `interactive`/`background`) are **not** mandatory. Relative intent stands: Dylan may receive a larger allowance than Free Vibecode; no number here is a tokenizer proof that a deployment can accept that cap.
 
@@ -111,11 +120,11 @@ Assessment confidence is concentration of the classifier’s output distribution
 
 These are different facts. Analytics and COGS must not collapse them.
 
-| Signal | What it is |
-| --- | --- |
-| **Cache hit** | Observed cached **input tokens** on the generator, deployment-specific |
+| Signal                     | What it is                                                             |
+| -------------------------- | ---------------------------------------------------------------------- |
+| **Cache hit**              | Observed cached **input tokens** on the generator, deployment-specific |
 | **Classifier exact cache** | Same Assessment reused for the same key/backend/schema/state/catalogue |
-| **Session reuse** | `continue` from a pin; affinity only |
+| **Session reuse**          | `continue` from a pin; affinity only                                   |
 
 A pin, a repeated prompt, or a provider restriction is not a generation cache hit and must not apply a cached-input price. Deliberate migration at a checkpoint should expect a cold prefill.
 
@@ -123,12 +132,12 @@ A pin, a repeated prompt, or a provider restriction is not a generation cache hi
 
 Track per key, priority, and deployment, without storing prompts. Responses expose OpenRouter-compatible `usage.cost` on **both** non-stream completions and the **final** streaming usage. Official nested field schema is owned/verified with the HTTP path — this file does not invent extra usage keys.
 
-| Kind | Meaning |
-| --- | --- |
-| Actual (cloud) | Provider-reported `usage.cost` and token fields, **passed through** |
+| Kind               | Meaning                                                                                                                                                                                 |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Actual (cloud)     | Provider-reported `usage.cost` and token fields, **passed through**                                                                                                                     |
 | Accounting (local) | Internal cost from configured per-deployment **input / cached-input / output** rates × observed tokens. Zero external API bill does **not** omit the field. This is **not** an invoice. |
-| Estimate | Catalogue prices × estimated tokens, with provenance, used for ranking/`maxEstimatedUsd` |
-| Unknown | Missing, cancelled, incomplete, or missing rates — **never coerce to zero** |
+| Estimate           | Catalogue prices × estimated tokens, with provenance, used for ranking/`maxEstimatedUsd`                                                                                                |
+| Unknown            | Missing, cancelled, incomplete, or missing rates — **never coerce to zero**                                                                                                             |
 
 Preserve prompt, completion, cached-input, and reasoning **counts**. Do **not** add reasoning tokens twice (once as reasoning and again as completion) when computing accounting cost.
 
@@ -180,14 +189,15 @@ The exact selected llama.cpp/ROCm/guide revisions are recorded in [llamacpp.md](
 - Halogen `.hgn` weights are **not portable** to llama.cpp. The unmodified-image redistribution restriction applies only to Halogen. Its quality overlay is required explicitly; see [halogen.md](halogen.md).
 - User-supplied **HumanEval+** screenshot (thinking **off**, temperature **0**, max tokens **1024**). Does **not** isolate quant vs engine vs template. **Not** proof for thinking-enabled coding-agent work. Not this repository’s measurements:
 
-| Label | Pass | Time |
-| --- | --- | --- |
-| llama Q6_K_v7 | 82.9% | 11.26s |
-| llama Heretic2 IQ4_XS NGQ4 | 79.3% | 4.16s |
-| Halogen official overlay | 78% | 13.82s |
-| Halogen Heretic2 BYO | 61% | 4.32s |
+| Label                      | Pass  | Time   |
+| -------------------------- | ----- | ------ |
+| llama Q6_K_v7              | 82.9% | 11.26s |
+| llama Heretic2 IQ4_XS NGQ4 | 79.3% | 4.16s  |
+| Halogen official overlay   | 78%   | 13.82s |
+| Halogen Heretic2 BYO       | 61%   | 4.32s  |
 
-  The 61% BYO row is a different Halogen configuration from official+overlay (78%). Neither row makes Halogen the required default.
+The 61% BYO row is a different Halogen configuration from official+overlay (78%). Neither row makes Halogen the required default.
+
 - `amd_iommu=off` was a **prior Halogen-host** prefill approval. It is **not** a llama.cpp requirement. **No host boot changes have been performed** from this tree. It would disable the NPU; default Laya remains CPU until an IOMMU-on NPU path is verified — [npu.md](npu.md).
 - Cloud chat is explicitly OpenRouter `z-ai/glm-5.3-flash`, with the selected endpoint and dated prices in [catalogue.md](catalogue.md). Public metadata was checked; paid generation and backend-specific graded effort were not. Binary thinking reports applied `on` truthfully.
 - Co-tenancy of CPU Laya with a local GPU generator, measured TPS/TTFT, and container NPU passthrough are unverified.

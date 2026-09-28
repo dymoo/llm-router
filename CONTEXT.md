@@ -81,8 +81,12 @@ A continuous per-key preference in `[0, 1]` for keeping work on local deployment
 _Avoid_: local-only, privacy, routingPreference, allowCloudOverflow, cloud-overflow
 
 **Priority**:
-A non-preemptive admission rank of high, medium, or low.
-_Avoid_: interactive, background, preemption, SLA, reservedInteractiveSlots (deployment reserve, not key priority)
+A non-preemptive admission rank of high, medium, or low. Low also means Flex: idle local compute only.
+_Avoid_: interactive, background, preemption, SLA, reservedInteractiveSlots (deployment reserve for high keys, not a priority)
+
+**Flex**:
+Gufo's idle-compute service tier (OpenAI `service_tier: "flex"`). Low-priority keys always use it and any key may ask for it. The Router waits for it within the Key's `maxWaitMs`; it never goes to cloud.
+_Avoid_: batch, low-cost cloud, preemptible, overload failover
 
 **Verified saturation**:
 Evidence from the local runtime that it cannot accept more work. Gateway slot counts and missing telemetry are not saturation.

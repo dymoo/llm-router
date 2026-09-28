@@ -11,32 +11,33 @@ Facts, estimates, and unknowns are separated. Every decisive claim cites its sou
 
 ## Identity and exact pins
 
-| What | Value | Source |
-| --- | --- | --- |
-| Repo | https://github.com/Aristo94/EngramHalo.cpp (fork of `ggml-org/llama.cpp`) | repo view, inspected 2026-09-20 |
-| Branch | `strix-halo-qwen4exp` (default) | repo view |
-| HEAD at inspection | `cf4cd1eeecda8384f7418eb0221738ab874effe8` — docs-only commit (committer date 2026-09-20); code-identical parent `a7b67eb8e10366ee97fc8d4c4d0ddc2f8adf994a` | https://api.github.com/repos/Aristo94/EngramHalo.cpp/commits/strix-halo-qwen4exp |
-| Base | ggml-org PR #27742 lineage: PR head `af1ffaf37` at measurement time, merged upstream 2026-08-27 as `6c84c7d5`; branch is **rebased onto master on top of that merge** and tracks current upstream (Sep 19–20 commits #29115/#29108/#28832/#29094/#28770 visible in history) | https://github.com/Aristo94/EngramHalo.cpp/blob/strix-halo-qwen4exp/docs/strix-halo/README.md; commit history page |
-| Reference builds quoted in benchmarks | "stock" `b8bdf73bb` (build 10678) and best-pre-patch `243914706` (build 10695) of the PR branch | https://github.com/Aristo94/EngramHalo.cpp/blob/strix-halo-qwen4exp/docs/strix-halo/BENCHMARKS.md |
-| Backend scope | **ROCm/HIP only** (gfx1151). Vulkan/RADV on this branch is reported a net loss (prefill ~half of stock, MTP collapse 6–7 t/s — unverified third-party report); the fork's own Vulkan cross-check covers plain pp/tg only, not MTP | fork docs/strix-halo/README.md |
-| ROCm | 7.14 (`amdrocm-runtime7.14`, `amdrocm-blas7.14-gfx1151`) via the shipped container; kyuz0 `rocm-10.0-engramhalo` image is an **experimental** ROCm 10.0 port, manual-build only | Dockerfile.rocm-7.14; https://github.com/kyuz0/amd-strix-halo-toolboxes |
-| License | llama.cpp MIT; model **Qwen Community License 1.0** (MaaS/AI-Work-Assistant clause — relevant to a commercial router) | fork README; HF card |
+| What                                  | Value                                                                                                                                                                                                                                                                       | Source                                                                                                             |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Repo                                  | https://github.com/Aristo94/EngramHalo.cpp (fork of `ggml-org/llama.cpp`)                                                                                                                                                                                                   | repo view, inspected 2026-09-20                                                                                    |
+| Branch                                | `strix-halo-qwen4exp` (default)                                                                                                                                                                                                                                             | repo view                                                                                                          |
+| HEAD at inspection                    | `cf4cd1eeecda8384f7418eb0221738ab874effe8` — docs-only commit (committer date 2026-09-20); code-identical parent `a7b67eb8e10366ee97fc8d4c4d0ddc2f8adf994a`                                                                                                                 | https://api.github.com/repos/Aristo94/EngramHalo.cpp/commits/strix-halo-qwen4exp                                   |
+| Base                                  | ggml-org PR #27742 lineage: PR head `af1ffaf37` at measurement time, merged upstream 2026-08-27 as `6c84c7d5`; branch is **rebased onto master on top of that merge** and tracks current upstream (Sep 19–20 commits #29115/#29108/#28832/#29094/#28770 visible in history) | https://github.com/Aristo94/EngramHalo.cpp/blob/strix-halo-qwen4exp/docs/strix-halo/README.md; commit history page |
+| Reference builds quoted in benchmarks | "stock" `b8bdf73bb` (build 10678) and best-pre-patch `243914706` (build 10695) of the PR branch                                                                                                                                                                             | https://github.com/Aristo94/EngramHalo.cpp/blob/strix-halo-qwen4exp/docs/strix-halo/BENCHMARKS.md                  |
+| Backend scope                         | **ROCm/HIP only** (gfx1151). Vulkan/RADV on this branch is reported a net loss (prefill ~half of stock, MTP collapse 6–7 t/s — unverified third-party report); the fork's own Vulkan cross-check covers plain pp/tg only, not MTP                                           | fork docs/strix-halo/README.md                                                                                     |
+| ROCm                                  | 7.14 (`amdrocm-runtime7.14`, `amdrocm-blas7.14-gfx1151`) via the shipped container; kyuz0 `rocm-10.0-engramhalo` image is an **experimental** ROCm 10.0 port, manual-build only                                                                                             | Dockerfile.rocm-7.14; https://github.com/kyuz0/amd-strix-halo-toolboxes                                            |
+| License                               | llama.cpp MIT; model **Qwen Community License 1.0** (MaaS/AI-Work-Assistant clause — relevant to a commercial router)                                                                                                                                                       | fork README; HF card                                                                                               |
 
 ### The patch series (commit → effect)
 
-| SHA | Commit | Effect |
-| --- | --- | --- |
-| `abda7ddb6` | CUDA/HIP: skip fully-masked warp slices in FA vec; tune head-256 for RDNA | backend-generic FA vector-kernel early exit; picks vector kernel for qwen4exp shape (hd 256, GQA 2, q8_0 KV) |
-| `af25fb85e` | HIP: chunked GATED_DELTA_NET prefill (opt-in) | opt-in on RDNA3/RDNA4 via `GGML_HIP_GDN_CHUNK=1`; **not active in any published number** |
-| `69f44d1b5` | mmap: prefetch lazily read rows; IQ4_NL get_rows for non-QK_K rows | batched `posix_madvise` readahead for SSD-backed engram rows; **without the IQ4_NL `get_rows` path the 160-value engram gather cannot run on the GPU at all** |
-| `a2ff187ed` | qwen4exp: gather top-k KV rows in QSA decode instead of dense masking | the decode-numerics-touching patch; graph-level gather, env-gated (details below) |
-| `31b71a27f` | qwen4exp: MTP draft head and mtp-only sidecar loading | standalone `-md` sidecar support; initial unmasked-nextn readback crash fixed |
-| `e2e0976d1` | convert: export the qwen4exp MTP block | `convert_hf_to_gguf.py --remote --mtp` builds the sidecar |
-| `b6da37ae2` | mmap: drop page cache behind uploaded tensors during load | transient load peak −~88% (28 GiB → 2 GiB extra cache; free mem during upload 0.8 → 17+ GiB) |
+| SHA         | Commit                                                                    | Effect                                                                                                                                                        |
+| ----------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `abda7ddb6` | CUDA/HIP: skip fully-masked warp slices in FA vec; tune head-256 for RDNA | backend-generic FA vector-kernel early exit; picks vector kernel for qwen4exp shape (hd 256, GQA 2, q8_0 KV)                                                  |
+| `af25fb85e` | HIP: chunked GATED_DELTA_NET prefill (opt-in)                             | opt-in on RDNA3/RDNA4 via `GGML_HIP_GDN_CHUNK=1`; **not active in any published number**                                                                      |
+| `69f44d1b5` | mmap: prefetch lazily read rows; IQ4_NL get_rows for non-QK_K rows        | batched `posix_madvise` readahead for SSD-backed engram rows; **without the IQ4_NL `get_rows` path the 160-value engram gather cannot run on the GPU at all** |
+| `a2ff187ed` | qwen4exp: gather top-k KV rows in QSA decode instead of dense masking     | the decode-numerics-touching patch; graph-level gather, env-gated (details below)                                                                             |
+| `31b71a27f` | qwen4exp: MTP draft head and mtp-only sidecar loading                     | standalone `-md` sidecar support; initial unmasked-nextn readback crash fixed                                                                                 |
+| `e2e0976d1` | convert: export the qwen4exp MTP block                                    | `convert_hf_to_gguf.py --remote --mtp` builds the sidecar                                                                                                     |
+| `b6da37ae2` | mmap: drop page cache behind uploaded tensors during load                 | transient load peak −~88% (28 GiB → 2 GiB extra cache; free mem during upload 0.8 → 17+ GiB)                                                                  |
 
 Sources: each commit page under https://github.com/Aristo94/EngramHalo.cpp/commits/strix-halo-qwen4exp and the commit table in docs/strix-halo/README.md.
 
 Two additional **container patches** (not branch commits) are required to reproduce the measured configuration:
+
 - `llama-cpp-25992-rocm-host-buffer.patch` — disables ROCm host-buffer compute on integrated GPUs. **Correctness workaround** for ggml-org llama.cpp issue #25992 (`-np > 1` + `--kv-unified` can return other requests' responses verbatim); based on still-unmerged upstream PR #25863. Also determines where engram gathers get scheduled with `-lm none`.
 - `llama-cpp-qwen38-per-buffer-mmap.patch` — per-shard-buffer mmap tracking; stops whole-file prefetch. **This is what lets the sparse engram tensor stay mmap-backed on CPU while dense weights upload to the GPU.**
 
@@ -60,12 +61,12 @@ Sources: https://github.com/Aristo94/EngramHalo.cpp/blob/strix-halo-qwen4exp/doc
 
 ### Flags that control it (the short answer)
 
-| Goal | Flags |
-| --- | --- |
-| SSD offload (full 262K window, ~1–1.5 GiB resident) | default (`-lm mmap`) — explicit: `-lm mmap --tensor-read-lazy on` (`on` only makes intent explicit; default `auto` already covers every lazy-marked tensor above 4 GiB, incl. this one) |
-| Full-resident table (fastest, interactive, ≤48K practical) | `-lm none` → 26.8 GiB **pinned** host memory (regular tensor; no lazy path) |
+| Goal                                                           | Flags                                                                                                                                                                                          |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SSD offload (full 262K window, ~1–1.5 GiB resident)            | default (`-lm mmap`) — explicit: `-lm mmap --tensor-read-lazy on` (`on` only makes intent explicit; default `auto` already covers every lazy-marked tensor above 4 GiB, incl. this one)        |
+| Full-resident table (fastest, interactive, ≤48K practical)     | `-lm none` → 26.8 GiB **pinned** host memory (regular tensor; no lazy path)                                                                                                                    |
 | Frequent reloads without discarding uploaded-weight page cache | `LLAMA_MMAP_DROP_BEHIND=1`: unmap only. Default `2` also invalidates copied-weight file pages; `0` disables dropping. Lazy tensors that remain mapped are excluded from this loader operation. |
-| **Forbidden** | `--no-mmap` — silently disables the lazy-read path |
+| **Forbidden**                                                  | `--no-mmap` — silently disables the lazy-read path                                                                                                                                             |
 
 Sources: docs/strix-halo/README.md "Recommended server configs", "Known limits"; `src/models/qwen4exp.cpp`.
 
@@ -89,12 +90,12 @@ Main verified these `DROP_BEHIND` modes directly in [`llama-model-loader.cpp` at
 
 ### Latency / cache-warm behavior (summary)
 
-| Metric | Value | Conditions |
-| --- | --- | --- |
-| Cold-start penalty | first request 20–55% slow; worst observed 17.8 vs 39.3 t/s | right after full `-lm none` load |
-| Repeat-request inflation | up to ~35% fast (52.7 vs 39.3) | identical request again: prompt cache + ngram speculator has seen the answer |
-| Synthetic-prompt MTP inflation | decode reads 2–3× high (73 t/s observed) | random-word filler prompts; measure MTP decode on real payloads only |
-| Load time | seconds (mmap) vs minutes (pin) | SSD vs RAM mode |
+| Metric                         | Value                                                      | Conditions                                                                   |
+| ------------------------------ | ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Cold-start penalty             | first request 20–55% slow; worst observed 17.8 vs 39.3 t/s | right after full `-lm none` load                                             |
+| Repeat-request inflation       | up to ~35% fast (52.7 vs 39.3)                             | identical request again: prompt cache + ngram speculator has seen the answer |
+| Synthetic-prompt MTP inflation | decode reads 2–3× high (73 t/s observed)                   | random-word filler prompts; measure MTP decode on real payloads only         |
+| Load time                      | seconds (mmap) vs minutes (pin)                            | SSD vs RAM mode                                                              |
 
 Source: BENCHMARKS.md "Measurement pitfalls".
 
@@ -102,12 +103,12 @@ Source: BENCHMARKS.md "Measurement pitfalls".
 
 ## Actual quant support and model files
 
-| File | Size | Note |
-| --- | --- | --- |
-| unsloth `Qwen3.8-Flash-Next-GGUF` UD-Q2_K_XL → UD-Q6_K_XL (IQ1_M/IQ1_S/IQ3_XXS/Q3_K_XL/IQ4_XS/Q4_K_XL/Q5_K_XL/Q6_K_XL, Q8_0, BF16) | 76.3 GiB (IQ3_XXS) / 87.2 (IQ4_XS) / 103.7 (Q4_K_XL) / 83.8 (Q3_K_XL) | published configs use UD-IQ3_XXS and UD-IQ4_XS |
-| EasiiX `mtp-Qwen3.8-Flash-Next-hc-Q8_0.gguf` | 4.1 GB | **use this one**; includes hyper-connection tensors required by llama.cpp since ggml-org#28901 |
-| ~~EasiiX `mtp-Qwen3.8-Flash-Next-Q8_0.gguf`~~ | 4.1 GB | **DEPRECATED 2026-09-19** — current builds refuse it (`check_tensor_dims: tensor 'output_hc_norm.weight' not found`). Note the fork README's configs A/B still name the old file — substitute `-hc-` |
-| dzannotti / other community exports | — | old format (missing `nextn.hc_head_*`, alignment/split-count checks) — rejected by the merged reader; standalone-load fails outright on pre-fork trunks (julianmb issue #1) |
+| File                                                                                                                               | Size                                                                  | Note                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| unsloth `Qwen3.8-Flash-Next-GGUF` UD-Q2_K_XL → UD-Q6_K_XL (IQ1_M/IQ1_S/IQ3_XXS/Q3_K_XL/IQ4_XS/Q4_K_XL/Q5_K_XL/Q6_K_XL, Q8_0, BF16) | 76.3 GiB (IQ3_XXS) / 87.2 (IQ4_XS) / 103.7 (Q4_K_XL) / 83.8 (Q3_K_XL) | published configs use UD-IQ3_XXS and UD-IQ4_XS                                                                                                                                                       |
+| EasiiX `mtp-Qwen3.8-Flash-Next-hc-Q8_0.gguf`                                                                                       | 4.1 GB                                                                | **use this one**; includes hyper-connection tensors required by llama.cpp since ggml-org#28901                                                                                                       |
+| ~~EasiiX `mtp-Qwen3.8-Flash-Next-Q8_0.gguf`~~                                                                                      | 4.1 GB                                                                | **DEPRECATED 2026-09-19** — current builds refuse it (`check_tensor_dims: tensor 'output_hc_norm.weight' not found`). Note the fork README's configs A/B still name the old file — substitute `-hc-` |
+| dzannotti / other community exports                                                                                                | —                                                                     | old format (missing `nextn.hc_head_*`, alignment/split-count checks) — rejected by the merged reader; standalone-load fails outright on pre-fork trunks (julianmb issue #1)                          |
 
 Sidecar contract (first-party issue): a working sidecar keeps `block_count = 49`, tensors at `blk.48.*` (49-entry `compress_ratios`, MTP block is a full-attention layer), and the runtime selects the trailing block via `n_main = n_layer - nextn_predict_layers`. The hyper-connection combiner (`nextn.hc_*`) is the difference between 0.87–0.96 and ~0.47 draft acceptance — mean-pooling the streams collapses acceptance. (source: https://github.com/Aristo94/EngramHalo.cpp/issues/1 comments)
 
@@ -176,23 +177,23 @@ Free rules (cost nothing): never bf16 KV (hd-256 FA re-converts the whole cache 
 
 Measured 2026-08-27 on one machine (GMKtec EVO-X2, Ryzen AI MAX+ 395, 40 CU RDNA 3.5 gfx1151, 96 GB LPDDR5X-8000 ≈256 GB/s theoretical, OS sees 92 GiB). q8_0 KV, temp 0. (BENCHMARKS.md)
 
-| q8_0 KV, temp 0 | stock (IQ3) | tuned IQ3, SSD | tuned IQ3, RAM | tuned IQ4_XS, SSD |
-|---|---|---|---|---|
-| tg400 code, MTP @ d0 | 24.4 [anchor] | 35.3 | **39.3** | 31.1 |
-| tg300 prose, MTP @ d0 | 22.4 | 25.1 | 25.3 | 23.2 |
-| tg300 code, MTP @ d78k | ~10 | 21.3 | — | **24.7** |
-| tg300 code, MTP @ d156k | ~6 | **12.1** | — | 11.4 |
-| pp4096 @ d0 | 352 | 396 [server, true SSD-lazy] | 496 [bench] | 502 [bench, cached mmap] |
-| pp @ d131k (delta rate) | 91 | 192 | — | — |
-| pp avg over 156K prompt | — | 192 | — | 216 |
-| resident engram | 26.8 GiB | ~1 GiB | 26.8 GiB pinned | ~1 GiB |
-| max context (single slot) | 262K | 262K (164K w/ MTP) | 131K measured | 262K |
+| q8_0 KV, temp 0           | stock (IQ3)   | tuned IQ3, SSD              | tuned IQ3, RAM  | tuned IQ4_XS, SSD        |
+| ------------------------- | ------------- | --------------------------- | --------------- | ------------------------ |
+| tg400 code, MTP @ d0      | 24.4 [anchor] | 35.3                        | **39.3**        | 31.1                     |
+| tg300 prose, MTP @ d0     | 22.4          | 25.1                        | 25.3            | 23.2                     |
+| tg300 code, MTP @ d78k    | ~10           | 21.3                        | —               | **24.7**                 |
+| tg300 code, MTP @ d156k   | ~6            | **12.1**                    | —               | 11.4                     |
+| pp4096 @ d0               | 352           | 396 [server, true SSD-lazy] | 496 [bench]     | 502 [bench, cached mmap] |
+| pp @ d131k (delta rate)   | 91            | 192                         | —               | —                        |
+| pp avg over 156K prompt   | —             | 192                         | —               | 216                      |
+| resident engram           | 26.8 GiB      | ~1 GiB                      | 26.8 GiB pinned | ~1 GiB                   |
+| max context (single slot) | 262K          | 262K (164K w/ MTP)          | 131K measured   | 262K                     |
 
 **Which config gives 39 tok/s:** config A — single slot, `--parallel 1`, UD-IQ3_XXS, q8_0 KV, `-lm none` (table fully resident), MTP combo `draft-mtp,ngram-mod`, n-max 4, p-min 0.75, hipBLASLt, warm (non-cold, fresh prompt), 400-token code output at temperature 0. The like-for-like anchor in the same patched build without MTP is 24.4 t/s (code, same prompt) — MTP adds +61% at acceptance ~83%. (BENCHMARKS.md flag matrix + speculation table; docs/strix-halo/README.md config A)
 
 Depth curves (IQ3, q8_0 KV, t4, ub2048, hipBLASLt, SSD mode): prefill before→after patches at d131k 90.9→192.3 t/s; decode at d131k 7.02→9.53; deepest stage measured 236,730 real tokens (pp delta 137.9, decode 6.45). Residual depth decay attributed to the QSA indexer still scoring O(ctx/4) blocks/token. (BENCHMARKS.md)
 
-MTP at depth (server, real code payloads, Q8_0 sidecar, n-max 4, p-min 0.75): 36.4 t/s @~0K (79.6% acceptance) → 21.6 @77.7K (73.5%) → 20.8 @156.4K (66.0%); the MTP win *grows* with depth (+47% → +63% → >2× vs plain). Sidecar costs prefill "essentially nothing" (within a few % of the plain bench curve). (BENCHMARKS.md)
+MTP at depth (server, real code payloads, Q8_0 sidecar, n-max 4, p-min 0.75): 36.4 t/s @~0K (79.6% acceptance) → 21.6 @77.7K (73.5%) → 20.8 @156.4K (66.0%); the MTP win _grows_ with depth (+47% → +63% → >2× vs plain). Sidecar costs prefill "essentially nothing" (within a few % of the plain bench curve). (BENCHMARKS.md)
 
 Flag matrix wins: `-t 4` (tg @16K 13.4→15.7), f16/q8_0 KV over bf16 (18.5/18.1 @16K), `ROCBLAS_USE_HIPBLASLT=1` (pp only), UD-IQ4_XS prefill faster than IQ3 (281–404 vs 346–468 in various modes) but ~7% decode tax. (BENCHMARKS.md)
 
@@ -213,11 +214,11 @@ Provenance caveat: the speculation-table campaign binaries predate the shipped M
 Only **pre-patch stock** `llama-batched-bench` exists (b8bdf73bb, IQ3, q8_0 KV, ub 512, -c 16384, npp 2048, ntg 64) — not re-measured on the patched branch, no MTP:
 
 | parallel | pp aggregate | decode aggregate | per-stream decode |
-|---|---|---:|---:|
-| 1 | 351.7 | 22.6 | 22.6 |
-| 2 | 362.9 | 36.9 | 18.4 |
-| 4 | 358.7 | **54.7** (~2.4×) | 13.7 |
-| 5 | 358.5 | 56.0 (saturated) | 11.2 |
+| -------- | ------------ | ---------------: | ----------------: |
+| 1        | 351.7        |             22.6 |              22.6 |
+| 2        | 362.9        |             36.9 |              18.4 |
+| 4        | 358.7        | **54.7** (~2.4×) |              13.7 |
+| 5        | 358.5        | 56.0 (saturated) |              11.2 |
 
 Author: "expect at least the same, it has not been re-measured here." **n=8 was never measured**; aggregate saturates at n=5 on stock. (BENCHMARKS.md "Multi-slot throughput")
 

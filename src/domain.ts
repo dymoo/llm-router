@@ -41,6 +41,12 @@ export type Priority = typeof Priority.Type;
 export const Location = Schema.Literals(["local", "cloud"]);
 export type Location = typeof Location.Type;
 
+/** Low-priority keys run on Gufo's flex tier (idle compute only); any key may ask for flex. */
+export const serviceTierFor = (
+  priority: Priority,
+  requested: "flex" | undefined,
+): "flex" | undefined => requested ?? (priority === "low" ? "flex" : undefined);
+
 export const OverloadAction = Schema.Literals(["report", "failover"]);
 export type OverloadAction = typeof OverloadAction.Type;
 
@@ -193,7 +199,7 @@ export const POLICY_SUGGESTIONS = {
     allowedModels: null,
     requestsPerMinute: 30,
     maxConcurrent: 1,
-    maxWaitMs: 5_000,
+    maxWaitMs: 30_000,
     overloadAction: "report",
     maxEstimatedUsd: null,
     bias: { cost: 1, quality: 0.3, latency: 0.05 },

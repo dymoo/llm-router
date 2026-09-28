@@ -49,7 +49,7 @@ export const POLICY_PRESETS: readonly PolicyPreset[] = [
   {
     id: "free-vibecode",
     label: "Free Vibecode",
-    summary: "Low priority, strong cost bias, local until verified saturation.",
+    summary: "Low priority: idle local compute only, strong cost bias.",
     policy: {
       priority: "low",
       localityBias: 0.95,
@@ -58,7 +58,7 @@ export const POLICY_PRESETS: readonly PolicyPreset[] = [
       allowedModels: ALL_DEPLOYMENTS,
       requestsPerMinute: 30,
       maxConcurrent: 1,
-      maxWaitMs: 5_000,
+      maxWaitMs: 30_000,
       overloadAction: "report",
       maxEstimatedUsd: null,
       bias: { cost: 1, quality: 0.3, latency: 0.05 },

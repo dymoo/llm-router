@@ -1,4 +1,5 @@
 import { createDeadline } from "../deadline.ts";
+import { serviceTierFor } from "../domain.ts";
 import { GatewayFailure } from "./gateway-failure.ts";
 import { readJsonObject } from "./body.ts";
 import type {
@@ -72,7 +73,6 @@ export async function handleChatCompletions(
       timeoutMs: BODY_READ_TIMEOUT_MS,
     });
     const decoded = decodeChatCompletion(body, { newId });
-    flex = decoded.serviceTier === "flex";
     // Open WebUI's chat id is advisory continuity, never user identity or authorization.
     // Explicit routing always wins; namespacing by the authenticated key happens in the router.
     const webuiChat = request.headers.get("x-openwebui-chat-id");
@@ -111,6 +111,8 @@ export async function handleChatCompletions(
       });
     }
     admission = await deps.keys.recheck(admission);
+    const serviceTier = serviceTierFor(admission.policy.priority, decoded.serviceTier);
+    flex = serviceTier === "flex";
     const work: RoutedWork = {
       requestId: admission.requestId,
       keyId: admission.keyId,
@@ -129,7 +131,7 @@ export async function handleChatCompletions(
       classifierInput: classifierInputFor(decoded, capabilities, inputTokens),
       freshFactsAvailable: false,
       stream: decoded.stream,
-      ...(decoded.serviceTier === undefined ? {} : { serviceTier: decoded.serviceTier }),
+      ...(serviceTier === undefined ? {} : { serviceTier }),
     };
     if (decoded.stream) {
       // Flex never queues, so dispatch before committing the 200: a refusal is

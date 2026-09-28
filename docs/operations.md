@@ -10,14 +10,14 @@ Compose defaults to `gateway` with Rules routing. CPU `laya` is behind the opt-i
 
 ## Storage and privacy
 
-| Volume | Contents |
-| --- | --- |
-| `sqlite-data` | Keys, policy versions, admission leases, metadata usage and audit; opt-in batch inputs/results in a separate private content store |
-| `laya-cache` | Local classifier weights and optional ONNX artifacts |
-| `fastflowlm-models` | Optional NPU model downloads |
-| `webui-data` | Open WebUI conversations and document state — separate from gateway metadata |
-| `LLAMACPP_MODELS_DIR` bind | GGUF weights and SSD-backed PLE table |
-| `HALOGEN_MODELS_DIR`, `HALOGEN_CACHE_DIR_HOST` binds | HGN weights/quality overlay and sensitive derived prompt-cache state |
+| Volume                                               | Contents                                                                                                                           |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `sqlite-data`                                        | Keys, policy versions, admission leases, metadata usage and audit; opt-in batch inputs/results in a separate private content store |
+| `laya-cache`                                         | Local classifier weights and optional ONNX artifacts                                                                               |
+| `fastflowlm-models`                                  | Optional NPU model downloads                                                                                                       |
+| `webui-data`                                         | Open WebUI conversations and document state — separate from gateway metadata                                                       |
+| `LLAMACPP_MODELS_DIR` bind                           | GGUF weights and SSD-backed PLE table                                                                                              |
+| `HALOGEN_MODELS_DIR`, `HALOGEN_CACHE_DIR_HOST` binds | HGN weights/quality overlay and sensitive derived prompt-cache state                                                               |
 
 Catalogues are read-only bind mounts. Secrets live in private `.env` files, not images or the repository. Keep `API_KEY_PEPPER` stable: changing it invalidates stored key authentication. Ordinary inference stores request metadata, not prompts/completions; submitting a batch explicitly stores its inputs and results in a bounded private store beside `control.sqlite`, outside Analytics, until acknowledgement or the 24 h post-terminal TTL ([batch.md](batch.md#result-holding)). Open WebUI stores conversations by design. FastFlowLM v1.0.6 prints inputs/transcripts, so the supplied profile disables Docker log persistence.
 
@@ -130,14 +130,14 @@ node scripts/upgrade-gateway.mjs
 
 Gateway-only upgrades do not restart the native generator, Laya, FastFlowLM, or optional Halogen. Full Compose stop is a deliberate separate operation. Native `next start` deployments that want this drain handler must also set `NEXT_MANUAL_SIG_HANDLE=true`.
 
-| Bound | Default |
-| --- | --- |
-| JSON body read | 15 seconds |
-| Classifier total | 2.5 seconds |
+| Bound                        | Default          |
+| ---------------------------- | ---------------- |
+| JSON body read               | 15 seconds       |
+| Classifier total             | 2.5 seconds      |
 | Key-controlled capacity wait | up to 30 seconds |
-| Generation | 10 minutes |
-| Overall inference deadline | 11 minutes |
-| Durable request lease | 12 minutes |
+| Generation                   | 10 minutes       |
+| Overall inference deadline   | 11 minutes       |
+| Durable request lease        | 12 minutes       |
 
 The overall chat deadline applies through the end of a streamed response, not merely until its headers are sent. Its timer is cancelled once chat work settles, including completed, failed, and cancelled requests; a completed request does not retain an eleven-minute timer. There is no lease heartbeat or crash-resume of generation. FastFlowLM's pinned ASR handler ignores cancellation during execution; its resource permit is retained through response/deadline instead of pretending the NPU is immediately idle.
 

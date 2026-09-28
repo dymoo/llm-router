@@ -8,12 +8,12 @@ Policy authority for locality, priority and hard limits: [routing-policy.md](rou
 
 Inference `jrv_…` Bearer key; every route is **scoped to the submitting key** — list, status, results and delete are invisible to any other key (an id you do not own answers `404 not_found`, same as an unknown id).
 
-| Route | Purpose |
-| --- | --- |
-| `POST /v1/batches` | Submit a job (validation, limits, deferred-lane admission) |
-| `GET /v1/batches/:id` | Job status; results inline when `completed` — **retry-safe, reading never destroys results** |
-| `GET /v1/batches` | List your jobs — `limit` 1–100 (default 20), `after` cursor, newest first |
-| `DELETE /v1/batches/:id` | Cancel undispatched items and purge held results (retrieval acknowledgement) |
+| Route                    | Purpose                                                                                      |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| `POST /v1/batches`       | Submit a job (validation, limits, deferred-lane admission)                                   |
+| `GET /v1/batches/:id`    | Job status; results inline when `completed` — **retry-safe, reading never destroys results** |
+| `GET /v1/batches`        | List your jobs — `limit` 1–100 (default 20), `after` cursor, newest first                    |
+| `DELETE /v1/batches/:id` | Cancel undispatched items and purge held results (retrieval acknowledgement)                 |
 
 Error bodies are the repo-wide envelope: `{ "error": { "code": "…", "message": "…" } }` — `401 unauthorized` (missing/bad bearer), `400 invalid`, `404 not_found` (unknown id and other-key id are indistinguishable; there is never a `403`), `409 conflict` (in-flight cap), `500` generic (unexpected server-side failure, e.g. corrupt result store — see [corruption policy](#status-and-results)). Codes, statuses and field names are contractual; exact message wording is not — do not parse it.
 
@@ -21,17 +21,17 @@ Error bodies are the repo-wide envelope: `{ "error": { "code": "…", "message":
 
 Job statuses (nine; terminals are `completed`, `failed`, `expired`, `cancelled`):
 
-| Status | Meaning |
-| --- | --- |
-| `validating` | Accepted, items being checked |
-| `queued` | Valid, waiting in the deferred lane (**our extension** — see [divergences](#divergences-from-openrouter)) |
-| `in_progress` | Items dispatching or executing (local or spilled) |
-| `finalizing` | All items settled, counts/usage being recorded |
-| `cancelling` | `DELETE` observed, in-flight items allowed to finish |
-| `completed` | Terminal: all items settled; results readable until TTL expiry or `DELETE` |
-| `failed` | Terminal: the job failed as a whole (`error` explains) |
-| `expired` | Terminal: the job outlived `deadline_at` (local window + provider window) and never reached another terminal state; never-dispatched items become `expired`, in-flight items are **not** interrupted and the job expires on a later sweep once they drain |
-| `cancelled` | Terminal after `DELETE`; in-flight items were allowed to finish first |
+| Status        | Meaning                                                                                                                                                                                                                                                   |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `validating`  | Accepted, items being checked                                                                                                                                                                                                                             |
+| `queued`      | Valid, waiting in the deferred lane (**our extension** — see [divergences](#divergences-from-openrouter))                                                                                                                                                 |
+| `in_progress` | Items dispatching or executing (local or spilled)                                                                                                                                                                                                         |
+| `finalizing`  | All items settled, counts/usage being recorded                                                                                                                                                                                                            |
+| `cancelling`  | `DELETE` observed, in-flight items allowed to finish                                                                                                                                                                                                      |
+| `completed`   | Terminal: all items settled; results readable until TTL expiry or `DELETE`                                                                                                                                                                                |
+| `failed`      | Terminal: the job failed as a whole (`error` explains)                                                                                                                                                                                                    |
+| `expired`     | Terminal: the job outlived `deadline_at` (local window + provider window) and never reached another terminal state; never-dispatched items become `expired`, in-flight items are **not** interrupted and the job expires on a later sweep once they drain |
+| `cancelled`   | Terminal after `DELETE`; in-flight items were allowed to finish first                                                                                                                                                                                     |
 
 Item statuses: `queued`, `running`, `completed`, `failed`, `cancelled`, `expired`, `interrupted`. Items are never preempted once running — neither `DELETE` nor expiry interrupts an in-flight item. `interrupted` marks work that was `running` when the process stopped: it **may have executed** upstream or locally, and is not resumed automatically — after a crash, never assume all running work continues or re-run it blindly; reconcile from the job's remote groups and item records.
 
@@ -86,7 +86,7 @@ Success is `202 Accepted` with the batch object:
 }
 ```
 
-`id` is `batch_` + uuid. `created_at`/`finalized_at`/`local_wait_until`/`deadline_at` are Unix seconds. `endpoint` is always `/v1/chat/completions` (chat only). `completion_window` is always `"24h"` — the only value upstream accepts, and it is the **provider's** window measured from *upstream* submission, not from our POST. Two gateway-owned clocks make that explicit:
+`id` is `batch_` + uuid. `created_at`/`finalized_at`/`local_wait_until`/`deadline_at` are Unix seconds. `endpoint` is always `/v1/chat/completions` (chat only). `completion_window` is always `"24h"` — the only value upstream accepts, and it is the **provider's** window measured from _upstream_ submission, not from our POST. Two gateway-owned clocks make that explicit:
 
 - **`local_wait_until`** = `spillAt` — the end of the local-first window (see [spill rule](#spill-rule)); before this instant only the explicit hard-ineligibility or opted-in overload exceptions below can leave for the provider.
 - **`deadline_at`** = `spillAt + completionWindowMs` (= `spillAt + 24h` for this single window) — our completion deadline for the job: local-first window plus provider window, so wall-clock from our POST can reach **~48 h**. The scheduler never expires a remote attempt at `created_at + 24h` while the provider legitimately still runs inside its own window.
@@ -101,14 +101,14 @@ Top-level fields: `endpoint` (required, must be `/v1/chat/completions`), `model`
 
 Per-item failures — **only** for items with valid identity but an invalid body — are **not** 4xx when at least one item is valid; the entry becomes an item with status `failed` plus an `errorCode`, and a result row (`response: null`, `error: {code, message}`) echoing the caller's valid `custom_id`, already counted in the `202` response's `request_counts.failed`. Exactly six codes exist. `body.model` is optional: absent **inherits** the top-level `model`; present **must equal** it — disagreement is rejected (the correct OpenRouter shape):
 
-| Rule | `error.code` (= item `errorCode`) |
-| --- | --- |
-| Non-object `body` | `invalid_body` |
-| Item body > 512 KiB | `body_too_large` |
-| `body.model` present but ≠ the top-level model | `model_mismatch` |
-| `stream: true` — streaming is out by design | `stream_unsupported` |
-| `messages` missing or empty | `messages_invalid` |
-| `max_tokens < 1` | `max_tokens_invalid` |
+| Rule                                           | `error.code` (= item `errorCode`) |
+| ---------------------------------------------- | --------------------------------- |
+| Non-object `body`                              | `invalid_body`                    |
+| Item body > 512 KiB                            | `body_too_large`                  |
+| `body.model` present but ≠ the top-level model | `model_mismatch`                  |
+| `stream: true` — streaming is out by design    | `stream_unsupported`              |
+| `messages` missing or empty                    | `messages_invalid`                |
+| `max_tokens < 1`                               | `max_tokens_invalid`              |
 
 The effective model stays uniform because one job is one model; a multi-model fan-out needs one job per model. Top-level `model` accepts `"auto"` (our routed choice — the router picks) or a model slug; **slugs never bypass key allowlists, which are enforced at dispatch**. Exceeding the in-flight-job cap (≥ 4 non-terminal jobs for the key) is `409 conflict` — nothing accepted until an earlier job terminates.
 
@@ -118,16 +118,16 @@ A submit whose remote outcome is ambiguous (timeout after the POST left the wire
 
 ### Limits (ours — upstream publishes none)
 
-| Limit | Value |
-| --- | --- |
-| Items per job | 1000 |
-| Item body | 512 KiB |
-| Whole submit / job payload | 32 MiB |
-| In-flight jobs per key | 4 |
-| Result holding per job / per key | 64 MiB / 256 MiB |
-| Completion window `deadline_at` | `spillAt + 24h` (up to ~48 h from our POST) |
-| Result TTL after terminal | 24 h (separate retention clock) |
-| List `limit` | 1–100 (default 20) |
+| Limit                            | Value                                       |
+| -------------------------------- | ------------------------------------------- |
+| Items per job                    | 1000                                        |
+| Item body                        | 512 KiB                                     |
+| Whole submit / job payload       | 32 MiB                                      |
+| In-flight jobs per key           | 4                                           |
+| Result holding per job / per key | 64 MiB / 256 MiB                            |
+| Completion window `deadline_at`  | `spillAt + 24h` (up to ~48 h from our POST) |
+| Result TTL after terminal        | 24 h (separate retention clock)             |
+| List `limit`                     | 1–100 (default 20)                          |
 
 All are fixed code constants — no environment knobs (see [setup.md](setup.md#environment)). Job-level overflows (> 1000 items, > 32 MiB) are `400 invalid`; a single oversized item (≤ 512 KiB rule) is a failed item with `body_too_large`, not a job rejection; the in-flight cap is `409 conflict`.
 
@@ -260,13 +260,13 @@ Each job carries a computed spill deadline:
 $$\texttt{spillAt} = \texttt{createdAt} + \operatorname{clamp}\big(24\text{h} \times \texttt{localityBias},\ 5\text{min},\ 23\text{h}55\text{m}\big)$$
 
 | `localityBias` (key policy) | Local-only window before spill is allowed |
-| --- | --- |
-| `0` — cloud-preferred | 5 min (floor) |
-| `0.5` | 12 h |
-| `1` — local-until-saturated | 23 h 55 min (ceiling) |
+| --------------------------- | ----------------------------------------- |
+| `0` — cloud-preferred       | 5 min (floor)                             |
+| `0.5`                       | 12 h                                      |
+| `1` — local-until-saturated | 23 h 55 min (ceiling)                     |
 
 - **Before `spillAt`**: local deployments are preferred; only the explicit hard-ineligibility and opted-in overload exceptions below can accelerate remote work. The floor gives ordinary work a local-first window and the ceiling makes every job deadline-spill-eligible inside 24 h.
-- **At/after `spillAt`**: *undispatched* items may route to the pinned OpenRouter Batch path. Spill fans out **one upstream batch per compatibility group** (model + response_format/reasoning config — upstream allows one shape per batch), so a job can carry **several** remote batch ids, one per group; each group's items stay bound to that group's proven id. Already-dispatched items are unaffected.
+- **At/after `spillAt`**: _undispatched_ items may route to the pinned OpenRouter Batch path. Spill fans out **one upstream batch per compatibility group** (model + response_format/reasoning config — upstream allows one shape per batch), so a job can carry **several** remote batch ids, one per group; each group's items stay bound to that group's proven id. Already-dispatched items are unaffected.
 - **Hard-constraint local ineligibility** (quality, context, allowlist): the item spills **immediately** when a cloud batch candidate remains; if none does, the item fails with `no_eligible_model`. Hard constraints are never relaxed to invent a candidate.
 - **Local downtime / definitive pre-enqueue overload**: before `spillAt`, only a Key with `overloadAction=failover` plus a configured spill port may enter remote batch planning. This uses the batch-only catalogue, not synchronous cloud dispatch. All Key/deployment allowlist, capability, context, credentials and spend constraints still pass through the real router planner and deferred key recheck; planning failure never makes a provider call. Report-only local work records the local overload instead of silently paying for cloud. Deadline-triggered spill remains a separate, unchanged batch authorization. A local-to-remote handoff keeps one request/admission and finalizes accounting once.
 - **Provider pinning**: the selected deployment’s `providerRestriction` is preserved as upstream `provider.only` — never silently dropped to gain availability. A pin no `:batch` endpoint satisfies fails clearly instead.
@@ -276,12 +276,12 @@ $$\texttt{spillAt} = \texttt{createdAt} + \operatorname{clamp}\big(24\text{h} \t
 
 The spill path targets a **dedicated batch-only deployment, separate from the synchronous catalogue** — synchronous chat (Sail FP8) is untouched:
 
-| Field | Value |
-| --- | --- |
-| Deployment id | `cloud-glm-batch` |
-| Model | `z-ai/glm-5.3-flash` |
-| `providerRestriction` | `deepinfra/fp4` |
-| Catalogue | Its own batch catalogue file — `BATCH_CATALOG` names the in-gateway path, bound read-only from the host via `BATCH_CATALOG_FILE` (default `./catalog.batch.example.json`); never inserted into the synchronous chat catalogue |
+| Field                 | Value                                                                                                                                                                                                                         |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Deployment id         | `cloud-glm-batch`                                                                                                                                                                                                             |
+| Model                 | `z-ai/glm-5.3-flash`                                                                                                                                                                                                          |
+| `providerRestriction` | `deepinfra/fp4`                                                                                                                                                                                                               |
+| Catalogue             | Its own batch catalogue file — `BATCH_CATALOG` names the in-gateway path, bound read-only from the host via `BATCH_CATALOG_FILE` (default `./catalog.batch.example.json`); never inserted into the synchronous chat catalogue |
 
 Endpoint metadata confirmed against the public batch catalogue on **2026-09-22**: input **$0.06/Mtok**, cached input **$0.012/Mtok**, output **$0.20/Mtok**, context **1,048,576**, max output **131,072**. This is **dated catalogue metadata for ranking and `maxEstimatedUsd` math — not performance evidence**; no paid batch benchmark has been run, and the model page remains the pricing source of truth.
 
@@ -305,27 +305,27 @@ Prompts and completions therefore still **never** enter the metadata database or
 
 The accounting identity is unchanged: **unknown ≠ zero, everywhere.**
 
-| Level | What is recorded |
-| --- | --- |
-| Per item, **local dispatch** | Finalizes into the requests ledger like any routed request: observed usage and **actual configured COGS** through the existing accounting — no special case. |
-| Per item, **remote (spilled) dispatch** | Finalizes into the requests ledger with tokens parsed **defensively** from the result body's `usage` (per-item usage in upstream chat batch bodies is unconfirmed — absent means unknown, not zero). **Cost is always unknown** for remote rows → `unknownCostCount`. The batch discount is batch-level only; never prorated across rows, never estimated as 0. |
-| Per job | `usage` = provider-reported actual: `{prompt_tokens, completion_tokens, total_tokens, cost, is_byok}` with `cost`/`is_byok` nullable — recorded only when a spill actually happened, and **aggregated once per remote group from its stored terminal facts** (a status poll never re-adds spend). `cost` is what the provider charges for the whole batch; `is_byok: true` means that `cost` covers only the BYOK/platform fee — attribute accordingly. Missing or partially reported usage makes the whole `usage` null rather than a partial sum. |
+| Level                                   | What is recorded                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per item, **local dispatch**            | Finalizes into the requests ledger like any routed request: observed usage and **actual configured COGS** through the existing accounting — no special case.                                                                                                                                                                                                                                                                                                                                                                                        |
+| Per item, **remote (spilled) dispatch** | Finalizes into the requests ledger with tokens parsed **defensively** from the result body's `usage` (per-item usage in upstream chat batch bodies is unconfirmed — absent means unknown, not zero). **Cost is always unknown** for remote rows → `unknownCostCount`. The batch discount is batch-level only; never prorated across rows, never estimated as 0.                                                                                                                                                                                     |
+| Per job                                 | `usage` = provider-reported actual: `{prompt_tokens, completion_tokens, total_tokens, cost, is_byok}` with `cost`/`is_byok` nullable — recorded only when a spill actually happened, and **aggregated once per remote group from its stored terminal facts** (a status poll never re-adds spend). `cost` is what the provider charges for the whole batch; `is_byok: true` means that `cost` covers only the BYOK/platform fee — attribute accordingly. Missing or partially reported usage makes the whole `usage` null rather than a partial sum. |
 
 Batch pricing is typically a discount on per-token rates, but the page/model price is the source of truth; job-level `cost` is the only batch-spend figure this system asserts.
 
 ## Divergences from OpenRouter
 
-| Topic | OpenRouter | Ours |
-| --- | --- | --- |
-| Cancel semantics | `cancelling`/`cancelled` exist but **no cancel endpoint is documented**; `DELETE` is a terminal-only purge (in-flight → `409`, "deletion is not cancellation") | `DELETE` **also cancels**: undispatched → `cancelled`, in-flight finish, results purged — deliberate, documented divergence |
-| Result retention | Inputs + results kept **30 days** upstream, then deleted; `DELETE` purges provider-side | Retry-safe reads like upstream, but the held copy is local only: terminal `DELETE` purges (retrieval acknowledgement), otherwise our local TTL of 24 h after terminal; job metadata retained. Upstream's own 30-day clock is theirs, not ours |
-| After-delete visibility | Later `GET`/`DELETE` → `404` once cleaned up | Job record retained: later `GET` returns `200` (results purged), repeat `DELETE` is a no-op `200` |
-| Duplicate / ambiguous submit | **No idempotency key** — duplicate submits undetectable from the API | Same absence, handled our way: durable submit intent persisted first; an ambiguous outcome is marked submit-unknown and reconciled only from a provider id proven to be ours — never attributed by list/model/count/time similarity |
-| Webhooks | **None upstream** — completion is poll-only | Same: poll `GET /:id`; no webhooks |
-| Status vocabulary | Eight states, no queued wait state | We add `queued` for the deferred lane (nine job statuses); items also gain `interrupted` for work possibly executed when the process stopped |
-| Scope | Workspace-scoped — every workspace key sees the same list | **Key-scoped**: only the submitting key sees its jobs and results |
-| Limits | None published (no items/payload cap documented) | Our published table above (1000 / 512 KiB / 32 MiB / 4 in-flight) |
-| Provider routing | `provider.only` accepted; wrong pin → `404`, no fallback | Same mapping — deployment `providerRestriction` becomes `provider.only`, unsupported pins fail clearly, never silently omitted |
+| Topic                        | OpenRouter                                                                                                                                                     | Ours                                                                                                                                                                                                                                          |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cancel semantics             | `cancelling`/`cancelled` exist but **no cancel endpoint is documented**; `DELETE` is a terminal-only purge (in-flight → `409`, "deletion is not cancellation") | `DELETE` **also cancels**: undispatched → `cancelled`, in-flight finish, results purged — deliberate, documented divergence                                                                                                                   |
+| Result retention             | Inputs + results kept **30 days** upstream, then deleted; `DELETE` purges provider-side                                                                        | Retry-safe reads like upstream, but the held copy is local only: terminal `DELETE` purges (retrieval acknowledgement), otherwise our local TTL of 24 h after terminal; job metadata retained. Upstream's own 30-day clock is theirs, not ours |
+| After-delete visibility      | Later `GET`/`DELETE` → `404` once cleaned up                                                                                                                   | Job record retained: later `GET` returns `200` (results purged), repeat `DELETE` is a no-op `200`                                                                                                                                             |
+| Duplicate / ambiguous submit | **No idempotency key** — duplicate submits undetectable from the API                                                                                           | Same absence, handled our way: durable submit intent persisted first; an ambiguous outcome is marked submit-unknown and reconciled only from a provider id proven to be ours — never attributed by list/model/count/time similarity           |
+| Webhooks                     | **None upstream** — completion is poll-only                                                                                                                    | Same: poll `GET /:id`; no webhooks                                                                                                                                                                                                            |
+| Status vocabulary            | Eight states, no queued wait state                                                                                                                             | We add `queued` for the deferred lane (nine job statuses); items also gain `interrupted` for work possibly executed when the process stopped                                                                                                  |
+| Scope                        | Workspace-scoped — every workspace key sees the same list                                                                                                      | **Key-scoped**: only the submitting key sees its jobs and results                                                                                                                                                                             |
+| Limits                       | None published (no items/payload cap documented)                                                                                                               | Our published table above (1000 / 512 KiB / 32 MiB / 4 in-flight)                                                                                                                                                                             |
+| Provider routing             | `provider.only` accepted; wrong pin → `404`, no fallback                                                                                                       | Same mapping — deployment `providerRestriction` becomes `provider.only`, unsupported pins fail clearly, never silently omitted                                                                                                                |
 
 Upstream facts and open questions behind this table: [research/openrouter-batch.md](research/openrouter-batch.md).
 
@@ -334,7 +334,7 @@ Upstream facts and open questions behind this table: [research/openrouter-batch.
 Batch is **our own compute spilling to our own OpenRouter account** — usage we consume, not access we resell.
 
 - Presenting OpenRouter batch as relayed/resold API access sits at [OpenRouter ToS §7](https://openrouter.ai/terms) ("reselling API access to Models or otherwise developing a competing service") — **the binding constraint on this seam**.
-- No UI, endpoint copy, or response wording may present batch as resold or relayed OpenRouter access. Clients submit to *our* batch surface with *our* keys; they never see, hold, or are billed against OpenRouter credentials.
+- No UI, endpoint copy, or response wording may present batch as resold or relayed OpenRouter access. Clients submit to _our_ batch surface with _our_ keys; they never see, hold, or are billed against OpenRouter credentials.
 - Because end users do not touch OpenRouter directly, §5.2 flow-down is not engaged by this path; §6.3(b) is the provider's storage basis for our own submissions upstream.
 
 This is a documented legal reading of the ToS, flagged for humans. It is **not** a legal permission grant: describing batch as our own compute does not make any resale or relay lawful. A commercial relay offering would require terms review and provider permission first — the internal-use posture is exactly that, an internal-use posture.

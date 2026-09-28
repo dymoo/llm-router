@@ -4,7 +4,7 @@ import test from "node:test";
 import { GatewayFailure } from "../../src/http/gateway-failure.ts";
 import { handleChatCompletions } from "../../src/http/inference.ts";
 import { GATEWAY_EFFECT_TIMEOUT_MS } from "../../src/http/limits.ts";
-import { inferenceDeps, jsonRequest, memoryKeys, ORIGIN } from "./helpers.ts";
+import { inferenceDeps, jsonRequest, memoryKeys, ORIGIN, samplePolicy } from "./helpers.ts";
 
 const completion = {
   id: "cmpl",
@@ -794,6 +794,48 @@ test("flex requests carry the tier and a local refusal is OpenAI's 429 resource_
     assert.deepEqual(tiers, ["flex"]);
     assert.equal(keys.finalizes[0]?.errorCode, "LocalOverloaded");
     assert.equal(keys.finalizes[0]?.deploymentId, "local-qwen");
+  }
+});
+
+test("low-priority keys run as flex; other keys only when they ask", async () => {
+  const cases = [
+    { priority: "low", requested: undefined, tier: "flex" },
+    { priority: "low", requested: "default", tier: "flex" },
+    { priority: "medium", requested: undefined, tier: undefined },
+    { priority: "high", requested: "flex", tier: "flex" },
+  ] as const;
+  for (const { priority, requested, tier } of cases) {
+    const base = memoryKeys();
+    const keys = {
+      ...base,
+      admit: async (raw: string) => ({
+        ...(await base.admit(raw)),
+        policy: samplePolicy({ priority }),
+      }),
+    };
+    let seen: unknown = "not called";
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: {
+          model: "auto",
+          messages: [{ role: "user", content: "hi" }],
+          ...(requested === undefined ? {} : { service_tier: requested }),
+        },
+      }),
+      inferenceDeps(keys, {
+        complete: async (work) => {
+          seen = work.serviceTier;
+          throw new Error("stop after routing");
+        },
+        stream: async () => {
+          throw new Error("not streaming");
+        },
+      }),
+    );
+    assert.equal(response.status >= 400, true);
+    assert.equal(seen, tier, `${priority} asking for ${requested ?? "nothing"}`);
   }
 });
 

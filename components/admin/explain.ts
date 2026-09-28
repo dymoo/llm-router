@@ -18,7 +18,7 @@ export function explainPriority(priority: Priority): string {
   if (priority === "medium") {
     return "Medium admission and queue precedence, after high, before low. Does not preempt running work.";
   }
-  return "Low admission and queue precedence. Waits behind high and medium. Does not preempt running work.";
+  return "Runs only on idle local compute (Gufo flex), never on cloud. The router retries for up to the wait budget, then reports 429.";
 }
 
 export function explainCostBias(value: number): string {

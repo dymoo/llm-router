@@ -16,9 +16,9 @@ node scripts/fetch-strix-halo-guide.mjs
 
 Writes checksum-verified copies to `third_party/strix-halo/f73872fe20dfdef460653f18e2fe63e5366ae958/`:
 
-| File | sha256 |
-| --- | --- |
-| `install.sh` | `b339476d3db30b1c70feea175c2dd2eb8abad4cce0bfba1b5777542174a1d1e0` |
+| File                    | sha256                                                             |
+| ----------------------- | ------------------------------------------------------------------ |
+| `install.sh`            | `b339476d3db30b1c70feea175c2dd2eb8abad4cce0bfba1b5777542174a1d1e0` |
 | `install-flash-next.sh` | `7fd25b554afcbe76d33b932ca07daadac2166b581c8d8861ea379b45778a0dc8` |
 
 The wrapper only sets `STRIX_PROFILE=flash-next` and execs `install.sh`.
