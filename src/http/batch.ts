@@ -203,6 +203,9 @@ function acceptedJobFailure(deps: BatchDeps, job: BatchJob, errorCode: string): 
   return jsonResponse(202, wireBatch(durable, null));
 }
 
+const MAX_CONCURRENT_BATCH_READS = 2;
+let activeBatchReads = 0;
+
 /** POST /v1/batches — validate, persist, wake the scheduler. 202 with the batch object. */
 export async function handleCreateBatch(request: Request, deps: BatchDeps): Promise<Response> {
   try {
@@ -212,10 +215,26 @@ export async function handleCreateBatch(request: Request, deps: BatchDeps): Prom
     const auth = await deps.keys.authenticate(rawKey);
     // Drain guard 1: reject before pulling up to 32MiB from a stopping gateway.
     deps.assertAccepting();
-    const body = await readJsonObject(request, {
-      maxBytes: BATCH_MAX_JOB_BODY_BYTES,
-      timeoutMs: BODY_READ_TIMEOUT_MS,
-    });
+    // A key at its job limit is refused before its body is read; the check
+    // after the read still settles concurrent submits.
+    if (inflightBatchJobs(deps, auth.keyId) >= BATCH_MAX_INFLIGHT_JOBS_PER_KEY) {
+      throw new HttpFailure(409, "conflict", "key already has 4 in-flight batch jobs");
+    }
+    // Each submit buffers and parses up to 32MiB: bound how many do so at once
+    // so concurrent uploads cannot exhaust the pod's memory.
+    if (activeBatchReads >= MAX_CONCURRENT_BATCH_READS) {
+      throw new HttpFailure(429, "rate_limited", "another batch upload is being read; retry", 1);
+    }
+    activeBatchReads++;
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonObject(request, {
+        maxBytes: BATCH_MAX_JOB_BODY_BYTES,
+        timeoutMs: BODY_READ_TIMEOUT_MS,
+      });
+    } finally {
+      activeBatchReads--;
+    }
     const decoded = decodeBatchSubmit(body);
     if (inflightBatchJobs(deps, auth.keyId) >= BATCH_MAX_INFLIGHT_JOBS_PER_KEY) {
       throw new HttpFailure(409, "conflict", "key already has 4 in-flight batch jobs");

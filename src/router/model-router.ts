@@ -448,6 +448,16 @@ function executeLocked(
       responseFormat: work.responseFormat,
     });
     const pin = sessions.get(work.keyId, work.routing.sessionId, now);
+    // Open WebUI chat ids are advisory continuity (http/inference.ts): pins
+    // live in memory, so after a restart, expiry or eviction the chat routes
+    // afresh at a checkpoint instead of failing every later turn.
+    if (
+      work.routing.boundary === "continue" &&
+      work.routing.sessionId.startsWith("webui:") &&
+      (pin === undefined || pin.continuityKey !== key)
+    ) {
+      work = { ...work, routing: { ...work.routing, boundary: "checkpoint" } };
+    }
 
     if (work.routing.boundary === "continue") {
       if (work.routing.qualityOverride === "highest") {
@@ -1051,6 +1061,7 @@ function probeUnavailable(
   return Effect.gen(function* () {
     const unavailable = new Set<string>(extra ?? []);
     const missingCredentials = new Set<string>();
+    const probes: Array<{ deployment: Deployment; credential: string | undefined }> = [];
     for (const deployment of catalogue) {
       const credential =
         deployment.credentialEnvVar === null ? undefined : credentials(deployment.credentialEnvVar);
@@ -1062,11 +1073,18 @@ function probeUnavailable(
         missingCredentials.add(deployment.id);
         continue;
       }
-      const down = yield* adapters[deployment.transport].probeUnavailable(deployment, credential);
-      if (down) {
-        unavailable.add(deployment.id);
-      }
+      probes.push({ deployment, credential });
     }
+    // Probes are independent: one slow provider no longer delays the others.
+    const down = yield* Effect.forEach(
+      probes,
+      ({ deployment, credential }) =>
+        adapters[deployment.transport].probeUnavailable(deployment, credential),
+      { concurrency: "unbounded" },
+    );
+    probes.forEach(({ deployment }, i) => {
+      if (down[i]) unavailable.add(deployment.id);
+    });
     return { unavailable, missingCredentials };
   });
 }

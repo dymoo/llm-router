@@ -50,6 +50,19 @@ test("rejects provider-specific controls that could bypass routing policy", () =
   );
 });
 
+test("rejects session ids that cannot be encoded or are oversized", () => {
+  for (const sessionId of ["bad\uD800id", "s".repeat(257)]) {
+    assert.throws(
+      () =>
+        decodeChatCompletion(
+          { model: "auto", messages: [{ role: "user", content: "hi" }], routing: { sessionId } },
+          { newId: () => "s1" },
+        ),
+      InvalidInput,
+    );
+  }
+});
+
 test("requires model auto", () => {
   assert.throws(
     () =>

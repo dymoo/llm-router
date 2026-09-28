@@ -174,6 +174,10 @@ function decodeRouting(value: unknown, newId: () => string): RoutingHint {
     record.sessionId === undefined
       ? newId()
       : requireNonempty(record.sessionId, "routing.sessionId");
+  // Session ids go into response headers and the in-memory session store: a
+  // lone surrogate cannot be encoded, and size is bounded.
+  if (sessionId.length > 256 || !sessionId.isWellFormed())
+    throw new InvalidInput("routing.sessionId must be well-formed and at most 256 characters");
   let boundary: SessionBoundary = "new-task";
   if (record.boundary !== undefined) {
     if (

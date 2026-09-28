@@ -143,6 +143,28 @@ describe("ModelRouter", () => {
     assert.equal(result.second.headers.appliedEffort, "none");
     assert.equal(result.second.accounting.reuse, "session");
   });
+  it("routes an Open WebUI chat afresh when its pin is gone, but still refuses an explicit continue", async () => {
+    const layer = modelRouterLayer({
+      mode: "rules",
+      catalogue: [localQwen, cloudGlm],
+      catalogueVersion: "webui-test",
+      fetch: fakeFetch(),
+    });
+    const outcome = await Effect.runPromise(
+      Effect.gen(function* () {
+        const router = yield* ModelRouter;
+        const webui = yield* router.complete(
+          work({ routing: { sessionId: "webui:chat-1", boundary: "continue" } }),
+        );
+        const explicit = yield* Effect.flip(
+          router.complete(work({ routing: { sessionId: "agent-1", boundary: "continue" } })),
+        );
+        return { webui, explicit };
+      }).pipe(Effect.provide(layer)),
+    );
+    assert.equal(outcome.webui.headers.deploymentId, localQwen.id);
+    assert.equal((outcome.explicit as { _tag?: string })._tag, "MissingSession");
+  });
   it("rules routes requests local cannot fit or support to cloud, and otherwise returns NoEligibleModel", async () => {
     for (const scenario of [
       { inputTokens: 40_000, capabilities: { tools: false, json: false, vision: false } },

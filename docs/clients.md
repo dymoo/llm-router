@@ -103,3 +103,11 @@ A missing local provider credential is hard ineligibility, not downtime. Rules m
 Local chat `usage` contains integer prompt/completion/total token counts, optional nested cached/reasoning counts and `cost`, with zero upstream API cost details. Configured internal local rates determine cost; missing rates/counts produce null, not invented zero. Provenance is internal metadata, not a nonstandard `cost_source` wire field. Cloud usage is passed through.
 
 `GET /v1/models`, `POST /v1/embeddings`, and multipart `POST /v1/audio/transcriptions` share inference authentication. Embeddings/STT use explicit configured model IDs, not chat `auto`; see [ai-hub.md](ai-hub.md) for supported formats and upstream limitations.
+
+`POST /v1/systemone` takes TypeSafe System One requests unchanged, so a
+TypeSafe SDK works with its base URL set to the router and a router key as
+its API key. `model` names a System One deployment, `kev-latest` or
+`jev-latest` ([catalogue](catalogue.md#system-one-kev-and-jev)). Errors
+carry TypeSafe's `detail` beside the router's `error`; a busy Gufo returns
+429 `resource_unavailable` with `Retry-After`. `GET /v1/models` adds a
+TypeSafe `models` list of the System One deployments a key may use.
