@@ -130,6 +130,9 @@ test(
       Object.assign(catalogue[0], {
         id: "fixture",
         modelId: "fixture-chat",
+        // A generic OpenAI peer: these tests cover router machinery, gufo.test.mjs covers Gufo.
+        transport: "openai-compatible",
+        credentialEnvVar: null,
         endpoint: `http://127.0.0.1:${upstreamPort}/v1`,
         contextLimitTokens: 65536,
         maxOutputTokens: 8192,
