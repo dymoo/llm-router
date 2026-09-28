@@ -268,7 +268,7 @@ export function UsageView({
           </div>
         ) : (
           <div className="table-wrap">
-            <table className="keys">
+            <table className="keys stack">
               <thead>
                 <tr>
                   <th>When</th>
@@ -282,8 +282,10 @@ export function UsageView({
               <tbody>
                 {rows.map((row) => (
                   <tr key={row.id}>
-                    <td className="muted">{formatEpoch(row.createdAt)}</td>
-                    <td>
+                    <td className="muted" data-label="When">
+                      {formatEpoch(row.createdAt)}
+                    </td>
+                    <td data-label="Key">
                       <button
                         className="btn btn-ghost btn-row"
                         type="button"
@@ -295,10 +297,14 @@ export function UsageView({
                           row.id}
                       </button>
                     </td>
-                    <td className="muted">{row.deploymentId ?? "—"}</td>
-                    <td>{row.outcome}</td>
-                    <td className="muted">{row.decisionReason ?? "—"}</td>
-                    <td className="muted">
+                    <td className="muted" data-label="Deployment">
+                      {row.deploymentId ?? "—"}
+                    </td>
+                    <td data-label="HTTP outcome">{row.outcome}</td>
+                    <td className="muted" data-label="Reason">
+                      {row.decisionReason ?? "—"}
+                    </td>
+                    <td className="muted" data-label="Cache">
                       {row.cacheHit === null
                         ? "—"
                         : row.cacheHit
@@ -448,7 +454,7 @@ function BreakdownTable({ title, rows }: { title: string; rows: BreakdownRow[] }
     <div className="panel">
       <h3 className="panel-title">{title}</h3>
       <div className="table-wrap">
-        <table className="keys">
+        <table className="keys stack">
           <thead>
             <tr>
               <th>{title}</th>
@@ -464,14 +470,22 @@ function BreakdownTable({ title, rows }: { title: string; rows: BreakdownRow[] }
             {rows.map((row) => (
               <tr key={row.id}>
                 <td className="name">{row.label}</td>
-                <td className="muted">{formatCount(row.requests)}</td>
-                <td className="muted">
+                <td className="muted" data-label="Requests">
+                  {formatCount(row.requests)}
+                </td>
+                <td className="muted" data-label="Local / cloud">
                   {formatUnknown(row.local)} / {formatUnknown(row.cloud)}
                 </td>
-                <td className="muted">{formatUsd(row.estimatedUsd)}</td>
-                <td className="muted">{formatUsd(row.actualUsd)}</td>
-                <td className="muted">{formatUsd(row.localComputeUsd)}</td>
-                <td className="muted">
+                <td className="muted" data-label="Estimate">
+                  {formatUsd(row.estimatedUsd)}
+                </td>
+                <td className="muted" data-label="Billed">
+                  {formatUsd(row.actualUsd)}
+                </td>
+                <td className="muted" data-label="Local COGS">
+                  {formatUsd(row.localComputeUsd)}
+                </td>
+                <td className="muted" data-label="Errors">
                   {formatUnknown(row.errors)} · cancel {formatUnknown(row.cancels)} · sat{" "}
                   {formatUnknown(row.saturation)}
                 </td>

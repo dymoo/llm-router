@@ -66,7 +66,7 @@ OMP v18.3.2 with an isolated `openai-completions` provider was captured against 
 | `reasoning_effort` | Reject with HTTP 400: routing mode, key policy and deployment own reasoning effort; clients cannot override it. |
 | Unknown/provider-specific fields | Reject with HTTP 400; no arbitrary inference-body passthrough or override of provider selection/routing policy. |
 
-Never put provider credentials in browser code. Admin access is network reachability plus optional Basic authentication, not an inference key.
+Never put provider credentials in browser code. Admin access is network reachability behind the deployment's authenticating proxy, not an inference key.
 
 Streaming holds model capacity and session ownership through the complete SSE lifetime. Disconnect aborts pending classification/queue work and cancels the chat upstream reader. The gateway does not retry after generation dispatch.
 

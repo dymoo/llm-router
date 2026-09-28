@@ -1,4 +1,3 @@
-import { requireBasic, unauthorizedBasic } from "./basic.ts";
 import { readJsonObject } from "./body.ts";
 import type { AdminDeps } from "./contracts.ts";
 import { decodeKeyDraft, decodeKeyPatch, decodeRotateBody } from "./decode.ts";
@@ -12,15 +11,7 @@ import {
 } from "./limits.ts";
 import { requireAdminMutation } from "./security.ts";
 
-function adminError(error: unknown, deps: AdminDeps): Response {
-  if (error instanceof HttpFailure && error.status === 401 && deps.basicAuth !== undefined) {
-    return unauthorizedBasic();
-  }
-  return failureResponse(error);
-}
-
 function guardAdmin(request: Request, deps: AdminDeps, mutate: boolean): void {
-  requireBasic(request, deps.basicAuth);
   if (mutate) {
     requireAdminMutation(request, deps.appOrigin);
   }
@@ -81,7 +72,7 @@ export async function handleListKeys(request: Request, deps: AdminDeps): Promise
     const page = await deps.keys.listKeys({ cursor, limit });
     return jsonResponse(200, page);
   } catch (error) {
-    return adminError(error, deps);
+    return failureResponse(error);
   }
 }
 
@@ -95,7 +86,7 @@ export async function handleCreateKey(request: Request, deps: AdminDeps): Promis
     const created = await deps.keys.createKey(decodeKeyDraft(json));
     return jsonResponse(201, created);
   } catch (error) {
-    return adminError(error, deps);
+    return failureResponse(error);
   }
 }
 
@@ -113,7 +104,7 @@ export async function handleUpdateKey(
     const key = await deps.keys.updateKey(id, decodeKeyPatch(json));
     return jsonResponse(200, { key });
   } catch (error) {
-    return adminError(error, deps);
+    return failureResponse(error);
   }
 }
 
@@ -127,7 +118,7 @@ export async function handleRevokeKey(
     await deps.keys.revokeKey(id);
     return emptyResponse(204);
   } catch (error) {
-    return adminError(error, deps);
+    return failureResponse(error);
   }
 }
 
@@ -145,7 +136,7 @@ export async function handleRotateKey(
     const rotated = await deps.keys.rotateKey(id, decodeRotateBody(json).expectedVersion);
     return jsonResponse(200, rotated);
   } catch (error) {
-    return adminError(error, deps);
+    return failureResponse(error);
   }
 }
 
@@ -166,7 +157,7 @@ export async function handleUsage(request: Request, deps: AdminDeps): Promise<Re
       ),
     );
   } catch (error) {
-    return adminError(error, deps);
+    return failureResponse(error);
   }
 }
 
@@ -191,6 +182,6 @@ export async function handleRequests(request: Request, deps: AdminDeps): Promise
     };
     return jsonResponse(200, await deps.keys.recentRequests(query));
   } catch (error) {
-    return adminError(error, deps);
+    return failureResponse(error);
   }
 }

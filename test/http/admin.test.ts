@@ -167,16 +167,6 @@ test("stale edits return stale_version without leaking secrets", async () => {
   assert.equal(body.error.message.includes("jrv_"), false);
 });
 
-test("basic auth challenges when configured", async () => {
-  const keys = memoryKeys();
-  const response = await handleListKeys(
-    new Request(`${ORIGIN}/api/admin/keys`),
-    adminDeps(keys, { username: "dylan", password: "secret" }),
-  );
-  assert.equal(response.status, 401);
-  assert.equal(response.headers.get("www-authenticate"), 'Basic realm="llm-router"');
-});
-
 test("usage forwards the AdminDeps classifier qualifications into analytics", async () => {
   const classifierQualifications: AdminDeps["classifierQualifications"] = [];
   let observedQuery: { since?: number; until?: number } | undefined;

@@ -671,7 +671,6 @@ globalThis.fetch = (input, init) => {
       BATCH_RESULTS_DIR: state.resultsDir,
       AUXILIARY_CATALOG: "",
       API_KEY_PEPPER: pepper,
-      ADMIN_BASIC_AUTH: "",
       CLASSIFIER_MODE: "jev",
       CLASSIFIER_QUALIFICATION: qualificationPath,
       TYPESAFE_API_KEY: "fixture-only",

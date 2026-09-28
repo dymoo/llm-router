@@ -13,7 +13,7 @@
 
 Do not bake a generator into the gateway image. Select one GPU runtime with [runtime selection](runtime-selection.md); the optimized native host route remains supported.
 
-There is **no UI login**. Reachability grants administration unless `ADMIN_BASIC_AUTH` is configured. Inference still requires `jrv_` API keys. Default binds are loopback. Mutations require exact `APP_ORIGIN` and `X-Jev-Admin: 1`.
+There is **no UI login**. Reachability grants administration; gate the console with an authenticating reverse proxy (for example Authentik forward auth) when it leaves loopback. Inference still requires `jrv_` API keys. Default binds are loopback. Mutations require exact `APP_ORIGIN` and `X-Jev-Admin: 1`.
 
 ## Clean machine (Rules routing, no classifier or local generator)
 
@@ -62,7 +62,7 @@ This tree does not change bootloaders. Keep IOMMU enabled when using FastFlowLM/
 | This machine only (default) | `127.0.0.1` | `http://127.0.0.1:3000` |
 | Private LAN | the LAN IP | `http://<that-ip>:3000` exactly |
 
-Never publish `0.0.0.0` on a public interface. LAN reachability is admin access unless `ADMIN_BASIC_AUTH` is set. The browser shows a native Basic challenge; there is no login form. Enable HTTPS if the hop is not a trusted private network.
+Never publish `0.0.0.0` on a public interface. LAN reachability is admin access: expose only `/v1` and `/health` directly and put everything else behind an authenticating proxy. Enable HTTPS if the hop is not a trusted private network.
 
 ## Environment
 
@@ -70,7 +70,6 @@ Never publish `0.0.0.0` on a public interface. LAN reachability is admin access 
 | --- | --- |
 | `APP_ORIGIN` | Exact UI origin for CSRF / same-origin checks |
 | `API_KEY_PEPPER` | HMAC pepper for inference API keys; generated |
-| `ADMIN_BASIC_AUTH` | Optional `username:password` for UI+admin API only; absent = no gate; malformed = refuse startup |
 | `SQLITE_PATH` | Control-plane SQLite |
 | `MODEL_CATALOG` | Runtime catalogue path |
 | `MODEL_CATALOG_FILE` | Host file bound into the Compose gateway as its chat catalogue |

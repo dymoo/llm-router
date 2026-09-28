@@ -2,25 +2,6 @@ import "server-only";
 import { createEnv } from "@t3-oss/env-nextjs";
 import { z } from "zod";
 
-const adminBasicAuth = z
-  .string()
-  .min(1)
-  .transform((value, ctx) => {
-    const colon = value.indexOf(":");
-    if (colon <= 0 || colon === value.length - 1) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "ADMIN_BASIC_AUTH must be username:password with both parts nonempty",
-      });
-      return z.NEVER;
-    }
-    return {
-      username: value.slice(0, colon),
-      password: value.slice(colon + 1),
-    };
-  })
-  .optional();
-
 const loadEnv = () =>
   createEnv({
     server: {
@@ -39,7 +20,6 @@ const loadEnv = () =>
       TYPESAFE_MODEL: z.string().min(1).default("jev-1.13.0"),
       TYPESAFE_BASE_URL: z.string().url().default("https://api.typesafe.ai"),
       OPENROUTER_API_KEY: z.string().min(1).optional(),
-      ADMIN_BASIC_AUTH: adminBasicAuth,
       METRICS_PORT: z.coerce.number().int().min(1).max(65535).optional(),
     },
     client: {},
@@ -59,7 +39,6 @@ const loadEnv = () =>
       TYPESAFE_MODEL: process.env.TYPESAFE_MODEL,
       TYPESAFE_BASE_URL: process.env.TYPESAFE_BASE_URL,
       OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
-      ADMIN_BASIC_AUTH: process.env.ADMIN_BASIC_AUTH,
       METRICS_PORT: process.env.METRICS_PORT,
     },
     emptyStringAsUndefined: true,
@@ -81,7 +60,6 @@ export interface Env {
   TYPESAFE_MODEL: string;
   TYPESAFE_BASE_URL: string;
   OPENROUTER_API_KEY?: string;
-  ADMIN_BASIC_AUTH?: { username: string; password: string };
   METRICS_PORT?: number;
 }
 
@@ -101,7 +79,7 @@ export const getEnv = (): Env => {
   return loaded;
 };
 
-/** Lazy view of getEnv(). Property access validates; module import does not. Malformed ADMIN_BASIC_AUTH fails closed. */
+/** Lazy view of getEnv(). Property access validates; module import does not. */
 export const env: Env = new Proxy({} as Env, {
   get(_target, property, receiver) {
     return Reflect.get(getEnv(), property, receiver);
