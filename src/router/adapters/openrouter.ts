@@ -9,18 +9,29 @@ import {
   type FetchImpl,
 } from "./http.ts";
 
+/**
+ * OpenRouter app attribution, sent on every OpenRouter call (chat, generation
+ * lookups, Batch, readiness). `hidden` keeps the app out of public rankings
+ * while attribution and per-app analytics keep working.
+ */
+export const OPENROUTER_APP_HEADERS = {
+  "HTTP-Referer": "https://github.com/dymoo/llm-router",
+  "X-OpenRouter-Title": "llm-router",
+  "X-OpenRouter-App-Visibility": "hidden",
+} as const;
+
 export function openRouterAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
   return {
     complete: (request) =>
       fetchResponse(fetchImpl, joinUrl(request.deployment.endpoint, "/v1/chat/completions"), {
         method: "POST",
-        headers: bearerHeaders(request.credential, { "http-referer": "https://dymoo.local" }),
+        headers: bearerHeaders(request.credential, OPENROUTER_APP_HEADERS),
         body: JSON.stringify(openRouterBody(request, false)),
       }).pipe(Effect.flatMap(readJsonCompletion)),
     stream: (request) =>
       fetchResponse(fetchImpl, joinUrl(request.deployment.endpoint, "/v1/chat/completions"), {
         method: "POST",
-        headers: bearerHeaders(request.credential, { "http-referer": "https://dymoo.local" }),
+        headers: bearerHeaders(request.credential, OPENROUTER_APP_HEADERS),
         body: JSON.stringify(openRouterBody(request, true)),
       }),
     probeUnavailable: () => Effect.succeed(false),
@@ -135,7 +146,7 @@ export function createOpenRouterPinVerifier(options: {
       url.searchParams.set("id", job.generationId);
       const response = await options.fetchImpl(url, {
         method: "GET",
-        headers: { authorization: `Bearer ${credential}` },
+        headers: { ...OPENROUTER_APP_HEADERS, authorization: `Bearer ${credential}` },
         signal: AbortSignal.timeout(2_000),
       });
       if (!response.ok) await response.body?.cancel().catch(() => undefined);

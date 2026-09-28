@@ -7,6 +7,7 @@ import { deploymentIsPlaceholder } from "../src/domain.ts";
 import { createHealthMonitor } from "../src/health.ts";
 import type { DeploymentHealth } from "../src/http/contracts.ts";
 import { adaptersFor } from "../src/router/adapters/index.ts";
+import { OPENROUTER_APP_HEADERS } from "../src/router/adapters/openrouter.ts";
 import { configuredAuxiliaryDeployments } from "./auxiliary.ts";
 import { keys } from "./control.ts";
 import { loadClassifierQualifications } from "./qualification.ts";
@@ -68,7 +69,12 @@ async function deployments(): Promise<DeploymentHealth[]> {
           else {
             ready = await boundedFetch(
               `${deployment.endpoint.replace(/\/$/, "")}/${deployment.transport === "openrouter" ? "auth/key" : "models"}`,
-              { headers: credential ? { authorization: `Bearer ${credential}` } : {} },
+              {
+                headers: {
+                  ...(deployment.transport === "openrouter" ? OPENROUTER_APP_HEADERS : {}),
+                  ...(credential ? { authorization: `Bearer ${credential}` } : {}),
+                },
+              },
               async (response) => {
                 try {
                   return response.ok;

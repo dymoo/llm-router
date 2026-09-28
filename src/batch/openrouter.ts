@@ -79,6 +79,7 @@ import { Option, Schema } from "effect";
 import type { BatchUsage } from "../domain.ts";
 import { createDeadline } from "../deadline.ts";
 import type { FetchImpl } from "../router/adapters/http.ts";
+import { OPENROUTER_APP_HEADERS } from "../router/adapters/openrouter.ts";
 import { BATCH_RESULT_JOB_BUDGET_BYTES, type BatchResultRow } from "./results.ts";
 import type {
   BatchSpillGroup,
@@ -587,7 +588,7 @@ export function openRouterBatchSpill(
   const pollMax = options.pollMaxDelayMs ?? POLL_MAX_DELAY_MS;
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const pollWindow = options.pollWindowMs ?? DEFAULT_POLL_WINDOW_MS;
-  const authHeaders = { authorization: `Bearer ${options.apiKey}` };
+  const authHeaders = { ...OPENROUTER_APP_HEADERS, authorization: `Bearer ${options.apiKey}` };
 
   const callDeadline = (signal: AbortSignal | undefined) =>
     createDeadline(requestTimeoutMs, signal === undefined ? [] : [signal]);

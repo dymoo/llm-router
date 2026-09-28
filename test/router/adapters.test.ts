@@ -18,6 +18,8 @@ import { joinUrl } from "../../src/router/adapters/http.ts";
 import { completionBody } from "../../src/router/adapters/openai-compatible.ts";
 import {
   createOpenRouterPinVerifier,
+  OPENROUTER_APP_HEADERS,
+  openRouterAdapter,
   openRouterBody,
 } from "../../src/router/adapters/openrouter.ts";
 import { localQwen, cloudGlm, frontier } from "./fixtures.ts";
@@ -87,6 +89,41 @@ describe("adapters", () => {
       }),
       false,
     );
+  });
+
+  it("identifies llm-router to OpenRouter on completions, streams and generation lookups", async () => {
+    const seen: Headers[] = [];
+    const fake = async (_url: string | URL | Request, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers));
+      return new Response(
+        JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const adapter = openRouterAdapter(fake);
+    await Effect.runPromise(
+      adapter.complete(request({ deployment: frontier, appliedEffort: "none" })),
+    );
+    await Effect.runPromise(
+      adapter.stream(request({ deployment: frontier, appliedEffort: "none" })),
+    );
+    await new Promise<void>((done) => {
+      createOpenRouterPinVerifier({
+        fetchImpl: async (url, init) => {
+          await fake(url, init);
+          done();
+          return new Response("{}", { status: 200 });
+        },
+        credential: () => "sk-test",
+        stopping: () => false,
+        onVerified: () => undefined,
+        delayMs: 0,
+      })({ ...frontier, providerRestriction: "inference-net" }, "gen-1");
+    });
+    assert.equal(seen.length, 3);
+    for (const headers of seen)
+      for (const [name, value] of Object.entries(OPENROUTER_APP_HEADERS))
+        assert.equal(headers.get(name), value);
   });
 
   it("pins OpenRouter provider without hidden fallbacks", () => {
