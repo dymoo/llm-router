@@ -14,6 +14,7 @@ export function observeSseUsage(
   onUsage: (usage: ProviderUsage) => void,
   rewriteFinalUsage?: RewriteUsage,
   startedAtMs = Date.now(),
+  onCompleted?: (generationId: unknown) => void,
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const encoder = new TextEncoder();
@@ -65,6 +66,7 @@ export function observeSseUsage(
       .join("\n");
     if (data === "[DONE]") {
       observe(emptyProviderUsage());
+      onCompleted?.(metadata.id);
       if (rewriteFinalUsage !== undefined) {
         const finalFrame = rewriteFinalUsage({ ...metadata, ...usageFrame }, usage);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalFrame)}\n\n`));

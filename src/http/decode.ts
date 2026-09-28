@@ -1,3 +1,5 @@
+import { Schema } from "effect";
+import { KeyPolicy as DomainKeyPolicy } from "../domain.ts";
 import { decodeSampling, SAMPLING_FIELDS } from "../sampling.ts";
 import type {
   ChatCompletionRequest,
@@ -27,6 +29,13 @@ const REQUEST_KEYS: Record<string, true> = {
   routing: true,
   stream_options: true,
   n: true,
+  store: true,
+  parallel_tool_calls: true,
+  user: true,
+  metadata: true,
+  service_tier: true,
+  prompt_cache_key: true,
+  safety_identifier: true,
   ...Object.fromEntries(SAMPLING_FIELDS.map((key) => [key, true as const])),
 };
 
@@ -51,6 +60,7 @@ const POLICY_KEYS: Record<string, true> = {
   requestsPerMinute: true,
   maxConcurrent: true,
   maxWaitMs: true,
+  overloadAction: true,
   maxEstimatedUsd: true,
   bias: true,
 };
@@ -81,56 +91,26 @@ function finiteNumber(value: unknown, label: string): number {
   return value;
 }
 
-function optionalNullNumber(value: unknown, label: string): number | null {
-  if (value === null) {
-    return null;
-  }
-  return finiteNumber(value, label);
-}
-
 export function decodeKeyPolicy(value: unknown): KeyPolicy {
   const record = asRecord(value, "policy");
   rejectUnknown(record, POLICY_KEYS, "policy");
-  if (record.priority !== "high" && record.priority !== "medium" && record.priority !== "low") {
-    throw new InvalidInput("policy.priority is invalid");
-  }
-  const localityBias = finiteNumber(record.localityBias, "policy.localityBias");
-  if (localityBias < 0 || localityBias > 1) {
-    throw new InvalidInput("policy.localityBias must be in [0,1]");
-  }
-  let allowedModels: readonly string[] | null = null;
-  if (record.allowedModels !== null && record.allowedModels !== undefined) {
-    if (
-      !Array.isArray(record.allowedModels) ||
-      record.allowedModels.some((id) => typeof id !== "string")
-    ) {
-      throw new InvalidInput("policy.allowedModels must be a string array or null");
-    }
-    allowedModels = record.allowedModels as string[];
-  }
   const bias = asRecord(record.bias, "policy.bias");
   rejectUnknown(bias, { cost: true, quality: true, latency: true }, "policy.bias");
-  const cost = finiteNumber(bias.cost, "policy.bias.cost");
-  const quality = finiteNumber(bias.quality, "policy.bias.quality");
-  const latency = finiteNumber(bias.latency, "policy.bias.latency");
   if (
-    [cost, quality, latency].some((item) => item < 0 || item > 1) ||
-    cost + quality + latency <= 0
+    record.overloadAction !== undefined &&
+    record.overloadAction !== "report" &&
+    record.overloadAction !== "failover"
   ) {
-    throw new InvalidInput("policy.bias values must be in [0,1] with at least one positive");
+    throw new InvalidInput("policy.overloadAction is invalid");
   }
-  return {
-    priority: record.priority,
-    localityBias,
-    contextLimitTokens: finiteNumber(record.contextLimitTokens, "policy.contextLimitTokens"),
-    maxCompletionTokens: finiteNumber(record.maxCompletionTokens, "policy.maxCompletionTokens"),
-    allowedModels,
-    requestsPerMinute: finiteNumber(record.requestsPerMinute, "policy.requestsPerMinute"),
-    maxConcurrent: finiteNumber(record.maxConcurrent, "policy.maxConcurrent"),
-    maxWaitMs: finiteNumber(record.maxWaitMs, "policy.maxWaitMs"),
-    maxEstimatedUsd: optionalNullNumber(record.maxEstimatedUsd, "policy.maxEstimatedUsd"),
-    bias: { cost, quality, latency },
-  };
+  try {
+    return Schema.decodeUnknownSync(DomainKeyPolicy)({
+      ...record,
+      allowedModels: record.allowedModels ?? null,
+    });
+  } catch {
+    throw new InvalidInput("policy violates configured limits");
+  }
 }
 
 export function decodeLoginBody(value: Record<string, unknown>): { token: string } {
@@ -168,7 +148,11 @@ export function decodeKeyPatch(value: Record<string, unknown>): KeyPatch {
     expiresAt: value.expiresAt,
     policy: value.policy,
   });
-  return { ...draft, expectedVersion };
+  const { overloadAction: _default, ...legacyPolicy } = draft.policy;
+  const policy = Object.hasOwn(asRecord(value.policy, "policy"), "overloadAction")
+    ? draft.policy
+    : legacyPolicy;
+  return { ...draft, policy, expectedVersion };
 }
 
 export function decodeRotateBody(value: Record<string, unknown>): { expectedVersion: number } {
@@ -190,6 +174,10 @@ function decodeRouting(value: unknown, newId: () => string): RoutingHint {
     record.sessionId === undefined
       ? newId()
       : requireNonempty(record.sessionId, "routing.sessionId");
+  // Session ids go into response headers and the in-memory session store: a
+  // lone surrogate cannot be encoded, and size is bounded.
+  if (sessionId.length > 256 || !sessionId.isWellFormed())
+    throw new InvalidInput("routing.sessionId must be well-formed and at most 256 characters");
   let boundary: SessionBoundary = "new-task";
   if (record.boundary !== undefined) {
     if (
@@ -222,6 +210,46 @@ function requireNonempty(value: unknown, label: string): string {
   return value;
 }
 
+function decodeToolChoice(value: unknown): unknown {
+  if (value === "auto" || value === "none" || value === "required") return value;
+  const choice = asRecord(value, "tool_choice");
+  rejectUnknown(choice, { type: true, function: true }, "tool_choice");
+  if (choice.type !== "function") throw new InvalidInput("tool_choice.type must be function");
+  const fn = asRecord(choice.function, "tool_choice.function");
+  rejectUnknown(fn, { name: true }, "tool_choice.function");
+  requireNonempty(fn.name, "tool_choice.function.name");
+  return value;
+}
+
+function decodeResponseFormat(value: unknown): unknown {
+  const format = asRecord(value, "response_format");
+  rejectUnknown(format, { type: true, json_schema: true }, "response_format");
+  if (format.type === "text" || format.type === "json_object") {
+    if (format.json_schema !== undefined) {
+      throw new InvalidInput("json_schema requires response_format.type json_schema");
+    }
+    return value;
+  }
+  if (format.type !== "json_schema") {
+    throw new InvalidInput("response_format.type is invalid");
+  }
+  const definition = asRecord(format.json_schema, "response_format.json_schema");
+  rejectUnknown(
+    definition,
+    { name: true, schema: true, strict: true, description: true },
+    "response_format.json_schema",
+  );
+  requireNonempty(definition.name, "response_format.json_schema.name");
+  asRecord(definition.schema, "response_format.json_schema.schema");
+  if (definition.strict !== undefined && typeof definition.strict !== "boolean") {
+    throw new InvalidInput("response_format.json_schema.strict must be a boolean");
+  }
+  if (definition.description !== undefined && typeof definition.description !== "string") {
+    throw new InvalidInput("response_format.json_schema.description must be a string");
+  }
+  return value;
+}
+
 export function decodeChatCompletion(
   value: Record<string, unknown>,
   options: { newId: () => string },
@@ -250,6 +278,23 @@ export function decodeChatCompletion(
     }
   }
   if (value.n !== undefined && value.n !== 1) throw new InvalidInput("Only n=1 is supported");
+  if (value.store !== undefined && typeof value.store !== "boolean") {
+    throw new InvalidInput("store must be a boolean");
+  }
+  if (value.parallel_tool_calls !== undefined && typeof value.parallel_tool_calls !== "boolean") {
+    throw new InvalidInput("parallel_tool_calls must be a boolean");
+  }
+  for (const key of ["user", "service_tier", "prompt_cache_key", "safety_identifier"]) {
+    if (value[key] !== undefined && typeof value[key] !== "string") {
+      throw new InvalidInput(`${key} must be a string`);
+    }
+  }
+  if (value.metadata !== undefined) {
+    const metadata = asRecord(value.metadata, "metadata");
+    if (Object.values(metadata).some((item) => typeof item !== "string")) {
+      throw new InvalidInput("metadata values must be strings");
+    }
+  }
   if (value.stream_options !== undefined) {
     const streamOptions = asRecord(value.stream_options, "stream_options");
     rejectUnknown(streamOptions, { include_usage: true }, "stream_options");
@@ -265,21 +310,28 @@ export function decodeChatCompletion(
     sampling: decodeSampling(value),
     messages,
     routing: decodeRouting(value.routing, options.newId),
+    parallelToolCalls: value.parallel_tool_calls as boolean | undefined,
   };
   if (value.tools !== undefined) {
     request.tools = decodeTools(value.tools);
     capabilities.tools = true;
   }
   if (value.tool_choice !== undefined) {
-    request.tool_choice = value.tool_choice;
+    request.tool_choice = decodeToolChoice(value.tool_choice);
   }
   if (value.response_format !== undefined) {
-    request.response_format = value.response_format;
-    capabilities.json = true;
+    const responseFormat = decodeResponseFormat(value.response_format);
+    // `text` is the OpenAI default; omit it so adapters without format controls stay eligible.
+    if ((responseFormat as { type: string }).type !== "text") {
+      request.response_format = responseFormat;
+      capabilities.json = true;
+    }
   }
   if (maxCompletionTokens !== undefined) {
     request.maxCompletionTokens = maxCompletionTokens;
   }
+  // Other OpenAI tiers (auto, default, scale, priority) are accepted and served normally.
+  if (value.service_tier === "flex") request.serviceTier = "flex";
   return request;
 }
 
@@ -326,7 +378,9 @@ export function requestCapabilities(request: ChatCompletionRequest): RequestCapa
   return {
     ...capabilities,
     tools: capabilities.tools || request.tools !== undefined,
-    json: request.response_format !== undefined,
+    json:
+      request.response_format !== undefined &&
+      (request.response_format as { type: string }).type !== "text",
   };
 }
 

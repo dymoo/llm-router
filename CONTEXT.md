@@ -1,11 +1,11 @@
 # LLM Router
 
-A self-hosted coding-agent inference gateway: it assesses a task, then reserves a model deployment and reasoning configuration through execution. It is not a model runtime.
+A self-hosted coding-agent inference gateway: it applies routing policy, optionally informed by semantic assessment, then reserves a model deployment and reasoning configuration through execution. It is not a model runtime.
 
 ## Product
 
 **Router**:
-The control plane that authenticates keys, assesses tasks, and holds a deployment reservation through generation.
+The control plane that authenticates keys, selects routes, and holds a deployment reservation through generation.
 _Avoid_: proxy, load balancer, classifier, Halogen, runtime, analytics warehouse
 
 **Key**:
@@ -30,6 +30,18 @@ _Avoid_: route, live wait/load/price text, Jev as fallback router, classificatio
 The assessment backend, either local Laya or explicitly selected remote Jev.
 _Avoid_: generator, Router, automatic fallback
 
+**Classifier readiness**:
+Operational status used to decide whether to attempt an Assessment, based on configuration evidence for a remote backend or a live local probe. It does not establish calibrated quality or Task success.
+_Avoid_: quality score, Task success, benchmark
+
+**Calibration**:
+Measured agreement between one Classifier backend revision and labelled judgments on a declared evaluation set, reported per Assessment question with the errors it permits.
+_Avoid_: confidence, readiness, self-claimed accuracy, benchmark as Task success
+
+**Classifier qualification**:
+The dated record pairing one Classifier backend revision and question schema with its measured Calibration and sourced token rates. Assessment-based routing fails closed without it; absent rates stay unknown.
+_Avoid_: licence, certification, model card, readiness
+
 **Laya**:
 The local classifier model. Default execution is CPU. NPU is optional and only when IOMMU is enabled.
 _Avoid_: Halogen, local Qwen, NPU as the default, generator
@@ -52,6 +64,10 @@ _Avoid_: generation tokens, prompt cache, unused 1k family window, mutable occup
 
 ## Routing
 
+**Rules mode**:
+An explicitly selected routing mode that uses deployment facts and Key policy without a semantic Assessment.
+_Avoid_: classifier, guessed difficulty, fallback assessment
+
 **Route**:
 A deployment and reasoning configuration reserved through execution, not a disconnected ranking result.
 _Avoid_: suggestion, score, assessment
@@ -72,18 +88,44 @@ _Avoid_: interactive, background, preemption, SLA, reservedInteractiveSlots (dep
 Evidence from the local runtime that it cannot accept more work. Gateway slot counts and missing telemetry are not saturation.
 _Avoid_: semaphore full, unknown health, complexity, busy guess
 
+**Local overload**:
+No immediately available Router-owned permit on any eligible local deployment, or a definitive local runtime rejection before execution (such as queue-full). It is not a claim of Verified saturation.
+_Avoid_: verified saturation, unknown health, an uncertain failure after provider contact
+
+**Overload action**:
+A Key's choice to report Local overload or permit a pre-dispatch switch to an already eligible cloud Deployment. It does not override Hard constraints or Session boundaries.
+_Avoid_: locality bias, automatic paid fallback, retry after dispatch
+
 **Cost bias** / **Quality bias** / **Latency bias**:
 Independent per-key ranking weights in `[0, 1]`. They never relax a hard constraint.
 _Avoid_: locality bias, monthly budget, invoice cap
 
 **Effort**:
-The thinking control requested from the Assessment and mapped onto what the chosen deployment actually supports.
-_Avoid_: applied `on` as a graded `high`, no-thinking as the default for coding
+The thinking control chosen for a task and mapped onto what the selected Deployment supports. Assessment-based routing uses semantic effort; Rules mode has no difficulty signal.
+_Avoid_: applied `on` as a graded `high`, inferred task complexity
+
+## Batch
+
+**Batch job**:
+A submitted unit of low-priority deferred chat work: one model, one completion window, a bounded set of items, and one terminal status.
+_Avoid_: background job, bulk request, upload, task queue
+
+**Batch item**:
+One chat request inside a Batch job, admitted and accounted through the ordinary routing path when it dispatches.
+_Avoid_: sub-request, queued message, row
+
+**Deferred lane**:
+The scheduling lane in which Batch items wait for idle capacity — dispatch only when interactive queues are empty, and never compete with high, medium, or low admission.
+_Avoid_: low priority, background priority, overflow queue, preemption
+
+**Result holding**:
+The bounded per-key opt-in store of a Batch job's terminal results — read retry-safely, held briefly, then deleted — kept apart from the metadata store and Analytics.
+_Avoid_: transcript archive, prompt store, results database, full capture
 
 ## Continuity
 
 **Session**:
-A key-namespaced client trajectory that reuses an Assessment, deployment, and effort until a safe boundary.
+A key-namespaced client trajectory that reuses a deployment, effort, and any Assessment until a safe boundary.
 _Avoid_: admin session, login, one session for every request on a Key
 
 **Session pin**:
@@ -91,11 +133,11 @@ The stored Route for a Session. Affinity is not a cache hit.
 _Avoid_: KV residency, prefix-cache evidence, provider restriction as a hit
 
 **Boundary**:
-The client declaration of `new-task` (assess and pin), `continue` (reuse the pin), or `checkpoint` (reassess when a switch is safe).
+The client declaration of `new-task` (select and pin), `continue` (reuse the pin), or `checkpoint` (reconsider when a switch is safe).
 _Avoid_: silent migrate, mid-tool switch, inferred shared session
 
 **Checkpoint**:
-A client-declared safe point where reclassification and a controlled deployment change are allowed.
+A client-declared safe point where route reconsideration and a controlled deployment change are allowed.
 _Avoid_: continue, crash recovery, automatic retry after dispatch
 
 ## Runtimes

@@ -5,7 +5,7 @@
 | Service | Image | Published | Default backend |
 | --- | --- | --- | --- |
 | `gateway` | built from `Dockerfile` | `127.0.0.1:3000` only | Next.js standalone |
-| `laya` | built from `Dockerfile.laya` (`python -m laya_service`) | none | CPU (`LAYA_BACKEND=cpu`) |
+| `laya` | optional `COMPOSE_PROFILES=laya`, built from `Dockerfile.laya` | none | CPU (`LAYA_BACKEND=cpu`), only for explicitly selected Laya mode |
 | `llamacpp` | selected `COMPOSE_PROFILES=llamacpp`, pinned Vulkan compatibility image | none | alternative to the optimized native host path |
 | `halogen` | selected `COMPOSE_PROFILES=halogen`, unmodified pinned image | none | official HGN + required quality overlay |
 | `fastflowlm` | optional `COMPOSE_PROFILES=npu` | none | NPU embeddings + Whisper |
@@ -15,21 +15,23 @@ Do not bake a generator into the gateway image. Select one GPU runtime with [run
 
 There is **no UI login**. Reachability grants administration unless `ADMIN_BASIC_AUTH` is configured. Inference still requires `jrv_` API keys. Default binds are loopback. Mutations require exact `APP_ORIGIN` and `X-Jev-Admin: 1`.
 
-## Clean machine (CPU classifier, no local generator)
+## Clean machine (Rules routing, no classifier or local generator)
 
 Needs Docker, Node 22.16+, and this tree. Does **not** need AMD GPU, NPU, or paid keys.
 
 ```bash
 node scripts/setup.mjs
-docker compose up -d gateway laya
+docker compose up -d --build gateway
 docker compose ps
 ```
 
-Gateway starts even if Laya is still pulling weights or is down. The console should load; inference reports not-ready until Laya answers `/healthz`.
+Only the gateway starts by default: no Laya build, container or model download. The console loads without a classifier; readiness still needs persistence and at least one healthy chat deployment.
 
 `scripts/setup.mjs` writes mode-0600 `.env` with generated secrets and a matching catalogue, refuses overwrite, and creates `./data` mode 0700. Compose catalogues are readable metadata (0644), never secret stores. Use `--runtime cloud` for an explicit cloud-only catalogue and configure an OpenRouter key before inference.
 
 The no-argument default retains the native llama.cpp layout without starting a GPU container. Use `--runtime halogen` or `--runtime llamacpp` when the AMD host and corresponding model files are ready. Generated aliases/limits must match the running engine; bootstrap quality/latency values are not measurements.
+
+To opt into **Laya**, set `CLASSIFIER_MODE=laya` in `.env`, add `laya` to `COMPOSE_PROFILES` (preserving the chosen GPU/NPU/WebUI profiles), select real qualification evidence, then run `docker compose up -d --build`. Laya remains CPU by default and unqualified evidence still blocks routing. **Jev** needs its configured key and qualification record, but never the `laya` profile. Changing only `CLASSIFIER_MODE` does not start a Compose service.
 
 ## Native (no Docker)
 
@@ -38,7 +40,7 @@ node scripts/setup.mjs --native
 set -a && . ./.env.native && set +a
 ```
 
-`.env.native` uses `SQLITE_PATH=./data/control.sqlite`, `MODEL_CATALOG=./catalog.native.json`, and `LAYA_URL=http://127.0.0.1:8090`. It does not overwrite Compose configuration. Laya root checkpoint max_len is 512 / head 192; see the [classifier quality gate](research/laya-routing-validation.md) before production routing.
+`.env.native` uses `SQLITE_PATH=./data/control.sqlite`, `MODEL_CATALOG=./catalog.native.json`, and optional `LAYA_URL=http://127.0.0.1:8090`. Rules mode starts no classifier. It does not overwrite Compose configuration. If explicitly choosing Laya, start the separate local service and qualify its root checkpoint (max_len 512 / head 192); see the [classifier quality gate](research/laya-routing-validation.md).
 
 ## Strix Halo host (after guide install)
 
@@ -74,12 +76,18 @@ Never publish `0.0.0.0` on a public interface. LAN reachability is admin access 
 | `MODEL_CATALOG_FILE` | Host file bound into the Compose gateway as its chat catalogue |
 | `COMPOSE_PROFILES` | Selected GPU runtime and optional `npu,webui` services |
 | `LAYA_URL` | `http://laya:8090` on Compose; `http://127.0.0.1:8090` native |
-| `CLASSIFIER_MODE` | `laya` or `jev` only. No automatic fallback. |
+| `CLASSIFIER_MODE` | `rules` (classifier-free; example default), `laya` or `jev`. Explicit selection; no automatic fallback. |
+| `CLASSIFIER_QUALIFICATION_FILE` | Host selector for the qualification record bound read-only into the gateway (default `./classifier-qualification.example.json` — keep the `./` prefix in short syntax; the mount itself is long-syntax bind, so bare-relative or absolute paths are safe). The shipped example has `verdict: fail` + `REPLACE_` placeholders so the default can never pass the gate. A real record is never generated: keep it outside the repository or under the ignored `./data/` directory, verify the chosen path is excluded from Git and the Docker build context, and never stage it. Only the literal root `classifier-qualification.json` is ignored by default; an arbitrary custom path is **not** automatically excluded |
+| `CLASSIFIER_QUALIFICATION` | Native-only local path to qualification records; absent = fail-closed `unqualified` in Laya/Jev modes. Ignored in Rules mode. On Compose the gateway uses `/etc/llm-router/classifier-qualification.json`, overriding any `.env` value, mounted read-only from `CLASSIFIER_QUALIFICATION_FILE` |
 | `TYPESAFE_API_KEY` | Required only for `jev` |
 | `LAYA_MODEL_REVISION` | Pinned snapshot `1c5edc17a7acd8701df6fc341c0d179f1c62c982` |
 | `HALOGEN_DOWNLOAD` | First-boot weights repo; passed into the unmodified Halogen image |
 | Catalogue `credentialEnvVar` | Secret variable name, e.g. `OPENROUTER_API_KEY`; never put the credential itself in a catalogue |
 | `AUXILIARY_CATALOG` | Optional NPU deployment catalogue; absent disables modality deployments |
+| `BATCH_RESULTS_DIR` | Optional batch result-holding directory override; unset defaults to `dirname(SQLITE_PATH)/batch-content` beside the metadata DB — dedicated store outside `control.sqlite`/Analytics, see [batch.md](batch.md) |
+| `BATCH_CATALOG` | In-gateway path of the batch-only deployment catalogue (`/etc/llm-router/batch-catalog.json` on Compose, `./catalog.batch.example.json` native; `cloud-glm-batch` → `z-ai/glm-5.3-flash` via `deepinfra/fp4`) — [batch.md](batch.md) |
+| `BATCH_CATALOG_FILE` | Host file bound read-only into the gateway as the batch catalogue (`${BATCH_CATALOG_FILE:-./catalog.batch.example.json}:/etc/llm-router/batch-catalog.json:ro`); never merged into the synchronous chat catalogue |
+| Batch limits (no env) | Fixed code constants: 1000 items/job, 512 KiB/item, 32 MiB/job, 4 in-flight jobs/key, `deadline_at` = spill + 24 h provider window, 24 h result TTL after terminal, 64/256 MiB result budgets — [batch.md](batch.md) |
 | `WEBUI_GATEWAY_KEY`, `WEBUI_SECRET_KEY` | Dedicated inference credential and stable WebUI secret |
 
 ## Optional AI hub services

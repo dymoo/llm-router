@@ -9,29 +9,45 @@ const baseEnv = {
   MODEL_CATALOG: "./catalog.example.json",
   API_KEY_PEPPER: "test-pepper-not-a-production-credential",
   CLASSIFIER_MODE: "laya",
+  CLASSIFIER_QUALIFICATION: "",
   ADMIN_BASIC_AUTH: "",
+  BATCH_CATALOG: "",
+  BATCH_RESULTS_DIR: "",
 };
 
-function inspect(overrides: Record<string, string | undefined>) {
+function evaluate(script: string, overrides: Record<string, string | undefined>) {
   return spawnSync(
     process.execPath,
-    [
-      "--import",
-      "tsx",
-      "--conditions=react-server",
-      "--input-type=module",
-      "-e",
-      'import { getEnv } from "./env.ts"; const env=getEnv(); console.log(JSON.stringify({ mode:env.CLASSIFIER_MODE, basic:env.ADMIN_BASIC_AUTH!==undefined, username:env.ADMIN_BASIC_AUTH?.username, passwordLength:env.ADMIN_BASIC_AUTH?.password.length }));',
-    ],
+    ["--import", "tsx", "--conditions=react-server", "--input-type=module", "-e", script],
     { cwd: process.cwd(), env: { ...baseEnv, ...overrides }, encoding: "utf8" },
+  );
+}
+
+function inspect(overrides: Record<string, string | undefined>) {
+  return evaluate(
+    'import { getEnv } from "./env.ts"; const env=getEnv(); console.log(JSON.stringify({ mode:env.CLASSIFIER_MODE, qualification:env.CLASSIFIER_QUALIFICATION ?? null, basic:env.ADMIN_BASIC_AUTH!==undefined, username:env.ADMIN_BASIC_AUTH?.username, passwordLength:env.ADMIN_BASIC_AUTH?.password.length }));',
+    overrides,
   );
 }
 
 test("typed configuration accepts absent Basic auth and keeps credentials out of output", () => {
   const result = inspect({});
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { mode: "laya", basic: false });
+  assert.deepEqual(JSON.parse(result.stdout), { mode: "laya", qualification: null, basic: false });
   assert.equal(result.stdout.includes(baseEnv.API_KEY_PEPPER), false);
+});
+
+test("optional qualification evidence path survives and empty stays absent", () => {
+  const configured = inspect({ CLASSIFIER_QUALIFICATION: "/etc/llm-router/qualification.json" });
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.deepEqual(
+    JSON.parse(configured.stdout).qualification,
+    "/etc/llm-router/qualification.json",
+  );
+
+  const empty = inspect({ CLASSIFIER_QUALIFICATION: "" });
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.deepEqual(JSON.parse(empty.stdout).qualification, null);
 });
 
 test("optional Basic auth keeps colons in its password", () => {
@@ -39,6 +55,7 @@ test("optional Basic auth keeps colons in its password", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
     mode: "laya",
+    qualification: null,
     basic: true,
     username: "operator",
     passwordLength: 18,
@@ -57,4 +74,22 @@ test("malformed Basic auth and invalid backend configuration fail closed", () =>
     assert.notEqual(result.status, 0);
     assert.equal(result.stdout.includes(baseEnv.API_KEY_PEPPER), false);
   }
+});
+
+test("batch catalogue and content-directory entries are optional; configured values survive", () => {
+  const script =
+    'import { getEnv } from "./env.ts"; const env=getEnv(); console.log(JSON.stringify({ catalog: env.BATCH_CATALOG ?? null, results: env.BATCH_RESULTS_DIR ?? null }));';
+  const configured = evaluate(script, {
+    BATCH_CATALOG: "/etc/llm-router/batch-catalog.json",
+    BATCH_RESULTS_DIR: "/var/lib/llm-router/batch-content",
+  });
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.deepEqual(JSON.parse(configured.stdout), {
+    catalog: "/etc/llm-router/batch-catalog.json",
+    results: "/var/lib/llm-router/batch-content",
+  });
+  // An operator who uncomments the override but leaves it blank must still boot.
+  const blank = evaluate(script, {});
+  assert.equal(blank.status, 0, blank.stderr);
+  assert.deepEqual(JSON.parse(blank.stdout), { catalog: null, results: null });
 });

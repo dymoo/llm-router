@@ -3,8 +3,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { HttpFailure } from "../src/http/errors.ts";
 import { stopHealth } from "./health.ts";
 import { pendingAdmissions } from "./control.ts";
+import { drainBatch } from "./batch.ts";
 import { disposeGateway } from "./runtime.ts";
 import { processState } from "./state.ts";
+import { stopMetricsListener } from "./metrics-listener.ts";
 
 export function assertAcceptingWork(): void {
   if (processState.stopping) throw new HttpFailure(503, "unavailable", "Gateway is draining");
@@ -12,7 +14,11 @@ export function assertAcceptingWork(): void {
 
 async function performDrain(): Promise<void> {
   processState.stopping = true;
+  await stopMetricsListener();
   stopHealth();
+  // Batch drains its in-flight LOCAL items. Remote polling tasks are aborted and settled
+  // before database disposal; unfinished durable intents resume at the next boot.
+  await drainBatch();
   const deadline = Date.now() + 11 * 60_000;
   while (pendingAdmissions() > 0 && Date.now() < deadline) await delay(100);
   await disposeGateway();
@@ -25,6 +31,7 @@ export function drainGateway(): Promise<void> {
 export function registerShutdown(): void {
   if (processState.signalsRegistered) return;
   processState.signalsRegistered = true;
+  // Signal registration is optional; batch scheduling starts at every production Node boot.
   const stop = () => {
     void drainGateway().then(
       () => process.exit(0),

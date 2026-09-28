@@ -37,6 +37,9 @@ export function validatePolicy(policy: KeyPolicy): string | null {
   if (policy.priority !== "high" && policy.priority !== "medium" && policy.priority !== "low") {
     return "Priority must be high, medium, or low.";
   }
+  if (policy.overloadAction !== "report" && policy.overloadAction !== "failover") {
+    return "Local overload action must be report or failover.";
+  }
   if (!Number.isFinite(policy.localityBias) || policy.localityBias < 0 || policy.localityBias > 1) {
     return "Locality must be between 0 and 1.";
   }

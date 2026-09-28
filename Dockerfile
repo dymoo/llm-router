@@ -21,6 +21,8 @@ RUN mkdir -p public \
   && test -f .next/standalone/server.js
 
 FROM node:24-bookworm-slim AS runner
+ARG SOURCE_COMMIT=unknown
+ENV SOURCE_COMMIT=${SOURCE_COMMIT}
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1

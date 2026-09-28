@@ -9,8 +9,11 @@ export type HttpErrorCode =
   | "unavailable"
   | "classifier_unavailable"
   | "classifier_context_exceeded"
+  | "classifier_unqualified"
   | "no_eligible_model"
   | "busy"
+  | "local_overloaded"
+  | "resource_unavailable"
   | "provider_failure"
   | "timeout"
   | "cancelled"
@@ -30,12 +33,19 @@ export type HttpErrorBody = {
 export class HttpFailure extends Error {
   readonly status: number;
   readonly code: HttpErrorCode;
+  readonly retryAfterSeconds: number | null;
 
-  constructor(status: number, code: HttpErrorCode, message: string) {
+  constructor(
+    status: number,
+    code: HttpErrorCode,
+    message: string,
+    retryAfterSeconds: number | null = null,
+  ) {
     super(message);
     this.name = "HttpFailure";
     this.status = status;
     this.code = code;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -102,10 +112,20 @@ const TAG_MAP: Record<string, { status: number; code: HttpErrorCode; message: st
     code: "classifier_unavailable",
     message: "classifier unavailable",
   },
+  ClassifierUnqualified: {
+    status: 503,
+    code: "classifier_unqualified",
+    message: "classifier is not qualified for production routing",
+  },
   ClassifierInvalidResponse: {
     status: 503,
     code: "classifier_unavailable",
     message: "classifier unavailable",
+  },
+  LocalOverloaded: {
+    status: 503,
+    code: "local_overloaded",
+    message: "local deployment overloaded",
   },
   CapacityBusy: { status: 503, code: "busy", message: "deployment capacity is busy" },
   QueueFull: { status: 503, code: "busy", message: "inference queue is full" },
@@ -172,6 +192,31 @@ function messageOf(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function retryAfterOf(error: unknown): number {
+  if (typeof error !== "object" || error === null) return 1;
+  if ("_tag" in error && error._tag === "LocalOverloaded") {
+    const value = "retryAfterSeconds" in error ? error.retryAfterSeconds : null;
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 1;
+  }
+  return "cause" in error ? retryAfterOf(error.cause) : 1;
+}
+
+/**
+ * A `service_tier: "flex"` request refused for lack of local capacity, in
+ * OpenAI Flex's shape: HTTP 429 `resource_unavailable`. Other failures pass through.
+ */
+export function flexFailure(error: unknown): unknown {
+  const failure = toHttpFailure(error);
+  return failure.code === "local_overloaded" || failure.code === "busy"
+    ? new HttpFailure(
+        429,
+        "resource_unavailable",
+        "no spare local capacity for a flex request",
+        failure.retryAfterSeconds ?? 1,
+      )
+    : error;
+}
+
 export function toHttpFailure(error: unknown): HttpFailure {
   if (error instanceof HttpFailure) {
     return error;
@@ -180,7 +225,12 @@ export function toHttpFailure(error: unknown): HttpFailure {
   if (tag !== undefined && tag in TAG_MAP) {
     const mapped = TAG_MAP[tag]!;
     const message = tag === "InvalidInput" ? messageOf(error, mapped.message) : mapped.message;
-    return new HttpFailure(mapped.status, mapped.code, message);
+    return new HttpFailure(
+      mapped.status,
+      mapped.code,
+      message,
+      mapped.code === "local_overloaded" ? retryAfterOf(error) : null,
+    );
   }
   return new HttpFailure(500, "unknown", "internal error");
 }
@@ -215,5 +265,11 @@ export function emptyResponse(status: number, extra?: HeadersInit): Response {
 export function failureResponse(error: unknown): Response {
   const failure = toHttpFailure(error);
   const status = failure.status === 499 ? 400 : failure.status;
-  return jsonResponse(status, errorBody(failure));
+  return jsonResponse(
+    status,
+    errorBody(failure),
+    failure.code === "local_overloaded" || failure.code === "resource_unavailable"
+      ? { "retry-after": String(failure.retryAfterSeconds ?? 1) }
+      : undefined,
+  );
 }

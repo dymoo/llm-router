@@ -1,4 +1,5 @@
 export type Priority = "high" | "medium" | "low";
+export type OverloadAction = "report" | "failover";
 
 export type KeyPolicy = {
   priority: Priority;
@@ -9,6 +10,7 @@ export type KeyPolicy = {
   requestsPerMinute: number;
   maxConcurrent: number;
   maxWaitMs: number;
+  overloadAction: OverloadAction;
   maxEstimatedUsd: number | null;
   bias: {
     cost: number;
@@ -54,7 +56,12 @@ export type ClassifierHealth = {
   ready: boolean;
   backend: string;
   local: boolean;
-  evidence?: "runtime-probe" | "configuration-only" | "unavailable";
+  evidence?:
+    | "runtime-probe"
+    | "configuration-only"
+    | "unavailable"
+    | "unqualified"
+    | "deterministic-rules";
 };
 
 export type DeploymentHealth = {

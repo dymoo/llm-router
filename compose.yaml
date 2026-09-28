@@ -1,5 +1,6 @@
-# Default: gateway + CPU Laya. Choose one GPU runtime: the `llamacpp` profile,
-# the `halogen` profile, or a native host llama-server. Do not enable both
+# Default: gateway with Rules routing. CPU Laya is opt-in via the `laya` profile.
+# Choose one GPU runtime: the `llamacpp` or `halogen` profile, or a native
+# host llama-server. Do not enable both
 # full-size GPU runtimes on the same host. setup.mjs --runtime selects a
 # matching catalogue/profile; configure-runtime.mjs prepares non-destructive switches.
 # Cheap gateway rebuilds: docker compose up -d --no-deps --build gateway
@@ -32,13 +33,19 @@ services:
     environment:
       SQLITE_PATH: /var/lib/llm-router/control.sqlite
       MODEL_CATALOG: /etc/llm-router/catalog.json
+      CLASSIFIER_QUALIFICATION: /etc/llm-router/classifier-qualification.json
       LAYA_URL: http://laya:8090
     ports:
       - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-3000}:3000"
     volumes:
       - sqlite-data:/var/lib/llm-router
       - ${MODEL_CATALOG_FILE:-./catalog.json}:/etc/llm-router/catalog.json:ro
+      - ${BATCH_CATALOG_FILE:-./catalog.batch.example.json}:/etc/llm-router/batch-catalog.json:ro
       - ./${AUXILIARY_CATALOG_FILE:-catalog.auxiliary.example.json}:/etc/llm-router/auxiliary.json:ro
+      - type: bind
+        source: ${CLASSIFIER_QUALIFICATION_FILE:-./classifier-qualification.example.json}
+        target: /etc/llm-router/classifier-qualification.json
+        read_only: true
     networks:
       - router
     healthcheck:
@@ -55,6 +62,7 @@ services:
       start_period: 40s
 
   laya:
+    profiles: ["laya"]
     build:
       context: .
       dockerfile: Dockerfile.laya

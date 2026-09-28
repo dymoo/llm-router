@@ -1,0 +1,201 @@
+# OpenRouter Batch API: primary-source research for the batch fallback seam
+
+**Date:** 2026-09-22 (all pages read this day)
+**Scope:** Research only — no implementation, no batch submissions, no paid calls. Context7 was queried first per policy and **does** index OpenRouter (`/websites/openrouter_ai`, `/openrouterteam/docs`, and a `llms.txt` mirror); its Batch API snapshot is cited where it is the only record of a now-superseded shape, and the live official docs (`openrouter.ai/docs/batch-quickstart.md`, the announcement blog, `openrouter.ai/terms`, `GET /api/v1/models`) are the source of truth for everything else. OpenAI's Batches guide is cited only for lineage/contrast, never as a claim about OpenRouter. Release date: the announcement blog carries `published_time: 2026-09-22` and describes a completed "two week beta period", so GA day is **2026-09-22** and the beta ran roughly 2026-09-08 → 2026-09-22 ([blog](https://openrouter.ai/blog/announcements/batch-api/), meta + "Most batches finish in minutes" section, read 2026-09-22).
+
+---
+
+## Verified primary-source facts (official sources, read 2026-09-22)
+
+### Endpoints and auth
+
+| Fact | Source |
+| --- | --- |
+| Submit: `POST https://openrouter.ai/api/v1/batches` | [batch-quickstart.md L81](https://openrouter.ai/docs/batch-quickstart.md); blog "Get started" section (`api/v1/batches`) |
+| Status/results: `GET https://openrouter.ai/api/v1/batches/:id` — results returned **inline** when `completed`; "There is no separate results-download endpoint" | quickstart L383, L411 |
+| List: `GET https://openrouter.ai/api/v1/batches` — `limit` 1–100 (default 20), `after` cursor, repeatable `status` filter (only the six non-transient states; `finalizing`/`cancelling` rejected as filters), `created_after`/`created_before` (Unix seconds or ISO-8601). Newest first; cursor pagination, no offsets | quickstart L310–L358 (list section; params table L350–L356) |
+| Delete: `DELETE https://openrouter.ai/api/v1/batches/:id` — terminal batches only; in-flight returns `409`; `200` means all cleanup (incl. provider-side file deletion) finished; later `GET`/`DELETE` → `404`; partial cleanup failure → retryable `5xx` that resumes | quickstart L502–L525 |
+| Auth: standard `Authorization: Bearer $OPENROUTER_API_KEY`. Batches are **workspace-scoped, not key-scoped** — every key in the workspace sees the same list | quickstart list section ("Batches are scoped to the workspace, not the key") |
+| The batch routes are **absent from the published OpenAPI spec** (`openrouter.ai/docs/openapi/openapi.yaml`, 46,452 lines, only 3 incidental `batch` enum hits; `openapi.json` has zero batch paths), so OpenRouter's spec-generated [API changelog](https://openrouter.ai/docs/changelog.md) does not describe this API | fetched spec 2026-09-22 |
+| **Endpoint-path disagreement (recorded, both sides):** the Context7-indexed snapshot of the quickstart still documents `POST https://openrouter.ai/api/beta/batches` and `GET /api/beta/batches/:id`, while the live quickstart and the same-day announcement both document `/api/v1/batches`. The beta path is the two-week-beta-era shape; treat `/api/v1/batches` as current and do not hardcode either until confirmed against the live base path at integration time | Context7 `/websites/openrouter_ai`, query "Batch API…", returned `Source: https://openrouter.ai/docs/batch-quickstart` with `POST .../api/beta/batches` (accessed 2026-09-22); live quickstart L81/L383; blog |
+
+### Submission format
+
+| Fact | Source |
+| --- | --- |
+| **Inline JSON, not a file upload.** Body = three required top-level fields: `endpoint`, `model`, `requests` (array of `{custom_id, body}`); optional `provider`, `completion_window`. "You don't upload a JSONL file; OpenRouter handles JSONL persistence internally" | quickstart L76–L98 (Submit section) |
+| `endpoint` ∈ `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/embeddings` — one shape per batch; mixing requires separate batches | quickstart "Use different API shapes" |
+| **Field-order trap:** `endpoint`, `model`, and any `provider`/`completion_window` MUST serialize before `requests`; the API stream-parses without buffering and returns **`400` if `requests` appears first** | quickstart L100 (Warning block) |
+| `custom_id` must be **unique within the batch**; `body` follows the shape of the selected endpoint | quickstart L90 |
+| Batch-level `model` applies to every request; a body may omit `model` (inherits) or must **match** the batch-level model, else submission is rejected | quickstart L103 |
+| `completion_window`: defaults to `24h`, "the only accepted value" | quickstart L97 |
+| Success = **`202 Accepted`** with `status: "validating"`, `usage: null`, `results: null` | quickstart L16, L195–L214 (202 example) |
+| **Batch size limit: none published.** The quickstart, blog, and limits page contain no numeric cap on requests-per-batch or payload size (verified by full-text grep of `llms-full.txt`, the quickstart, and `api_reference/limits.md` — zero batch-rate-limit hits). The stream-parsing design implies large arrays are expected; blog says "thousands of requests" | quickstart (whole page), [limits](https://openrouter.ai/docs/api_reference/limits.md), blog intro — all read 2026-09-22 |
+
+### Per-item request support (chat-completions specifics)
+
+Bodies inherit the sync chat-completions shape; the only batch-specific rules are the documented bans ([quickstart "Limitations" L21–L48](https://openrouter.ai/docs/batch-quickstart.md)):
+
+| Item | Batch behavior | Source |
+| --- | --- | --- |
+| `messages`, sampling (`temperature`, `top_p`, …), `max_tokens`, `tools`, `tool_choice`, `response_format`, reasoning/effort fields | **Not banned** → carried in `body` under "body follows the shape of the selected endpoint"; unknown parameters are dropped by the provider serializer "matching the sync API". No batch-specific reasoning/tool documentation exists — support inherits whatever the resolved provider's batch serializer accepts | quickstart L90, L46 ("Unknown parameters are dropped…") |
+| `max_tokens` boundary | "a max output token cap below 1" is rejected | quickstart L46 |
+| `stream: true` | **Explicitly rejected** (streaming is out; results arrive only as the final inline array) | quickstart L46 |
+| `speed` | Rejected (no fast-tier in batch) | quickstart L46 |
+| Empty input (`messages`/`input` empty, no `prompt`) | Rejected | quickstart L46 |
+| Images/files | URL-only, provider-dependent (table: OpenAI/Anthropic/xAI/DeepInfra accept image URLs; base64/`data:` rejected everywhere; audio/video rejected everywhere) | quickstart L23–L46 (provider table at L27–L38) |
+| Web search | OpenRouter-orchestrated search unavailable in batch; `:online` submit → synchronous `422`; per-request `web` plugin and `web_search_options` rejected (except provider-native search on OpenAI `/v1/responses`, Anthropic `/v1/messages`) | quickstart L44 |
+| `response_format` on Google models | **All requests in a batch must agree**: all-omitted, all `json_object`, or all `json_schema` with the *same* schema — "send one batch per response_format and per schema"; violations fail validation naming the first conflict | quickstart L105 (Google note) |
+| Timing of per-request failures | Per-request checks run **after** the `202`; the batch then moves to `failed` with the batch-level `error` explaining the rejection | quickstart L48 |
+
+### Status lifecycle and polling
+
+| Fact | Source |
+| --- | --- |
+| Happy path: `validating → in_progress → finalizing → completed` | quickstart L396 |
+| All eight states: `validating`, `in_progress`, `finalizing`, `completed`, `failed`, `expired`, `cancelling`, `cancelled`. **Terminal:** `completed`, `failed`, `expired`, `cancelled`. `finalizing`/`cancelling` are transient (excluded from list filters) | quickstart L399, L352 |
+| Poll `GET /:id` until terminal. `request_counts: {total, completed, failed}` is the only mid-flight progress signal | quickstart L399–L409 |
+| While in progress **or** in any non-`completed` terminal state, `results` is `null` — partial results are never exposed; on `completed`, `results` is an inline array in the same response | quickstart L411 |
+| Batch object fields: `id`, `object: "batch"`, `endpoint`, `model`, `completion_window`, `status`, `created_at` (Unix s), `finalized_at` (Unix s or null), `request_counts`, `usage`, `results`, `error` | quickstart L195–L214 (202 example), L446–L499 (completed example) |
+| Per-batch `error` on `failed` "explains the rejection"; its field shape is **not documented** | quickstart L48 |
+
+### Result row shape
+
+| Fact | Source |
+| --- | --- |
+| Rows are **inline array entries, not a downloadable JSONL** (JSONL is only OpenRouter's internal storage format: "inputs and results [are stored] as JSONL artifacts in Google Cloud Storage", deleted 30 days after creation) | quickstart L411, L670 |
+| Success row: `{ id: "batch_req_…", custom_id, response: { status_code: 200, request_id, body: <chat.completion> }, error: null }` | quickstart L415–L444 (result-item example) |
+| `response.body` is a standard `chat.completion` object: `id` (`gen-batch-…` generation id), `object: "chat.completion"`, `created`, `model`, `choices[]` with `index`/`message`/`finish_reason`. **The documented example shows no `usage` inside the per-item body** (embeddings example *does* include per-item `usage`) — whether chat result bodies carry per-item `usage` is unconfirmed | quickstart L420–L444; embeddings example L612–L666 |
+| **Exactly one of `response` or `error` is populated per row** ("error rows" therefore have `response: null`); no non-null error-row example exists anywhere in OpenRouter's docs (full-text grep, 2026-09-22) | quickstart L413 |
+| `response.body.id` doubles as the OpenRouter generation ID for the Report-Feedback flow | quickstart "Reporting issues" |
+
+### Expiry, retention, cancellation
+
+| Fact | Source |
+| --- | --- |
+| Completion window: `24h` only; the provider chooses when inside the window to finish (blog intro) | quickstart L97; blog "How the Batch API works" |
+| Retention: inputs + results kept **30 days from creation**, then deleted; earlier purge via `DELETE`. "Upstream retention varies by provider" | quickstart L502, L670; blog "Retention: inputs and results are kept for 30 days, or until you DELETE the batch" |
+| BYOK batches need the original provider key still enabled to delete (else `409`, batch untouched) | quickstart "Delete a batch" |
+| **Cancellation:** `cancelling`/`cancelled` are documented states, but **no cancel endpoint is documented anywhere** — the quickstart and full docs (`llms-full.txt`) contain only submit/list/get/delete (verified by grep). Deletion explicitly "is not cancellation" | quickstart L399, L502; full-docs grep 2026-09-22 |
+| `expired` is terminal but its trigger/semantics are **never defined** in OpenRouter docs | quickstart L399 (only mentions) |
+| OpenAI lineage (contrast only): `expired` = didn't finish in the 24h window (unfinished requests cancelled, completed ones billable, expired rows land in the error file with `code: "batch_expired"`); cancel via `POST /v1/batches/:id/cancel`, `cancelling` up to 10 min; output file auto-deleted 30 days after completion | [OpenAI Batch guide](https://developers.openai.com/api/docs/guides/batch), status table, "Cancel a batch", "Batch expiration" sections, read 2026-09-22 |
+
+### Pricing, usage, and cost reporting
+
+| Fact | Source |
+| --- | --- |
+| "Batch requests are typically billed at **50% of the model's standard per-token pricing**, mirroring … OpenAI and Anthropic" | quickstart L60 |
+| Blog phrasing (recorded alongside): the provider "generally charge[s] 50% (**and sometimes less**) of their normal per-token price"; discount "applies to per-token pricing and varies by model. Web search calls bill at standard rates." Non-token components are **not uniformly discounted**; prompt-caching rates vary; "the pricing shown on each model's page is the source of truth" | blog intro + "What's supported with batches"; quickstart pricing Note |
+| **`usage.cost` exists — at batch level:** `usage: { prompt_tokens, completion_tokens, total_tokens, cost, is_byok }` on a completed batch; "`usage.cost` reports the amount OpenRouter charges". BYOK batches: `cost` covers only the OpenRouter BYOK fee, `is_byok: true` | quickstart L460–L466 (completed example), pricing/BYOK sections |
+| The **list** example shows `usage` with only token counts (no `cost`/`is_byok`) — whether list rows include cost is unconfirmed (possibly abbreviated example) | quickstart L335 (list example) |
+| Per-item discounted cost: **not documented** (no per-row `usage`/`cost` shown for chat results) | quickstart L415–L444 |
+| Billing/audit/generation records survive deletion | quickstart "Delete a batch" |
+| Announcement metrics (same-day primary): 230k+ beta batches; median 7 min, p90 1.0 h, p99 10.3 h; single-request batches 5–11 min; ≥1,000-request batches 12–21 min; slowest 10% of >100-request batches submitted 00:00–12:00 PT took up to 6.8 h; ">70 models" support batch | blog "Most batches finish in minutes" + meta description |
+
+### Rate limits / quotas, idempotency, webhooks
+
+| Fact | Source |
+| --- | --- |
+| **No batch-specific rate limits or quotas are documented.** `api_reference/limits.md` contains zero `batch` mentions (grep 2026-09-22); the quickstart never uses "rate limit" | [limits](https://openrouter.ai/docs/api_reference/limits.md), quickstart |
+| **No idempotency mechanism is documented** — no idempotency key, no submit-token ("idempot" appears nowhere in docs). Duplicate submits cannot be detected from the API | quickstart + `llms-full.txt` grep 2026-09-22 |
+| **No webhooks for batch** — the word "webhook" appears nowhere in the quickstart; completion is poll-only. (OpenRouter webhooks exist for video generation and for Broadcast observability — different features.) | quickstart grep; [broadcast webhook](https://openrouter.ai/docs/guides/features/broadcast/webhook.md) and video-gen pages listed in docs index |
+| Contrast (OpenAI only): separate batch rate-limit pool; ≤50,000 requests/batch, ≤200 MB input file, ≤2,000 batches/hour; batch tokens don't consume sync limits | [OpenAI Batch guide](https://developers.openai.com/api/docs/guides/batch), "Rate limits" — **do not assume any of this for OpenRouter** |
+
+### Models and providers
+
+| Fact | Source |
+| --- | --- |
+| Batch runs on **`:batch` endpoint variants**. Model with no `:batch` endpoint → submit `400`. Model has `:batch` endpoints but none match `provider.only` → `404` (no fallback to other providers) | quickstart L54, L306 |
+| One provider per batch, chosen once at submit: default = cheapest eligible `:batch` endpoint after account allowlist, data policy, BYOK; same-price endpoints share traffic; BYOK key preferred over cheaper platform endpoints | quickstart "Provider routing" |
+| Only `provider: { only: [...] }` is accepted; `order`, `sort`, `allow_fallbacks` and all other sync preferences are **rejected**. Embeddings bodies reject `provider` preferences entirely | quickstart L306, embeddings section |
+| **`z-ai/glm-5.3-flash` supports batch:** `GET /api/v1/models` returns the id `z-ai/glm-5.3-flash:batch` (and `z-ai/glm-5.3:batch`), read 2026-09-22. The catalog's bare `z-ai/glm-5.3-flash` record currently lists `endpoints: []` in the API response; the batch capability is declared by the `:batch` variant id | `https://openrouter.ai/api/v1/models` (fetched 2026-09-22) |
+| Catalog browse: [models page filtered by batch variant](https://openrouter.ai/models?variant=batch); blog claims ">70 models" on GA day | quickstart L54; blog |
+| BYOK + Google Vertex: Vertex batches may create a private GCS bucket in the user's GCP project on first batch (or use a supplied `bucket`) | quickstart "BYOK" |
+
+### OpenAI Batches compatibility claim
+
+- **No explicit compatibility claim exists.** Neither the announcement nor the quickstart says the API is OpenAI-Batches-compatible or that an OpenAI SDK/client works unchanged (both read in full 2026-09-22).
+- Observed lineage (our observation, both sources above + OpenAI guide): identical status vocabulary (`validating`/`in_progress`/`finalizing`/`completed`/`failed`/`expired`/`cancelling`/`cancelled`), identical `request_counts {total, completed, failed}`, `object: "batch"`, `batch_<id>`/`batch_req_<id>` idiom, and the `{id, custom_id, response:{status_code, request_id, body}, error}` row shape.
+- Observed divergences from OpenAI: OpenRouter is inline-JSON submit (OpenAI: Files-API JSONL upload + `input_file_id`), results inline in `GET` (OpenAI: `output_file_id`/`error_file_id` via Files API), extra OpenRouter fields `model`/`results`/`finalized_at`/`usage.cost`/`usage.is_byok`, extra `DELETE` route, top-level `provider` object, no `metadata`, no documented `expires_at`. OpenAI's error-row shape (`{code, message}`) and 50k/200MB limits are OpenAI facts only.
+
+### Licensing / terms constraints (reselling or relaying the batch API)
+
+Source: [OpenRouter Terms of Service](https://openrouter.ai/terms), **Last Updated: August 31, 2026**, read 2026-09-22.
+
+| Clause | Constraint |
+| --- | --- |
+| §7 Prohibited Conduct | You agree not to "access the Site or Service for purposes of **reselling API access to Models or otherwise developing a competing service**." A router that republishes OpenRouter batch access as its own service sits close to this line. |
+| §5.2 Flow-Down | You must require all Authorized Users **and customers** to use the Service/Models under the same terms — end users of a relay are bound through you. |
+| §6.3(b) Processing-Related Storage | Batch/large-volume processing explicitly licenses OpenRouter to host, store, copy, and use your User Content "solely for such processing purposes" (this is the legal basis for the 30-day GCS JSONL retention). |
+| §6.1 / Outputs | Inputs **and Outputs** are User Content; your grant to OpenRouter and Model Provider Model Terms flow down. Per-model Model Terms can add restrictions on top of these Terms. |
+| OpenAPI spec license | The published spec declares MIT (`openapi.json` `info.license`), but it covers the spec document, not the API — and contains no batch paths anyway. |
+
+---
+
+## Seam implications (inferences — reasoned, not documented upstream)
+
+These follow from the facts above; none are OpenRouter statements.
+
+1. **The seam is poll-only, single-shot retrieval.** No webhooks, no partial results, no results download. Our adapter must (a) persist our-job-id → `batch_id` at the 202, (b) poll `GET /:id` on a schedule using `request_counts` for progress, (c) harvest the full inline `results` array exactly once at `completed`, within the 30-day window. Local-first execution is unaffected; only the spill path pays this latency model — acceptable because the surface is explicitly *low-priority async*.
+2. **Splitting is mandatory in three dimensions:** one model per batch (batch-level `model` with match-enforcement), one endpoint shape per batch, and — when `response_format` is used with Google — one schema per batch. A router fanning one job across models must produce one OpenRouter batch per model, and `custom_id` uniqueness is per-batch, so our item ids must be re-keyed or globally unique to survive the split.
+3. **Serialization order is a wire-level contract.** `JSON.stringify` insertion order must put `endpoint`, `model`, `provider`, `completion_window` before `requests`, or the stream-parser 400s. This belongs in the adapter's encoder, not in caller discipline.
+4. **Cost accounting must stay "unknown ≠ zero" per item.** `usage.cost` is batch-level only in the docs; per-item chat results show no `usage`/`cost`. To reconcile a spill against our own accounting (the repo already refuses to price missing rates as \$0 — `classifierCostUsd` returns `unknown`, `docs/research/classifier-economics-and-gates.md`), prorating batch cost across rows would be an invention. Options: record batch-level cost as an aggregate against the spill bucket and mark per-item cost `unknown`, or wait for confirmation that result bodies carry `usage` (open question Q2). `is_byok` must gate which portion (`cost` = BYOK fee only) we attribute.
+5. **Failure semantics are two-tier.** Tier 1: synchronous submit errors (400/404/422, field-order 400, provider-mismatch 404). Tier 2: post-202 whole-batch `failed` with batch-level `error`. Tier 3: per-row failures inside a `completed` batch (`request_counts.failed > 0`, exactly one of `response`/`error` set). Our adapter can retry tier 1 safely (nothing persisted), must treat tier 2 as "resubmit as a new batch" (no partial results are ever exposed), and must surface tier 3 rows back to the caller as per-item failures without failing the job — matching the announcement's "a few bad rows never fail the rest of the job".
+6. **Idempotency must be ours.** With no upstream idempotency key, a timeout on POST risks duplicate batches (duplicate spend). The adapter should generate our own submit token, persist it before the POST, and reconcile via `GET /?id=`-list + `created_after` (list filters are the only dedupe surface) — or accept at-most-once submission with a durable local intent record. This is a design decision the implementers own (Q8).
+7. **24h is the scheduling horizon, minutes is the observed reality.** Local idle-hardware execution should be attempted first per project goal; spill only when the job's deadline exceeds the 24h worst case and its latency tolerance covers the blog's p90 (1.0 h) — never for interactive traffic (`stream: true` is rejected outright anyway).
+8. **Provider pinning interplay:** our `provider.only`-style preference maps only as `provider.only`, and a wrong pin converts a would-be submit into `404` with no fallback — so the adapter should either omit `provider` (default cheapest-eligible) or validate pins against the `:batch` variant listing first. For `z-ai/glm-5.3-flash` the pin question is live: capability is confirmed (`:batch` id in the catalog), but which providers serve it must be re-checked at integration via the batch variant filter, since the provider table is dynamic.
+9. **Terms risk for a "relaying" product:** §7's reselling prohibition is the binding constraint — the seam should present batch as *our own low-priority compute spilling to our own OpenRouter account* (usage we consume, not access we resell), with §5.2 flow-down if any end user ever touches OpenRouter directly. This is a legal reading, flagged for humans, not a green light.
+
+---
+
+## Translation table: our batch surface → OpenRouter Batch API
+
+"Our field" = the router's own batch surface for low-priority async chat (goal statement; no seam types exist in the repo yet — only `maxBatchSize` on local deployments, `src/auxiliary.ts:15`).
+
+| Our field | OpenRouter field | Mapping | Gap? |
+| --- | --- | --- | --- |
+| `endpoint: chat` (only shape we need) | `endpoint: "/v1/chat/completions"` | fixed string, top-level | 1:1 |
+| `model` (per job) | `model` (top-level, per batch) | copied; per-item `body.model` must match or be omitted | ⚠ one model per batch — multi-model jobs must split |
+| item id | `custom_id` | must be unique **within** each batch | ⚠ re-key on split; use globally unique ids |
+| `messages[]` | `body.messages` | verbatim (sync chat shape) | 1:1 |
+| sampling (`temperature`, `top_p`, `top_k`, `seed`) | same-named `body.*` | passthrough; unknown params silently dropped by provider serializer | ⚠ silent-drop behavior inherited from sync API |
+| `max_tokens` | `body.max_tokens` | passthrough; values `< 1` rejected (post-202 batch failure) | validate client-side pre-submit |
+| `tools` / `tool_choice` | `body.tools` / `body.tool_choice` | not banned → passthrough | ⚠ provider batch-serializer support unverified per model |
+| `response_format` | `body.response_format` | passthrough, **except** Google: uniform across the whole batch | ⚠ split per schema on Google |
+| reasoning/effort (`reasoning.effort` etc.) | same sync-API fields in `body` | not banned → passthrough; no batch-specific doc | ⚠ unverified per provider |
+| `stream` | — | **no mapping**: `stream: true` rejected (`400`-class post-202 failure) | ❌ streaming out by design; adapter must materialize final responses |
+| priority / low-priority flag | — | no field exists; "batch" *is* the priority class | ❌ policy lives entirely in our router |
+| completion deadline (ours) | `completion_window` | forced `"24h"` (only accepted value) | ⚠ jobs needing >24h cannot spill; <24h unaffected |
+| provider preference | top-level `provider: { only: [slugs] }` | only `only` accepted; `order`/`sort`/`allow_fallbacks` rejected | ⚠ wrong pin → `404`, no fallback |
+| callback/webhook | — | none — poll `GET /:id` only | ❌ we implement polling + retention timer (30d) |
+| idempotency key | — | none documented | ❌ client-side dedupe required |
+| status: `queued`/`running`/`done`/`failed` | `validating`/`in_progress`/`finalizing` → `completed`; terminals `failed`/`expired`/`cancelled` | map: `queued`←`validating`; `running`←`in_progress`,`finalizing`,`cancelling`; success←`completed`; 3 distinct failure terminals | ⚠ `expired`/`cancelled` semantics undefined (Q5/Q6) |
+| item result (success) | `results[i].response.body` (`chat.completion`) | standard shape; `id` is the `gen-batch-…` generation id | ⚠ per-item `usage` unconfirmed (Q2) |
+| item result (failure) | `results[i].error` with `response: null` | exactly-one-of invariant | ❌ error-row fields undocumented (Q3) — parse defensively |
+| per-item cost | — | only batch-level `usage.cost` + `usage.is_byok` documented | ❌ per-item cost `unknown`, never 0 (matches repo accounting identity) |
+| cancel request | — | statuses exist; **no cancel endpoint documented** | ❌ treat cancel as "stop polling + optionally DELETE at terminal" pending Q6 |
+| job record / audit | batch object + workspace list + dashboard "Batches" tab | billing/generation/audit rows survive DELETE | 1:1 for our bookkeeping (we keep the id map) |
+| input images (future) | URL-only, provider-dependent | public `http(s)` only, no base64 | ⚠ per-provider support table applies |
+
+---
+
+## Unknowns (not answerable from primary sources as of 2026-09-22)
+
+1. **Batch size limits** — no published requests-per-batch or payload cap (Q1).
+2. **Per-item `usage`/`cost` in chat result bodies** — examples omit them; embeddings examples include `usage`. (Q2)
+3. **Error-row shape** — fields of a non-null `results[i].error` and of the batch-level `error` are undocumented; OpenAI's `{code, message}` is lineage, not evidence. (Q3)
+4. **Rate limits/quotas for submit and polling** — limits page has zero batch content. (Q4)
+5. **`expired` semantics** — trigger (24h overrun?) and what happens to completed items' results (OpenRouter never says; `results` is `null` on `expired`). (Q5)
+6. **Cancellation** — how a batch enters `cancelling`; whether a `POST /:id/cancel` exists undocumented. (Q6)
+7. **Idempotency/duplicate-submit behavior** — undocumented; presumably two POSTs = two batches, but unstated. (Q7)
+8. **List-row `usage.cost` presence** — list example omits it. (Q8)
+9. **Base path confirmation** (`/api/v1/batches` vs Context7's stale `/api/beta/batches`) — live docs and blog agree on v1; confirm at integration. (Q9)
+10. **Whether OpenAI's SDK `batches.*` works against OpenRouter** — no compatibility claim; shapes differ (file upload vs inline). (Q10)
+
+---
+
+## Recommendation for the fallback-seam implementers
+
+Build the spill path as a **thin poll-and-normalize adapter** behind our own batch interface: translate submit-side (encode order, one model/shape/schema per batch, global `custom_id`s, `provider` omitted-or-validated), own idempotency locally, poll to terminal, normalize the inline `results` array into our per-item records with **defensive error parsing** (unknown fields tolerated, `response` XOR `error` enforced), and account cost **only** at batch level with `unknown ≠ zero` until Q2/Q8 resolve. Do not model cancellation, webhooks, file uploads, or OpenAI-SDK compatibility until their open questions close. Re-verify the `:batch` provider set (especially for `z-ai/glm-5.3-flash`) and Q1/Q4 before first real submission — those two can throttle a large spill with no documented ceiling to design against.
+
+**Open questions for implementers** (beyond upstream Q1–Q10): do we prorate batch-level `usage.cost` for internal chargeback or record it purely as a spill-bucket aggregate? What deadline horizon triggers spill versus local retry (24h worst case vs blog p90 of 1.0 h)? And under Terms §7, does the product surface expose OpenRouter as a *relayed* API to users (prohibited-adjacent) or keep it strictly as our own account's backend (the assumption this report makes)?

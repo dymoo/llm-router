@@ -94,6 +94,9 @@ export const requests = sqliteTable(
     cacheObservation: text("cache_observation"),
     costSource: text("cost_source"),
     decisionTraceJson: text("decision_trace_json"),
+    /** 1 while a remote batch owns this authorized request (no ordinary HTTP lease held);
+     * 0 for every request that is not remote-deferred. */
+    deferred: integer("deferred").notNull().default(0),
   },
   (table) => [
     index("requests_key_status_idx").on(table.keyId, table.status),
@@ -127,6 +130,7 @@ export const requests = sqliteTable(
       "requests_cost_source_known",
       sql`${table.costSource} IS NULL OR ${table.costSource} IN ('provider-reported', 'local-rate-card', 'estimated')`,
     ),
+    check("requests_deferred_bool", sql`${table.deferred} IN (0, 1)`),
   ],
 );
 
@@ -156,4 +160,142 @@ export const auditLog = sqliteTable(
   (table) => [index("audit_log_at_idx").on(table.at), index("audit_log_key_idx").on(table.keyId)],
 );
 
-export const controlPlaneTables = [settings, apiKeys, requests, rateLimits, auditLog] as const;
+/** Metadata-only batch jobs. Never stores prompts or completions; usage is provider-reported
+ * batch-level JSON; input bodies and result rows live in the dedicated store outside this DB. */
+export const batchJobs = sqliteTable(
+  "batch_jobs",
+  {
+    id: text("id").primaryKey(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => apiKeys.id),
+    model: text("model").notNull(),
+    status: text("status").notNull(),
+    completionWindowMs: integer("completion_window_ms").notNull(),
+    createdAt: integer("created_at").notNull(),
+    finalizedAt: integer("finalized_at"),
+    spillAt: integer("spill_at").notNull(),
+    usageJson: text("usage_json"),
+    requestCountsTotal: integer("request_counts_total").notNull(),
+    requestCountsCompleted: integer("request_counts_completed").notNull(),
+    requestCountsFailed: integer("request_counts_failed").notNull(),
+    errorCode: text("error_code"),
+  },
+  (table) => [
+    index("batch_jobs_key_created_idx").on(table.keyId, table.createdAt),
+    index("batch_jobs_status_created_idx").on(table.status, table.createdAt),
+    check(
+      "batch_jobs_status_known",
+      sql`${table.status} IN ('validating', 'queued', 'in_progress', 'finalizing', 'completed', 'failed', 'expired', 'cancelling', 'cancelled')`,
+    ),
+    check("batch_jobs_completion_window_positive", sql`${table.completionWindowMs} >= 1`),
+    check("batch_jobs_created_at_nonneg", sql`${table.createdAt} >= 0`),
+    check("batch_jobs_spill_at_nonneg", sql`${table.spillAt} >= 0`),
+    check(
+      "batch_jobs_finalized_at_nonneg",
+      sql`${table.finalizedAt} IS NULL OR ${table.finalizedAt} >= 0`,
+    ),
+    check(
+      "batch_jobs_counts_nonneg",
+      sql`${table.requestCountsTotal} >= 0 AND ${table.requestCountsCompleted} >= 0 AND ${table.requestCountsFailed} >= 0`,
+    ),
+    check(
+      "batch_jobs_counts_bounded",
+      sql`${table.requestCountsCompleted} + ${table.requestCountsFailed} <= ${table.requestCountsTotal}`,
+    ),
+  ],
+);
+
+/** Durable remote spill intent: ONE row per compatibility group with ONE proven remote id;
+ * a job holds many groups. Terminal usage/harvest facts persist once per group. */
+export const batchRemotes = sqliteTable(
+  "batch_remotes",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => batchJobs.id),
+    groupKey: text("group_key").notNull(),
+    intent: text("intent").notNull(),
+    submitToken: text("submit_token").notNull(),
+    remoteBatchId: text("remote_batch_id"),
+    usageJson: text("usage_json"),
+    harvestedAt: integer("harvested_at"),
+    createdAt: integer("created_at").notNull(),
+    confirmedAt: integer("confirmed_at"),
+  },
+  (table) => [
+    uniqueIndex("batch_remotes_token_uq").on(table.submitToken),
+    uniqueIndex("batch_remotes_remote_id_uq").on(table.remoteBatchId),
+    index("batch_remotes_job_idx").on(table.jobId),
+    check(
+      "batch_remotes_intent_known",
+      sql`${table.intent} IN ('intended', 'confirmed', 'unknown', 'abandoned')`,
+    ),
+    check("batch_remotes_created_at_nonneg", sql`${table.createdAt} >= 0`),
+    check(
+      "batch_remotes_confirmed_at_nonneg",
+      sql`${table.confirmedAt} IS NULL OR ${table.confirmedAt} >= 0`,
+    ),
+    check(
+      "batch_remotes_confirmed_needs_id",
+      sql`${table.intent} <> 'confirmed' OR ${table.remoteBatchId} IS NOT NULL`,
+    ),
+    check(
+      "batch_remotes_unconfirmed_has_no_id",
+      sql`${table.intent} = 'confirmed' OR ${table.remoteBatchId} IS NULL`,
+    ),
+    check(
+      "batch_remotes_harvested_at_nonneg",
+      sql`${table.harvestedAt} IS NULL OR ${table.harvestedAt} >= 0`,
+    ),
+  ],
+);
+
+export const batchItems = sqliteTable(
+  "batch_items",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => batchJobs.id),
+    customId: text("custom_id").notNull(),
+    status: text("status").notNull(),
+    requestId: text("request_id"),
+    deploymentId: text("deployment_id"),
+    errorCode: text("error_code"),
+    createdAt: integer("created_at").notNull(),
+    dispatchedAt: integer("dispatched_at"),
+    finishedAt: integer("finished_at"),
+    remoteId: text("remote_id").references(() => batchRemotes.id),
+  },
+  (table) => [
+    uniqueIndex("batch_items_job_custom_uq").on(table.jobId, table.customId),
+    index("batch_items_job_status_idx").on(table.jobId, table.status),
+    index("batch_items_status_created_idx").on(table.status, table.createdAt),
+    check(
+      "batch_items_status_known",
+      sql`${table.status} IN ('queued', 'running', 'completed', 'failed', 'cancelled', 'expired', 'interrupted')`,
+    ),
+    check("batch_items_created_at_nonneg", sql`${table.createdAt} >= 0`),
+    check(
+      "batch_items_dispatched_at_nonneg",
+      sql`${table.dispatchedAt} IS NULL OR ${table.dispatchedAt} >= 0`,
+    ),
+    check(
+      "batch_items_finished_at_nonneg",
+      sql`${table.finishedAt} IS NULL OR ${table.finishedAt} >= 0`,
+    ),
+  ],
+);
+
+export const controlPlaneTables = [
+  settings,
+  apiKeys,
+  requests,
+  rateLimits,
+  auditLog,
+  batchJobs,
+  batchRemotes,
+  batchItems,
+] as const;

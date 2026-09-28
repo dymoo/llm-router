@@ -1,5 +1,14 @@
+import type { ClassifierHealth } from "../classifier.ts";
 import type { SamplingOptions } from "../sampling.ts";
-import type { AnalyticsSnapshot } from "../domain.ts";
+import type {
+  AnalyticsSnapshot,
+  BatchRequestCounts,
+  BatchStatus,
+  BatchUsage,
+  ClassifierQualification,
+} from "../domain.ts";
+import type { BatchLedger } from "../batch/ledger.ts";
+import type { BatchResultRow, BatchResultStore } from "../batch/results.ts";
 import type { AnalyticsQuery } from "../keys/analytics.ts";
 import type {
   Admission as RepoAdmission,
@@ -10,6 +19,7 @@ import type {
 import type { RequestStatusStore } from "./status.ts";
 
 export type Priority = "high" | "medium" | "low";
+export type OverloadAction = "report" | "failover";
 export type SessionBoundary = "new-task" | "continue" | "checkpoint";
 
 export type KeyPolicy = {
@@ -21,6 +31,7 @@ export type KeyPolicy = {
   requestsPerMinute: number;
   maxConcurrent: number;
   maxWaitMs: number;
+  overloadAction: OverloadAction;
   maxEstimatedUsd: number | null;
   bias: {
     cost: number;
@@ -63,7 +74,8 @@ export type KeyDraft = {
   policy: KeyPolicy;
 };
 
-export type KeyPatch = KeyDraft & {
+export type KeyPatch = Omit<KeyDraft, "policy"> & {
+  policy: Omit<KeyPolicy, "overloadAction"> & Partial<Pick<KeyPolicy, "overloadAction">>;
   expectedVersion: number;
 };
 
@@ -87,13 +99,6 @@ export type RequestQuery = {
   until?: number;
   priority?: Priority;
   deploymentId?: string;
-};
-
-export type ClassifierHealth = {
-  ready: boolean;
-  backend: string;
-  local: boolean;
-  evidence?: "runtime-probe" | "configuration-only" | "unavailable";
 };
 
 export type DeploymentHealth = {
@@ -163,12 +168,15 @@ export type ChatCompletionRequest = {
   model: "auto";
   stream: boolean;
   sampling?: SamplingOptions;
+  parallelToolCalls?: boolean;
   messages: ChatMessage[];
   tools?: ToolDefinition[];
   tool_choice?: unknown;
   response_format?: unknown;
   maxCompletionTokens?: number;
   routing: RoutingHint;
+  /** OpenAI `service_tier: "flex"`: local spare capacity only, refused otherwise. */
+  serviceTier?: "flex";
 };
 
 export type RequestCapabilities = {
@@ -196,6 +204,7 @@ export type RoutedWork = {
   policy: KeyPolicy;
   keyPolicyVersion: number;
   messages: ChatMessage[];
+  parallelToolCalls?: boolean;
   tools?: ToolDefinition[];
   toolChoice?: unknown;
   responseFormat?: unknown;
@@ -206,6 +215,7 @@ export type RoutedWork = {
   classifierInput: ClassifierInput;
   freshFactsAvailable: false;
   stream: boolean;
+  serviceTier?: "flex";
 };
 
 export type SessionHeaders = {
@@ -253,7 +263,10 @@ export type KeyService = {
   finalize: (admission: Admission, outcome: FinalizeOutcome) => Promise<void>;
   usageSummary: (query: UsageQuery) => Promise<UsageSummary>;
   recentRequests: (query: RequestQuery) => Promise<RecentRequestList>;
-  analytics: (query: AnalyticsQuery) => Promise<AnalyticsSnapshot>;
+  analytics: (
+    query: AnalyticsQuery,
+    qualifications: readonly ClassifierQualification[],
+  ) => Promise<AnalyticsSnapshot>;
 };
 
 export type InferenceGateway = {
@@ -273,6 +286,7 @@ export type AdminDeps = {
   appOrigin: string;
   basicAuth?: { username: string; password: string };
   keys: KeyService;
+  classifierQualifications: readonly ClassifierQualification[];
 };
 
 export type InferenceDeps = {
@@ -281,8 +295,51 @@ export type InferenceDeps = {
   status: RequestStatusStore;
   now?: () => number;
   newId?: () => string;
+  onStream?: (outcome: "completed" | "terminal_error" | "aborted" | "cancelled") => void;
+  onAdmissionRejected?: (result: "unauthorized" | "invalid" | "other") => void;
 };
 
 export type HealthDeps = {
   health: HealthService;
+};
+
+/** Every batch handler is wired through this and nothing else. `keys` authenticates the
+ * bearer (and supplies localityBias for the submit-time spill computation); `kick` wakes
+ * the deferred-lane scheduler after a state change it must notice. */
+export type BatchDeps = {
+  ledger: BatchLedger;
+  results: BatchResultStore;
+  keys: KeyService;
+  /** POST-only drain guard, wired to server/lifecycle assertAcceptingWork: throws 503 while
+   * the gateway drains. GET/list/DELETE never call it — reads stay available during drain. */
+  assertAccepting(): void;
+  kick(): void;
+};
+
+/** OpenRouter-shaped batch object. All times are Unix seconds. `local_wait_until` is our
+ * spill boundary (= spillAt) and `deadline_at` = spillAt + the 24h provider window; the two
+ * windows are independent of each other and of our 24h post-terminal result TTL. */
+export type BatchWireObject = {
+  id: string;
+  object: "batch";
+  endpoint: "/v1/chat/completions";
+  model: string;
+  completion_window: "24h";
+  status: BatchStatus;
+  created_at: number;
+  finalized_at: number | null;
+  local_wait_until: number;
+  deadline_at: number;
+  request_counts: BatchRequestCounts;
+  usage: BatchUsage | null;
+  results: readonly BatchResultRow[] | null;
+  error: { code: string; message: string } | null;
+};
+
+export type BatchWireList = {
+  object: "list";
+  data: readonly BatchWireObject[];
+  first_id: string | null;
+  last_id: string | null;
+  has_more: boolean;
 };

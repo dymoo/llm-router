@@ -15,20 +15,24 @@ import {
   type Assessment,
   type ClassifiedAssessment,
   type ClassifierMode,
+  type ClassifierQualification,
   type ClassifierSource,
   type ClassifyInput,
   type LayaBudget,
   type LayaHealth,
+  type QualificationFailure,
   decodeAssessment,
   decodeLayaBudget,
   decodeLayaHealth,
   decodeLayaResponse,
+  evaluateClassifierQualification,
 } from "./domain.ts";
 import {
   BriefRequired,
   ClassifierContextExceeded,
   ClassifierInvalidResponse,
   ClassifierTimeout,
+  ClassifierUnqualified,
   ClassifierUnavailable,
   type ClassifierError,
 } from "./errors.ts";
@@ -76,6 +80,18 @@ export interface RouterClassifierService {
   readonly classify: (input: ClassifyInput) => Effect.Effect<ClassifiedAssessment, ClassifierError>;
 }
 
+export type ClassifierHealth = {
+  ready: boolean;
+  backend: string;
+  local: boolean;
+  evidence?:
+    | "runtime-probe"
+    | "configuration-only"
+    | "unavailable"
+    | "unqualified"
+    | "deterministic-rules";
+};
+
 export interface ClassifierLayerOptions {
   readonly mode: ClassifierMode;
   readonly layaUrl?: string | null;
@@ -87,12 +103,16 @@ export interface ClassifierLayerOptions {
   readonly jevBaseUrl?: string;
   readonly cacheTtlMs?: number;
   readonly cacheMaxEntries?: number;
+  readonly qualifications: readonly ClassifierQualification[];
 }
 
 type CacheRecord = {
   readonly value: ClassifiedAssessment;
   readonly expiresAt: number;
 };
+
+/** Laya readiness probe budget: the gateway's existing 2-second health window. */
+const READINESS_TIMEOUT_MS = 2_000;
 
 const joinLaya = (base: string, path: string): string =>
   new URL(path, base.endsWith("/") ? base : `${base}/`).toString();
@@ -268,10 +288,23 @@ const parseContextError = (
   };
 };
 
+/** Decoded healthz plus the single strict-acceptance verdict; `failure: null` means accepted. */
+type LayaProbeResult = {
+  readonly health: LayaHealth;
+  readonly failure: ClassifierUnavailable | null;
+};
+
+/**
+ * The one strict acceptance both readiness and classification consume: HTTP exactly 200,
+ * ok, ready, and the optional configured revision. Transport and schema failures stay
+ * typed channel errors; acceptance rejections return their verdict alongside the decoded
+ * health so callers decide the representation without re-checking any predicate.
+ */
 const readLayaHealth = Effect.fn("readLayaHealth")(function* (
   fetchImpl: typeof globalThis.fetch,
   layaUrl: string,
-): Effect.fn.Return<LayaHealth, ClassifierError> {
+  expectedRevision?: string,
+): Effect.fn.Return<LayaProbeResult, ClassifierError> {
   const healthResult = yield* jsonRequest(fetchImpl, joinLaya(layaUrl, "healthz"), {
     method: "GET",
     headers: { accept: "application/json" },
@@ -282,9 +315,20 @@ const readLayaHealth = Effect.fn("readLayaHealth")(function* (
     ),
   );
   if (healthResult.status !== 200 || !health.ok || !health.ready) {
-    return yield* new ClassifierUnavailable({ message: "Laya classifier is not ready" });
+    return {
+      health,
+      failure: new ClassifierUnavailable({ message: "Laya classifier is not ready" }),
+    };
   }
-  return health;
+  if (expectedRevision !== undefined && health.model_revision !== expectedRevision) {
+    return {
+      health,
+      failure: new ClassifierUnavailable({
+        message: "Laya model revision differs from configured revision",
+      }),
+    };
+  }
+  return { health, failure: null };
 });
 
 const layaClassify = Effect.fn("layaClassify")(function* (
@@ -292,16 +336,10 @@ const layaClassify = Effect.fn("layaClassify")(function* (
   layaUrl: string,
   input: ClassifyInput,
   health: LayaHealth,
-  expectedRevision?: string,
 ): Effect.fn.Return<
   Omit<ClassifiedAssessment, "elapsedMs" | "cacheHit" | "reuse">,
   ClassifierError
 > {
-  if (expectedRevision !== undefined && health.model_revision !== expectedRevision) {
-    return yield* new ClassifierUnavailable({
-      message: "Laya model revision differs from configured revision",
-    });
-  }
   const payload = {
     state: classifierState(input),
     questions: assessmentQuestions,
@@ -467,9 +505,86 @@ const jevClassify = Effect.fn("jevClassify")(function* (
   };
 });
 
+/**
+ * The one qualification gate readiness and classification both consume first:
+ * the selected backend identity must resolve to a non-placeholder, passing
+ * calibration covering every assessment question, or the call fails closed
+ * with the matching reason before any cache lookup or backend work.
+ */
+const qualificationGate = (options: ClassifierLayerOptions): QualificationFailure | null => {
+  const outcome = evaluateClassifierQualification(
+    options.qualifications,
+    {
+      backend: options.mode,
+      modelRevision:
+        options.mode === "laya" ? options.layaModelRevision : (options.jevModel ?? JEV_MODEL_ID),
+      questionSchemaVersion: ASSESSMENT_QUESTION_SCHEMA_VERSION,
+    },
+    Object.keys(assessmentQuestions),
+  );
+  return outcome._tag === "qualified" ? null : outcome;
+};
+
 export class RouterClassifier extends Context.Service<RouterClassifier, RouterClassifierService>()(
   "dymoo/llm-router/src/classifier/RouterClassifier",
 ) {
+  /**
+   * Backend readiness without constructing an inference runtime or Jev SDK client.
+   * Laya consumes the one strict readLayaHealth acceptance (HTTP 200, ok, ready,
+   * configured revision) and is independently bounded to the 2-second health budget;
+   * Jev is configuration-only and never fetches, infers, nor constructs a client.
+   */
+  static readiness(options: ClassifierLayerOptions): Effect.Effect<ClassifierHealth> {
+    if (qualificationGate(options) !== null) {
+      return Effect.succeed<ClassifierHealth>({
+        ready: false,
+        backend: options.mode,
+        local: options.mode === "laya",
+        evidence: "unqualified",
+      });
+    }
+    if (options.mode === "jev") {
+      // Jev has no documented free authenticated readiness endpoint. Never spend on a probe.
+      const configured =
+        options.jev !== undefined || (options.jevApiKey !== undefined && options.jevApiKey !== "");
+      return Effect.succeed({
+        ready: configured,
+        backend: "jev",
+        local: false,
+        evidence: "configuration-only",
+      });
+    }
+    const fetchImpl = options.fetch ?? globalThis.fetch;
+    const layaUrl = options.layaUrl;
+    if (layaUrl === undefined || layaUrl === null || layaUrl === "") {
+      return Effect.succeed({
+        ready: false,
+        backend: "laya",
+        local: true,
+        evidence: "unavailable",
+      });
+    }
+    return readLayaHealth(fetchImpl, layaUrl, options.layaModelRevision).pipe(
+      Effect.timeout(Duration.millis(READINESS_TIMEOUT_MS)),
+      // A decoded healthz that failed strict acceptance is still runtime evidence.
+      Effect.map((probe): ClassifierHealth => ({
+        ready: probe.failure === null,
+        backend: probe.health.backend ?? "laya",
+        local: true,
+        evidence: "runtime-probe",
+      })),
+      // Transport, schema, and timeout failures never yield a probe result.
+      Effect.catch(() =>
+        Effect.succeed<ClassifierHealth>({
+          ready: false,
+          backend: "laya",
+          local: true,
+          evidence: "unavailable",
+        }),
+      ),
+    );
+  }
+
   static layer(
     options: ClassifierLayerOptions,
   ): Layer.Layer<RouterClassifier, ClassifierUnavailable> {
@@ -483,6 +598,14 @@ export class RouterClassifier extends Context.Service<RouterClassifier, RouterCl
         const classify = Effect.fn("RouterClassifier.classify")(function* (
           input: ClassifyInput,
         ): Effect.fn.Return<ClassifiedAssessment, ClassifierError> {
+          const unqualified = qualificationGate(options);
+          if (unqualified !== null) {
+            return yield* new ClassifierUnqualified({
+              message: `Classifier qualification failed: ${unqualified._tag}`,
+              reason: unqualified._tag,
+              ...("questionId" in unqualified ? { questionId: unqualified.questionId } : {}),
+            });
+          }
           if (
             options.mode === "laya" &&
             (options.layaUrl === undefined || options.layaUrl === null || options.layaUrl === "")
@@ -510,16 +633,29 @@ export class RouterClassifier extends Context.Service<RouterClassifier, RouterCl
 
           return yield* mapTimeout(
             Effect.gen(function* () {
-              const classified =
-                options.mode === "laya"
-                  ? yield* layaClassify(
-                      fetchImpl,
-                      options.layaUrl as string,
-                      input,
-                      yield* readLayaHealth(fetchImpl, options.layaUrl as string),
-                      options.layaModelRevision,
-                    )
-                  : yield* jevClassify(jevClient as TypeSafeClientService, input, jevModel);
+              let classified: Omit<ClassifiedAssessment, "elapsedMs" | "cacheHit" | "reuse">;
+              if (options.mode === "laya") {
+                const probe = yield* readLayaHealth(
+                  fetchImpl,
+                  options.layaUrl as string,
+                  options.layaModelRevision,
+                );
+                if (probe.failure !== null) {
+                  return yield* probe.failure;
+                }
+                classified = yield* layaClassify(
+                  fetchImpl,
+                  options.layaUrl as string,
+                  input,
+                  probe.health,
+                );
+              } else {
+                classified = yield* jevClassify(
+                  jevClient as TypeSafeClientService,
+                  input,
+                  jevModel,
+                );
+              }
               if (options.mode === "laya" && classified.modelRevision !== null) {
                 layaRevision = classified.modelRevision;
               }
@@ -548,6 +684,10 @@ export class RouterClassifier extends Context.Service<RouterClassifier, RouterCl
       });
 
     if (options.mode === "jev" && options.jev === undefined) {
+      // Cost safety: an unqualified backend never constructs a Jev client.
+      if (qualificationGate(options) !== null) {
+        return Layer.effect(RouterClassifier, make(undefined));
+      }
       return Layer.effect(RouterClassifier, Effect.flatMap(TypeSafeClient, make)).pipe(
         Layer.provide(
           TypeSafeClient.layerFetch({ apiKey: options.jevApiKey, baseURL: options.jevBaseUrl }),

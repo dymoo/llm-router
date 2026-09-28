@@ -1,4 +1,5 @@
-import type { ClassifierHealth, DeploymentHealth, HealthSnapshot } from "./http/contracts.ts";
+import type { ClassifierHealth } from "./classifier.ts";
+import type { DeploymentHealth, HealthSnapshot } from "./http/contracts.ts";
 
 export type HealthProbes = {
   classifier: () => Promise<ClassifierHealth>;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Effect } from "effect";
+import { gufoBody } from "../../src/router/adapters/gufo.ts";
 import {
   halogenBody,
   halogenEffort,
@@ -14,7 +15,11 @@ import {
   llamaCppSlotsSaturated,
 } from "../../src/router/adapters/llamacpp.ts";
 import { joinUrl } from "../../src/router/adapters/http.ts";
-import { openRouterBody } from "../../src/router/adapters/openrouter.ts";
+import { completionBody } from "../../src/router/adapters/openai-compatible.ts";
+import {
+  createOpenRouterPinVerifier,
+  openRouterBody,
+} from "../../src/router/adapters/openrouter.ts";
 import { localQwen, cloudGlm, frontier } from "./fixtures.ts";
 import type { AdapterRequest } from "../../src/router/adapters/types.ts";
 
@@ -32,6 +37,29 @@ const request = (
 });
 
 describe("adapters", () => {
+  it("only sends parallel tool control to upstreams that understand it", () => {
+    for (const enabled of [true, false]) {
+      const options = { parallelToolCalls: enabled, appliedEffort: "none" as const };
+      const openai = completionBody(request({ ...options, deployment: cloudGlm }), false);
+      const openrouter = openRouterBody(request({ ...options, deployment: frontier }), false);
+      const gufo = gufoBody(
+        request({ ...options, deployment: { ...localQwen, transport: "gufo" } }),
+        false,
+      );
+      const llama = llamaCppBody(request({ ...options, deployment: localQwen }), false);
+      const halogen = halogenBody(request({ ...options, deployment: localQwen }), false);
+      assert.equal(openai.parallel_tool_calls, enabled);
+      assert.equal(openrouter.parallel_tool_calls, enabled);
+      for (const body of [openai, openrouter, gufo, llama, halogen]) {
+        assert.equal("store" in body, false);
+        assert.equal("metadata" in body, false);
+      }
+      for (const body of [gufo, llama, halogen]) {
+        assert.equal("parallel_tool_calls" in body, false);
+      }
+    }
+  });
+
   it("maps Halogen high to xhigh and sends a single token budget field", () => {
     assert.equal(halogenEffort("high"), "xhigh");
     const body = halogenBody(request({ deployment: localQwen, appliedEffort: "high" }), false);
@@ -172,3 +200,123 @@ it("uses Halogen's runtime admission signal without equating one active request 
     saturated: false,
   });
 });
+it(
+  "bounds OpenRouter metadata lookups without retrying failures or dispatching during shutdown",
+  { timeout: 5000 },
+  async () => {
+    const deployment = { ...frontier, providerRestriction: "inference-net" };
+    let active = 0;
+    let peak = 0;
+    let requests = 0;
+    let stopping = false;
+    const observed: string[] = [];
+    const finished = Promise.withResolvers<void>();
+    const verify = createOpenRouterPinVerifier({
+      fetchImpl: async () => {
+        const requestNumber = ++requests;
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+        return requestNumber === 1
+          ? new Response("unavailable", { status: 503 })
+          : Response.json({ data: { provider_name: "InferenceNet" } });
+      },
+      credential: () => "fixture-key",
+      stopping: () => stopping,
+      delayMs: 0,
+      onVerified: (_deployment, result) => {
+        observed.push(result);
+        if (observed.length === 10) finished.resolve();
+      },
+    });
+    for (let index = 0; index < 10; index++) verify(deployment, `gen-${index}`);
+    await finished.promise;
+    assert.equal(requests, 10);
+    assert.equal(peak, 4);
+    assert.equal(observed.filter((result) => result === "unknown").length, 1);
+    assert.equal(observed.filter((result) => result === "match").length, 9);
+    stopping = true;
+    verify(deployment, "gen-after-shutdown");
+    assert.equal(requests, 10);
+  },
+);
+it(
+  "compares only the provider identity when an endpoint pin includes a variant",
+  { timeout: 5000 },
+  async () => {
+    for (const [pin, served, expected] of [
+      ["sail-research/fp8", "Sail Research", "match"],
+      ["inference-net", "InferenceNet", "match"],
+      ["inference-net", "DeepInfra", "mismatch"],
+    ] as const) {
+      const verified = Promise.withResolvers<string>();
+      const verify = createOpenRouterPinVerifier({
+        fetchImpl: async () => Response.json({ data: { provider_name: served } }),
+        credential: () => "fixture-key",
+        stopping: () => false,
+        delayMs: 0,
+        onVerified: (_deployment, result) => verified.resolve(result),
+      });
+      verify({ ...frontier, providerRestriction: pin }, "gen-test");
+      assert.equal(await verified.promise, expected);
+    }
+  },
+);
+
+it("skips checks without a cloud provider restriction", () => {
+  let fetches = 0;
+  const observed: string[] = [];
+  const verify = createOpenRouterPinVerifier({
+    fetchImpl: async () => {
+      fetches += 1;
+      return Response.json({ data: { provider_name: "InferenceNet" } });
+    },
+    credential: () => "fixture-key",
+    stopping: () => false,
+    delayMs: 0,
+    onVerified: (_deployment, result) => observed.push(result),
+  });
+  verify(frontier, "gen-unpinned");
+  verify({ ...frontier, location: "local", providerRestriction: "inference-net" }, "gen-local");
+  assert.equal(fetches, 0);
+  assert.deepEqual(observed, []);
+});
+
+it(
+  "drains rejected and malformed generation metadata before reporting unknown",
+  { timeout: 5000 },
+  async () => {
+    for (const status of [503, 200]) {
+      let cancelled = false;
+      let pulled = false;
+      let requests = 0;
+      const verified = Promise.withResolvers<string>();
+      const verify = createOpenRouterPinVerifier({
+        fetchImpl: async () => {
+          requests += 1;
+          const source = new ReadableStream<Uint8Array>({
+            pull(controller) {
+              pulled = true;
+              controller.enqueue(new TextEncoder().encode(status === 503 ? "error" : "{bad-json"));
+              if (status === 200) controller.close();
+            },
+            cancel() {
+              cancelled = true;
+            },
+          });
+          return new Response(source, { status });
+        },
+        credential: () => "fixture-key",
+        stopping: () => false,
+        delayMs: 0,
+        onVerified: (_deployment, result) => verified.resolve(result),
+      });
+      verify({ ...frontier, providerRestriction: "inference-net" }, "gen-error");
+      assert.equal(await verified.promise, "unknown");
+      assert.equal(requests, 1);
+      assert.equal(pulled, true);
+      if (status === 503) assert.equal(cancelled, true);
+    }
+  },
+);

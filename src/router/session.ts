@@ -4,7 +4,6 @@ import { LockTimeout } from "./failures.ts";
 
 export const DEFAULT_SESSION_CAPACITY = 2048;
 export const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
-export const SESSION_STRIPES = 128;
 export const DEFAULT_LOCK_WAIT_MS = 10_000;
 export const CHECKPOINT_SCORE_MARGIN = 0.08;
 
@@ -18,6 +17,8 @@ export interface SessionStore {
     use: Effect.Effect<A, E, R>,
     releaseAfter?: (value: A, release: () => void) => void,
   ) => Effect.Effect<A, E | LockTimeout, R>;
+  /** Diagnostic snapshot of active lock identities. */
+  readonly activeLockCount: () => number;
 }
 
 export function createSessionStore(options?: {
@@ -27,12 +28,12 @@ export function createSessionStore(options?: {
   const capacity = options?.capacity ?? DEFAULT_SESSION_CAPACITY;
   const ttlMs = options?.ttlMs ?? DEFAULT_SESSION_TTL_MS;
   const entries = new Map<string, SessionPin>();
-  const stripes: StripeLock[] = [];
-  for (let i = 0; i < SESSION_STRIPES; i++) {
-    stripes.push(new StripeLock());
-  }
+  const locks = new Map<string, { lock: SessionLock; references: number }>();
 
   return {
+    activeLockCount() {
+      return locks.size;
+    },
     get(keyId, sessionId, nowMs) {
       const id = sessionKey(keyId, sessionId);
       const pin = entries.get(id);
@@ -62,8 +63,47 @@ export function createSessionStore(options?: {
       }
     },
     withLock(keyId, sessionId, lockWaitMs, use, releaseAfter) {
-      const stripe = stripes[stripeIndex(keyId, sessionId)]!;
-      return stripe.withLock(lockWaitMs, sessionId, use, releaseAfter);
+      return Effect.uninterruptibleMask((restore) =>
+        Effect.suspend(() => {
+          const id = sessionKey(keyId, sessionId);
+          let entry = locks.get(id);
+          if (entry === undefined) {
+            entry = { lock: new SessionLock(), references: 0 };
+            locks.set(id, entry);
+          }
+          entry.references++;
+          const active = entry;
+          let retained = true;
+          let handedOff = false;
+          const dropReference = () => {
+            if (!retained) return;
+            retained = false;
+            if (--active.references === 0) locks.delete(id);
+          };
+          return Effect.onExit(
+            restore(
+              active.lock.withLock(
+                lockWaitMs,
+                sessionId,
+                use,
+                releaseAfter === undefined
+                  ? undefined
+                  : (value, release) => {
+                      releaseAfter(value, () => {
+                        release();
+                        dropReference();
+                      });
+                      handedOff = true;
+                    },
+              ),
+            ),
+            () =>
+              Effect.sync(() => {
+                if (!handedOff) dropReference();
+              }),
+          );
+        }),
+      );
     },
   };
 }
@@ -72,23 +112,14 @@ function sessionKey(keyId: string, sessionId: string): string {
   return `${keyId}\0${sessionId}`;
 }
 
-function stripeIndex(keyId: string, sessionId: string): number {
-  const text = sessionKey(keyId, sessionId);
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
-  }
-  return (hash >>> 0) % SESSION_STRIPES;
-}
-
-interface StripeWaiter {
+interface SessionWaiter {
   readonly deferred: Deferred.Deferred<void, LockTimeout>;
   abandoned: boolean;
 }
 
-class StripeLock {
+class SessionLock {
   private taken = false;
-  private readonly waiters: StripeWaiter[] = [];
+  private readonly waiters: SessionWaiter[] = [];
 
   withLock<A, E, R>(
     lockWaitMs: number,
@@ -131,7 +162,7 @@ class StripeLock {
         return Effect.void;
       }
       return Effect.flatMap(Deferred.make<void, LockTimeout>(), (deferred) => {
-        const waiter: StripeWaiter = { deferred, abandoned: false };
+        const waiter: SessionWaiter = { deferred, abandoned: false };
         this.waiters.push(waiter);
         return Effect.onExit(
           restore(
@@ -154,7 +185,7 @@ class StripeLock {
     });
   }
 
-  private abandon(waiter: StripeWaiter, sessionId: string): void {
+  private abandon(waiter: SessionWaiter, sessionId: string): void {
     waiter.abandoned = true;
     const index = this.waiters.indexOf(waiter);
     if (index >= 0) {

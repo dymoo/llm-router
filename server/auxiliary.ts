@@ -7,12 +7,14 @@ import { processState } from "./state.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
 import { keys } from "./control.ts";
 import { configuredChatDeployments, statusStore } from "./runtime.ts";
+import { registerDeployments } from "./metrics.ts";
 
 export function configuredAuxiliaryDeployments(): readonly AuxiliaryDeployment[] {
   if (processState.auxiliary === undefined) {
     const path = getEnv().AUXILIARY_CATALOG;
     processState.auxiliary =
       path === undefined ? [] : decodeAuxiliaryCatalogue(JSON.parse(readFileSync(path, "utf8")));
+    registerDeployments(processState.auxiliary.map((item) => item.id));
     const chatIds = new Set(configuredChatDeployments().map((item) => item.id));
     if (processState.auxiliary.some((item) => chatIds.has(item.id)))
       throw new Error("Chat and auxiliary deployment ids must be unique");

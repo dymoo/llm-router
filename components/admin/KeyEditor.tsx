@@ -53,6 +53,7 @@ export function KeyEditor({
   const latencyId = useId();
   const waitId = useId();
   const priorityId = useId();
+  const overloadId = useId();
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -224,6 +225,28 @@ export function KeyEditor({
           explanation={explainQueueWait(draft.policy.maxWaitMs)}
           onChange={(maxWaitMs) => editPolicy({ maxWaitMs })}
         />
+        <div className="field">
+          <span id={overloadId}>Local overload</span>
+          <div className="segmented" role="radiogroup" aria-labelledby={overloadId}>
+            {(["report", "failover"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={draft.policy.overloadAction === value}
+                disabled={busy}
+                onClick={() => editPolicy({ overloadAction: value })}
+              >
+                {value === "report" ? "Report overload" : "Fail over to eligible cloud"}
+              </button>
+            ))}
+          </div>
+          <p className="hint">
+            {draft.policy.overloadAction === "report"
+              ? "After the local wait, report overload. Overload-triggered paid cloud failover is off by default."
+              : "Before dispatch, an eligible cloud deployment may be used when local capacity is unavailable. This may incur provider charges; allowlist, capability, context, credentials and estimated-spend limits still apply. A continue pin never switches silently."}
+          </p>
+        </div>
         <label className="field">
           <span>Expires</span>
           <input

@@ -16,6 +16,7 @@ import {
   type SessionBoundary,
   type SessionPin,
 } from "../domain.ts";
+import type { FinalizeOutcome } from "../keys/types.ts";
 import {
   BoundaryRequired,
   CapacityBusy,
@@ -24,6 +25,7 @@ import {
   ImpossibleLimits,
   MissingSession,
   NoEligibleModel,
+  LocalOverloaded,
   ProviderFailure,
   RetrievalRequired,
   UnsupportedCapabilities,
@@ -31,7 +33,7 @@ import {
   type KeyLifecycleError,
   InvalidInput,
 } from "../errors.ts";
-import { adaptersFor } from "./adapters/index.ts";
+import { adaptersFor, openRouterBody } from "./adapters/index.ts";
 import { holdReadableStream, type FetchImpl } from "./adapters/http.ts";
 import { observeSseUsage } from "./sse.ts";
 import { attachUsage } from "./cost.ts";
@@ -70,7 +72,7 @@ import {
 import { decideReason, exclusionsOf, type RouteDecision } from "./decision.ts";
 
 export interface Classification {
-  readonly assessment: Assessment;
+  readonly assessment: Assessment | null;
   readonly usage: {
     readonly input_tokens: number | null;
     readonly output_tokens: number | null;
@@ -90,6 +92,7 @@ export interface RouterWork {
   readonly keyPolicyVersion?: number;
   readonly messages: readonly ChatMessage[];
   readonly tools?: unknown;
+  readonly parallelToolCalls?: boolean;
   readonly toolChoice?: unknown;
   readonly responseFormat?: unknown;
   readonly sampling?: SamplingOptions;
@@ -109,6 +112,11 @@ export interface RouterWork {
   readonly freshFactsAvailable: boolean;
   readonly cacheEvidence?: CacheEvidence;
   readonly stream: boolean;
+  /**
+   * Client `service_tier: "flex"`: local spare capacity only. Never waits for a
+   * Router permit, never spills or fails over to cloud; a refusal is returned.
+   */
+  readonly serviceTier?: "flex";
 }
 
 export interface RouteHeaders {
@@ -138,6 +146,12 @@ export interface RoutedStream {
   readonly decision: RouteDecision;
 }
 
+export interface BatchSpillPlan {
+  readonly deployment: Deployment;
+  readonly body: Record<string, unknown>;
+  readonly metadata: Omit<FinalizeOutcome, "status">;
+}
+
 export type RouterFailure =
   | BoundaryRequired
   | CapacityBusy
@@ -146,6 +160,7 @@ export type RouterFailure =
   | ImpossibleLimits
   | MissingSession
   | NoEligibleModel
+  | LocalOverloaded
   | ProviderFailure
   | RetrievalRequired
   | UnsupportedCapabilities
@@ -155,10 +170,21 @@ export type RouterFailure =
   | KeyLifecycleError
   | InvalidInput;
 
-export interface RouterOptions {
+export type RouterOptions = RouterCommonOptions &
+  (
+    | { readonly mode: "rules" }
+    | {
+        readonly mode?: "classifier";
+        readonly classify: (
+          input: ClassifyInput,
+        ) => Effect.Effect<ClassifiedAssessment, ClassifierError>;
+      }
+  );
+
+interface RouterCommonOptions {
   readonly catalogue: readonly Deployment[];
   readonly catalogueVersion: string;
-  readonly classify: (input: ClassifyInput) => Effect.Effect<ClassifiedAssessment, ClassifierError>;
+
   readonly fetch?: FetchImpl;
   readonly credentials?: (envVar: string) => string | undefined;
   readonly unavailable?: ReadonlySet<string>;
@@ -168,12 +194,45 @@ export interface RouterOptions {
     reservation: Reservation,
   ) => Effect.Effect<void, KeyLifecycleError | InvalidInput>;
   readonly onQueue?: (event: QueueEvent) => void;
+  readonly onQueueOutcome?: (event: "timeout" | "full", priority: Priority) => void;
   readonly onDecision?: (decision: RouteDecision, work: RouterWork) => void;
   readonly onClassified?: (work: RouterWork, classified: Classification) => void;
+  readonly onCapacityPool?: (pool: CapacityPool) => void;
+  readonly onOpenRouterCompleted?: (deployment: Deployment, generationId: unknown) => void;
   readonly lockWaitMs?: number;
   readonly sessionTtlMs?: number;
   readonly sessionCapacity?: number;
   readonly queueSlots?: number;
+}
+
+type RouteMode =
+  | { readonly kind: "interactive" }
+  | { readonly kind: "batch-local"; readonly requestedModel: string }
+  | {
+      readonly kind: "batch-spill";
+      readonly requestedModel: string;
+      readonly catalogue: readonly Deployment[];
+    };
+
+interface ForegroundTracker {
+  readonly enter: () => () => void;
+  readonly state: { value: number };
+}
+
+function createForegroundTracker(): ForegroundTracker {
+  const state = { value: 0 };
+  return {
+    state,
+    enter: () => {
+      state.value += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        state.value = Math.max(0, state.value - 1);
+      };
+    },
+  };
 }
 
 export class ModelRouter extends Context.Service<
@@ -181,6 +240,16 @@ export class ModelRouter extends Context.Service<
   {
     readonly complete: (work: RouterWork) => Effect.Effect<RoutedCompletion, RouterFailure>;
     readonly stream: (work: RouterWork) => Effect.Effect<RoutedStream, RouterFailure>;
+    readonly completeBatch: (
+      work: RouterWork,
+      requestedModel: string,
+    ) => Effect.Effect<RoutedCompletion, RouterFailure>;
+    readonly planBatchSpill: (
+      work: RouterWork,
+      catalogue: readonly Deployment[],
+      requestedModel: string,
+    ) => Effect.Effect<BatchSpillPlan, RouterFailure>;
+    readonly interactiveIdle: () => boolean;
   }
 >()("llm-router/router/ModelRouter") {}
 
@@ -193,10 +262,51 @@ export const modelRouterLayer = (options: RouterOptions) =>
         ttlMs: options.sessionTtlMs,
       });
       const pool = createCapacityPool({ queueSlots: options.queueSlots });
+      options.onCapacityPool?.(pool);
       const adapters = adaptersFor(options.fetch ?? fetch);
       const credentials = options.credentials ?? ((envVar: string) => process.env[envVar]);
       const lockWaitMs = options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS;
+      const foreground = createForegroundTracker();
       const complete = (work: RouterWork) =>
+        Effect.acquireUseRelease(
+          Effect.sync(foreground.enter),
+          (release) =>
+            runRouted(
+              work,
+              options,
+              sessions,
+              pool,
+              adapters,
+              credentials,
+              lockWaitMs,
+              false,
+              { kind: "interactive" },
+              release,
+            ),
+          (release) => Effect.sync(release),
+        ) as Effect.Effect<RoutedCompletion, RouterFailure>;
+      const stream = (work: RouterWork) =>
+        Effect.acquireUseRelease(
+          Effect.sync(foreground.enter),
+          (release) =>
+            runRouted(
+              work,
+              options,
+              sessions,
+              pool,
+              adapters,
+              credentials,
+              lockWaitMs,
+              true,
+              { kind: "interactive" },
+              release,
+            ),
+          (release, exit) =>
+            Effect.sync(() => {
+              if (exit._tag !== "Success") release();
+            }),
+        ) as Effect.Effect<RoutedStream, RouterFailure>;
+      const completeBatch = (work: RouterWork, requestedModel: string) =>
         runRouted(
           work,
           options,
@@ -206,22 +316,26 @@ export const modelRouterLayer = (options: RouterOptions) =>
           credentials,
           lockWaitMs,
           false,
-        ) as Effect.Effect<RoutedCompletion, RouterFailure>;
-      const stream = (work: RouterWork) =>
-        runRouted(
-          work,
-          options,
-          sessions,
-          pool,
-          adapters,
-          credentials,
-          lockWaitMs,
-          true,
-        ) as Effect.Effect<RoutedStream, RouterFailure>;
-      return ModelRouter.of({ complete, stream });
+          { kind: "batch-local", requestedModel },
+          undefined,
+          () => foreground.state.value === 0,
+        ).pipe(Effect.map((result) => result as RoutedCompletion));
+      const planBatchSpill = (
+        work: RouterWork,
+        catalogue: readonly Deployment[],
+        requestedModel: string,
+      ) =>
+        planSpill(work, options, sessions, pool, adapters, credentials, catalogue, requestedModel);
+      const interactiveIdle = () => foreground.state.value === 0;
+      return ModelRouter.of({
+        complete,
+        stream,
+        completeBatch,
+        planBatchSpill,
+        interactiveIdle,
+      });
     }),
   );
-
 function runRouted(
   work: RouterWork,
   options: RouterOptions,
@@ -231,17 +345,38 @@ function runRouted(
   credentials: (envVar: string) => string | undefined,
   lockWaitMs: number,
   stream: boolean,
-): Effect.Effect<RoutedCompletion | RoutedStream, RouterFailure> {
+  mode: RouteMode = { kind: "interactive" },
+  onInteractiveRelease?: () => void,
+  isInteractiveIdle: () => boolean = () => true,
+): Effect.Effect<RoutedCompletion | RoutedStream | BatchSpillPlan, RouterFailure> {
   return sessions.withLock(
     work.keyId,
     work.routing.sessionId,
     lockWaitMs,
-    executeLocked(work, options, sessions, pool, adapters, credentials, stream),
+    executeLocked(
+      work,
+      options,
+      sessions,
+      pool,
+      adapters,
+      credentials,
+      stream,
+      mode,
+      isInteractiveIdle,
+    ),
     stream
       ? (result, release) => {
           if (result.body instanceof ReadableStream) {
-            Object.assign(result, { body: holdReadableStream(new Response(result.body), release) });
-          } else release();
+            Object.assign(result, {
+              body: holdReadableStream(new Response(result.body), () => {
+                release();
+                onInteractiveRelease?.();
+              }),
+            });
+          } else {
+            release();
+            onInteractiveRelease?.();
+          }
         }
       : undefined,
   );
@@ -255,20 +390,55 @@ function executeLocked(
   adapters: Record<Deployment["transport"], ProviderAdapter>,
   credentials: (envVar: string) => string | undefined,
   stream: boolean,
-): Effect.Effect<RoutedCompletion | RoutedStream, RouterFailure> {
+  mode: RouteMode,
+  isInteractiveIdle: () => boolean,
+): Effect.Effect<RoutedCompletion | RoutedStream | BatchSpillPlan, RouterFailure> {
   return Effect.gen(function* () {
-    const catalogue = yield* checkCatalogueForInference(options.catalogue);
+    const configuredCatalogue = yield* checkCatalogueForInference(options.catalogue);
+    let sourceCatalogue: readonly Deployment[] = configuredCatalogue;
+    if (mode.kind === "batch-spill") {
+      sourceCatalogue = yield* checkCatalogueForInference(mode.catalogue);
+    }
+    const catalogue = sourceCatalogue.filter((deployment) => {
+      if (mode.kind === "interactive") {
+        return true;
+      }
+      if (mode.kind === "batch-local") {
+        return (
+          deployment.location === "local" &&
+          (mode.requestedModel === "auto" || deployment.id === mode.requestedModel)
+        );
+      }
+      return (
+        deployment.location === "cloud" &&
+        deployment.transport === "openrouter" &&
+        (mode.requestedModel === "auto" || deployment.id === mode.requestedModel)
+      );
+    });
+    if (catalogue.length === 0) {
+      return yield* Effect.fail(
+        new NoEligibleModel({
+          message:
+            mode.kind === "batch-spill"
+              ? "No eligible cloud OpenRouter batch deployment"
+              : "No eligible local batch deployment",
+        }),
+      );
+    }
     const generationAllowance = Math.min(
       work.maxCompletionTokens ?? work.policy.maxCompletionTokens,
       work.policy.maxCompletionTokens,
     );
-    yield* checkFeasibility({
-      policy: work.policy,
-      catalogue,
-      estimatedInputTokens: work.inputTokens,
-      requestedCompletionTokens: generationAllowance,
-      capabilities: work.capabilities,
-    });
+    // Rules uses the selection seam's complete hard filters, without assessment prechecks.
+    if (options.mode !== "rules") {
+      yield* checkFeasibility({
+        policy: work.policy,
+        catalogue,
+        estimatedInputTokens: work.inputTokens,
+        requestedCompletionTokens: generationAllowance,
+        capabilities: work.capabilities,
+      });
+    }
 
     const now = yield* Clock.currentTimeMillis;
     const key = continuityKey({
@@ -278,6 +448,16 @@ function executeLocked(
       responseFormat: work.responseFormat,
     });
     const pin = sessions.get(work.keyId, work.routing.sessionId, now);
+    // Open WebUI chat ids are advisory continuity (http/inference.ts): pins
+    // live in memory, so after a restart, expiry or eviction the chat routes
+    // afresh at a checkpoint instead of failing every later turn.
+    if (
+      work.routing.boundary === "continue" &&
+      work.routing.sessionId.startsWith("webui:") &&
+      (pin === undefined || pin.continuityKey !== key)
+    ) {
+      work = { ...work, routing: { ...work.routing, boundary: "checkpoint" } };
+    }
 
     if (work.routing.boundary === "continue") {
       if (work.routing.qualityOverride === "highest") {
@@ -297,14 +477,14 @@ function executeLocked(
       }
     }
 
-    const classified = yield* classifyIfNeeded(work, options, catalogue, pin);
+    const classified = yield* classifyIfNeeded(work, options, configuredCatalogue, pin);
     options.onClassified?.(work, classified);
-    const unavailable = yield* probeUnavailable(
-      catalogue,
-      adapters,
-      credentials,
-      options.unavailable,
-    );
+    let availability: DeploymentAvailability;
+    if (mode.kind === "batch-spill") {
+      availability = unavailableWithoutProviderProbe(catalogue, credentials, options.unavailable);
+    } else {
+      availability = yield* probeUnavailable(catalogue, adapters, credentials, options.unavailable);
+    }
     const selected = selectRoute({
       assessment: classified.assessment,
       deployments: catalogue,
@@ -316,19 +496,71 @@ function executeLocked(
       vision: work.capabilities.vision,
       boundary: work.routing.boundary,
       freshFactsAvailable: work.freshFactsAvailable,
-      unavailable,
+      unavailable: availability.unavailable,
+      missingCredentials: availability.missingCredentials,
       cacheEvidence: work.cacheEvidence,
       qualityOverride: work.routing.qualityOverride,
       preferredLocation: preferredLocationFromBias(work.policy.localityBias),
       pinRequestedEffort:
         work.routing.boundary === "continue"
-          ? pinRequestedEffort(pin?.requestedEffort ?? "low")
+          ? options.mode === "rules"
+            ? pin?.requestedEffort
+            : pinRequestedEffort(pin?.requestedEffort ?? "low")
           : undefined,
     });
+    // In Rules, a health denial means the other hard constraints already passed.
+    const localUnavailable =
+      options.mode === "rules" &&
+      mode.kind !== "batch-spill" &&
+      selected.denials.some(
+        (denial) =>
+          denial.code === "health" &&
+          catalogue.some(
+            (deployment) =>
+              deployment.id === denial.deploymentId &&
+              deployment.location === "local" &&
+              (work.routing.boundary === "continue"
+                ? deployment.id === pin?.deploymentId
+                : work.policy.localityBias >= 0.5 || selected._tag === "Denied"),
+          ),
+      ) &&
+      (work.routing.boundary === "continue" ||
+        selected._tag === "Denied" ||
+        !selected.ranked.some((entry) => entry.deployment.location === "local"));
+    if (
+      localUnavailable &&
+      (work.policy.overloadAction === "report" ||
+        work.serviceTier === "flex" ||
+        work.routing.boundary === "continue" ||
+        selected._tag === "Denied")
+    ) {
+      const failed = denialDecision(work, options, classified, {
+        _tag: "Denied",
+        code: "health",
+        detail: "Local deployment unavailable",
+        denials: selected.denials,
+      });
+      options.onDecision?.(
+        {
+          ...failed,
+          reason: "local-overloaded",
+          selectionReason: { code: "local-overloaded", detail: "local-unavailable" },
+        },
+        work,
+      );
+      return yield* new LocalOverloaded({
+        message: "Local deployment unavailable",
+        retryAfterSeconds: null,
+      });
+    }
     if (selected._tag === "Denied") {
       const denied = denialDecision(work, options, classified, selected);
       options.onDecision?.(denied, work);
-      return yield* Effect.fail(toDenialError(selected));
+      return yield* Effect.fail(
+        options.mode === "rules" && selected.denials.length > 0
+          ? new NoEligibleModel({ message: selected.detail })
+          : toDenialError(selected),
+      );
     }
 
     const chosen = chooseCandidate(work, pin, selected);
@@ -336,16 +568,27 @@ function executeLocked(
       return yield* Effect.fail(chosen.error);
     }
 
-    const saturation =
-      options.saturation !== undefined
-        ? options.saturation("local")
-        : yield* readLocalSaturation(catalogue, adapters, credentials);
-    const spill = cloudSpillPermitted(
-      work.policy,
-      classified.assessment,
-      saturation,
-      work.routing.boundary,
-    );
+    let saturation: SaturationEvidence;
+    if (mode.kind === "interactive") {
+      if (options.saturation !== undefined) {
+        saturation = options.saturation("local");
+      } else {
+        saturation = yield* readLocalSaturation(catalogue, adapters, credentials);
+      }
+    } else {
+      saturation = UNKNOWN_SATURATION;
+    }
+    const spill =
+      mode.kind === "interactive" &&
+      work.serviceTier !== "flex" &&
+      (classified.assessment === null
+        ? chosen.candidates[0]?.deployment.location === "cloud"
+        : cloudSpillPermitted(
+            work.policy,
+            classified.assessment,
+            saturation,
+            work.routing.boundary,
+          ));
     let rankedDeployments = chosen.candidates.map((candidate) => candidate.deployment);
     if (work.routing.boundary === "continue" && pin !== undefined) {
       rankedDeployments = rankedDeployments.filter(
@@ -356,7 +599,7 @@ function executeLocked(
           new BoundaryRequired({ message: "pinned deployment is no longer eligible" }),
         );
       }
-    } else if (!spill) {
+    } else if (!spill && mode.kind !== "batch-spill") {
       rankedDeployments = rankedDeployments.filter((deployment) => deployment.location === "local");
       if (rankedDeployments.length === 0) {
         const detail =
@@ -386,24 +629,97 @@ function executeLocked(
       }
     }
 
+    const overloadFailover =
+      mode.kind === "interactive" &&
+      work.serviceTier !== "flex" &&
+      work.policy.overloadAction === "failover" &&
+      work.routing.boundary !== "continue" &&
+      rankedDeployments[0]?.location === "local";
+    if (overloadFailover) {
+      const localFirst: Deployment[] = [];
+      for (const entry of chosen.candidates) {
+        if (entry.deployment.location === "local") localFirst.push(entry.deployment);
+      }
+      for (const entry of chosen.candidates) {
+        if (entry.deployment.location === "cloud") localFirst.push(entry.deployment);
+      }
+      rankedDeployments = localFirst;
+    }
     let queued = false;
     let waitedMs = 0;
-    const permit = yield* pool.acquire(rankedDeployments, work.policy.priority, {
-      requestId: work.requestId,
-      waitMs: waitBudgetMs(work.policy),
-      spill: spill && work.routing.boundary !== "continue",
-      onQueue: (event) => {
-        if (event.state === "queued") {
-          queued = true;
-        }
-        waitedMs = event.waitedMs;
-        options.onQueue?.(event);
-      },
-    });
+    let permit: Permit | undefined;
+    if (mode.kind === "batch-spill") {
+      permit = undefined;
+    } else if (mode.kind === "batch-local") {
+      permit = pool.tryAcquireIdleOnly(rankedDeployments, work.policy.priority, isInteractiveIdle);
+      if (permit === undefined) {
+        return yield* Effect.fail(
+          new CapacityBusy({ message: "batch requires an interactive-idle permit" }),
+        );
+      }
+    } else {
+      const capacityStartedAt = yield* Clock.currentTimeMillis;
+      permit = yield* pool
+        .acquire(rankedDeployments, work.policy.priority, {
+          requestId: work.requestId,
+          waitMs: overloadFailover || work.serviceTier === "flex" ? 0 : waitBudgetMs(work.policy),
+          spill: spill && work.routing.boundary !== "continue",
+          onQueue: (event) => {
+            if (event.state === "queued") {
+              queued = true;
+            }
+            waitedMs = event.waitedMs;
+            options.onQueue?.(event);
+          },
+          onOutcome: options.onQueueOutcome,
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            rankedDeployments.some((deployment) => deployment.location === "local")
+              ? new LocalOverloaded({
+                  message: "Local deployment overloaded",
+                  retryAfterSeconds: null,
+                })
+              : error,
+          ),
+          Effect.tapError((error) =>
+            Effect.gen(function* () {
+              if (error._tag !== "LocalOverloaded") return;
+              waitedMs = Math.max(waitedMs, (yield* Clock.currentTimeMillis) - capacityStartedAt);
+              const failed = denialDecision(work, options, classified, {
+                _tag: "Denied",
+                code: "health",
+                detail: "local-overloaded",
+                denials: selected.denials,
+              });
+              options.onDecision?.(
+                {
+                  ...failed,
+                  reason: "local-overloaded",
+                  selectionReason: { code: "local-overloaded", detail: "local-overloaded" },
+                  queue: { queued, waitedMs },
+                  exclusions: [
+                    ...failed.exclusions,
+                    ...rankedDeployments
+                      .filter((deployment) => deployment.location === "local")
+                      .map((deployment) => ({
+                        deploymentId: deployment.id,
+                        code: "saturation" as const,
+                        detail: "router-owned local permit unavailable",
+                      })),
+                  ],
+                },
+                work,
+              );
+            }),
+          ),
+        );
+    }
 
     const candidate =
-      chosen.candidates.find((entry) => entry.deployment.id === permit.deploymentId) ??
-      chosen.candidates[0]!;
+      chosen.candidates.find(
+        (entry) => entry.deployment.id === (permit?.deploymentId ?? rankedDeployments[0]?.id),
+      ) ?? chosen.candidates[0]!;
     const reservation: Reservation = {
       requestId: work.requestId,
       deploymentId: candidate.deployment.id,
@@ -421,30 +737,49 @@ function executeLocked(
       queued,
       waitedMs,
     };
-    const reason = decideReason({
-      pinned: work.routing.boundary === "continue",
-      qualityOverride: work.routing.qualityOverride === "highest",
-      queued,
-      selectedLocation: candidate.deployment.location,
-      spilledForSaturation:
-        saturation.verified && saturation.saturated && candidate.deployment.location === "cloud",
-      spilledForComplexity:
-        candidate.deployment.location === "cloud" &&
-        (classified.assessment.difficulty.value === "hard" ||
-          classified.assessment.localSufficiency < 0.8),
-    });
+    const overloadedToCloud =
+      (overloadFailover || localUnavailable) && candidate.deployment.location === "cloud";
+    const reason = overloadedToCloud
+      ? "local-overload-failover"
+      : classified.assessment === null
+        ? "deterministic-rules"
+        : decideReason({
+            pinned: work.routing.boundary === "continue",
+            qualityOverride: work.routing.qualityOverride === "highest",
+            queued,
+            selectedLocation: candidate.deployment.location,
+            spilledForSaturation:
+              saturation.verified &&
+              saturation.saturated &&
+              candidate.deployment.location === "cloud",
+            spilledForComplexity:
+              candidate.deployment.location === "cloud" &&
+              (classified.assessment.difficulty.value === "hard" ||
+                classified.assessment.localSufficiency < 0.8),
+          });
     const decision: RouteDecision = {
       reason,
       selectionReason: { code: reason, detail: reason },
-      exclusions: exclusionsOf(selected.denials),
+      exclusions: overloadedToCloud
+        ? [
+            ...exclusionsOf(selected.denials),
+            ...chosen.candidates
+              .filter((entry) => entry.deployment.location === "local")
+              .map((entry) => ({
+                deploymentId: entry.deployment.id,
+                code: "saturation" as const,
+                detail: "router-owned local permit unavailable",
+              })),
+          ]
+        : exclusionsOf(selected.denials),
       assessment: {
-        task: classified.assessment.task,
-        difficulty: classified.assessment.difficulty.value,
-        difficultyConfidence: classified.assessment.difficulty.confidence,
-        localSufficiency: classified.assessment.localSufficiency,
-        freshFacts: classified.assessment.freshFacts,
-        trivialChat: classified.assessment.trivialChat,
-        effortConfidence: classified.assessment.effort.confidence,
+        task: classified.assessment?.task ?? null,
+        difficulty: classified.assessment?.difficulty.value ?? null,
+        difficultyConfidence: classified.assessment?.difficulty.confidence ?? null,
+        localSufficiency: classified.assessment?.localSufficiency ?? null,
+        freshFacts: classified.assessment?.freshFacts ?? null,
+        trivialChat: classified.assessment?.trivialChat ?? null,
+        effortConfidence: classified.assessment?.effort.confidence ?? null,
         requestedEffort: candidate.requestedEffort,
         appliedEffort: candidate.appliedEffort,
       },
@@ -462,35 +797,170 @@ function executeLocked(
       },
     };
     options.onDecision?.(decision, work);
+    if (mode.kind === "batch-spill") {
+      const request = adapterRequestFor(work, candidate, credentials);
+      return {
+        deployment: candidate.deployment,
+        body: openRouterBody(request, false),
+        metadata: batchMetadataOf(work, candidate, classified, decision, pin),
+      } satisfies BatchSpillPlan;
+    }
+    if (permit === undefined) {
+      return yield* Effect.fail(new CapacityBusy({ message: "missing route permit" }));
+    }
 
-    const dispatched = yield* Effect.acquireUseRelease(
-      Effect.succeed(permit),
-      (held) =>
-        dispatch(
-          work,
-          options,
-          sessions,
-          candidate,
-          held,
-          adapters,
-          credentials,
-          stream,
-          classified,
-          headers,
-          reservation,
-          pin,
-          decision,
-        ),
-      (held, exit) =>
-        Effect.sync(() => {
-          if (stream && exit._tag === "Success") {
-            return;
+    const send = (
+      entry: RankedCandidate,
+      heldPermit: Permit,
+      routeHeaders: RouteHeaders,
+      routeReservation: Reservation,
+      routeDecision: RouteDecision,
+    ) =>
+      Effect.acquireUseRelease(
+        Effect.succeed(heldPermit),
+        (held) =>
+          dispatch(
+            work,
+            options,
+            sessions,
+            entry,
+            held,
+            adapters,
+            credentials,
+            stream,
+            classified,
+            routeHeaders,
+            routeReservation,
+            pin,
+            routeDecision,
+            // Batch work runs only on runtime-verified spare capacity.
+            mode.kind === "batch-local" ? "flex" : work.serviceTier,
+          ),
+        (held, exit) =>
+          Effect.sync(() => {
+            if (stream && exit._tag === "Success") return;
+            held.release();
+          }),
+      );
+
+    return yield* send(candidate, permit, headers, reservation, decision).pipe(
+      Effect.catchTag("LocalOverloaded", (error) =>
+        Effect.gen(function* () {
+          const reportRejected = () => {
+            if (candidate.deployment.location !== "local") return;
+            options.onDecision?.(
+              {
+                ...decision,
+                reason: "local-overloaded",
+                selectionReason: { code: "local-overloaded", detail: "local-overloaded" },
+                exclusions: [
+                  ...decision.exclusions,
+                  {
+                    deploymentId: candidate.deployment.id,
+                    code: "saturation",
+                    detail: "local runtime rejected before enqueue",
+                  },
+                ],
+              },
+              work,
+            );
+          };
+          if (mode.kind === "batch-local" && error.flexRefused === true) {
+            // No spare capacity right now: the batch item stays queued. A full
+            // queue or a draining runtime keeps the key's overload policy.
+            reportRejected();
+            return yield* new CapacityBusy({
+              message: "local runtime has no spare capacity for batch work",
+            });
           }
-          held.release();
+          if (
+            mode.kind !== "interactive" ||
+            work.serviceTier === "flex" ||
+            work.policy.overloadAction !== "failover" ||
+            work.routing.boundary === "continue" ||
+            candidate.deployment.location !== "local"
+          ) {
+            reportRejected();
+            return yield* error;
+          }
+
+          let next: RankedCandidate | undefined;
+          let cloudPermit: Permit | undefined;
+          for (const entry of chosen.candidates) {
+            if (entry.deployment.location !== "cloud") continue;
+            cloudPermit = pool.tryAcquire(entry.deployment, work.policy.priority);
+            if (cloudPermit !== undefined) {
+              next = entry;
+              break;
+            }
+          }
+          if (next === undefined || cloudPermit === undefined) {
+            reportRejected();
+            return yield* error;
+          }
+          const nextDecision: RouteDecision = {
+            ...decision,
+            reason: "local-overload-failover",
+            selectionReason: { code: "local-overload-failover", detail: "local-overload-failover" },
+            exclusions: [
+              ...decision.exclusions,
+              {
+                deploymentId: candidate.deployment.id,
+                code: "saturation",
+                detail: "local runtime rejected before enqueue",
+              },
+            ],
+            assessment: {
+              ...decision.assessment,
+              requestedEffort: next.requestedEffort,
+              appliedEffort: next.appliedEffort,
+            },
+          };
+          options.onDecision?.(nextDecision, work);
+          return yield* send(
+            next,
+            cloudPermit,
+            {
+              ...headers,
+              deploymentId: next.deployment.id,
+              requestedEffort: next.requestedEffort,
+              appliedEffort: next.appliedEffort,
+            },
+            {
+              ...reservation,
+              deploymentId: next.deployment.id,
+              requestedEffort: next.requestedEffort,
+              appliedEffort: next.appliedEffort,
+            },
+            nextDecision,
+          );
         }),
+      ),
     );
-    return dispatched;
   });
+}
+
+function planSpill(
+  work: RouterWork,
+  options: RouterOptions,
+  sessions: SessionStore,
+  pool: CapacityPool,
+  adapters: Record<Deployment["transport"], ProviderAdapter>,
+  credentials: (envVar: string) => string | undefined,
+  catalogue: readonly Deployment[],
+  requestedModel: string,
+): Effect.Effect<BatchSpillPlan, RouterFailure> {
+  return runRouted(
+    work,
+    options,
+    sessions,
+    pool,
+    adapters,
+    credentials,
+    options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS,
+    false,
+    { kind: "batch-spill", catalogue, requestedModel },
+  ).pipe(Effect.map((result) => result as BatchSpillPlan));
 }
 
 function classifyIfNeeded(
@@ -508,6 +978,18 @@ function classifyIfNeeded(
       cacheHit: false,
       elapsedMs: null,
       reuse: "session",
+      source: null,
+    });
+  }
+  if (options.mode === "rules") {
+    return Effect.succeed({
+      assessment: null,
+      usage: { input_tokens: null, output_tokens: null },
+      backend: null,
+      modelRevision: null,
+      cacheHit: false,
+      elapsedMs: null,
+      reuse: null,
       source: null,
     });
   }
@@ -565,14 +1047,21 @@ function classifyIfNeeded(
     );
 }
 
+interface DeploymentAvailability {
+  readonly unavailable: ReadonlySet<string>;
+  readonly missingCredentials: ReadonlySet<string>;
+}
+
 function probeUnavailable(
   catalogue: readonly Deployment[],
   adapters: Record<Deployment["transport"], ProviderAdapter>,
   credentials: (envVar: string) => string | undefined,
   extra?: ReadonlySet<string>,
-): Effect.Effect<ReadonlySet<string>> {
+): Effect.Effect<DeploymentAvailability> {
   return Effect.gen(function* () {
     const unavailable = new Set<string>(extra ?? []);
+    const missingCredentials = new Set<string>();
+    const probes: Array<{ deployment: Deployment; credential: string | undefined }> = [];
     for (const deployment of catalogue) {
       const credential =
         deployment.credentialEnvVar === null ? undefined : credentials(deployment.credentialEnvVar);
@@ -581,15 +1070,42 @@ function probeUnavailable(
         (credential === undefined || credential.length === 0)
       ) {
         unavailable.add(deployment.id);
+        missingCredentials.add(deployment.id);
         continue;
       }
-      const down = yield* adapters[deployment.transport].probeUnavailable(deployment, credential);
-      if (down) {
-        unavailable.add(deployment.id);
-      }
+      probes.push({ deployment, credential });
     }
-    return unavailable;
+    // Probes are independent: one slow provider no longer delays the others.
+    const down = yield* Effect.forEach(
+      probes,
+      ({ deployment, credential }) =>
+        adapters[deployment.transport].probeUnavailable(deployment, credential),
+      { concurrency: "unbounded" },
+    );
+    probes.forEach(({ deployment }, i) => {
+      if (down[i]) unavailable.add(deployment.id);
+    });
+    return { unavailable, missingCredentials };
   });
+}
+
+function unavailableWithoutProviderProbe(
+  catalogue: readonly Deployment[],
+  credentials: (envVar: string) => string | undefined,
+  extra?: ReadonlySet<string>,
+): DeploymentAvailability {
+  const unavailable = new Set<string>(extra ?? []);
+  const missingCredentials = new Set<string>();
+  for (const deployment of catalogue) {
+    if (
+      deployment.credentialEnvVar !== null &&
+      (credentials(deployment.credentialEnvVar) ?? "").length === 0
+    ) {
+      unavailable.add(deployment.id);
+      missingCredentials.add(deployment.id);
+    }
+  }
+  return { unavailable, missingCredentials };
 }
 
 function chooseCandidate(
@@ -646,6 +1162,80 @@ function toDenialError(result: Extract<SelectRouteResult, { _tag: "Denied" }>): 
   }
 }
 
+function adapterRequestFor(
+  work: RouterWork,
+  candidate: RankedCandidate,
+  credentials: (envVar: string) => string | undefined,
+  serviceTier?: "flex",
+): AdapterRequest {
+  const credential =
+    candidate.deployment.credentialEnvVar === null
+      ? undefined
+      : credentials(candidate.deployment.credentialEnvVar);
+  return {
+    deployment: candidate.deployment,
+    messages: work.messages,
+    tools: work.tools,
+    toolChoice: work.toolChoice,
+    parallelToolCalls: work.parallelToolCalls,
+    responseFormat: work.responseFormat,
+    sampling: work.sampling,
+    maxCompletionTokens: Math.min(
+      work.maxCompletionTokens ?? work.policy.maxCompletionTokens,
+      work.policy.maxCompletionTokens,
+      candidate.deployment.maxOutputTokens,
+    ),
+    requestedEffort: candidate.requestedEffort,
+    appliedEffort: candidate.appliedEffort,
+    credential,
+    requestId: work.requestId,
+    ...(serviceTier === undefined ? {} : { serviceTier }),
+  };
+}
+
+function batchMetadataOf(
+  work: RouterWork,
+  candidate: RankedCandidate,
+  classified: Classification,
+  decision: RouteDecision,
+  pin: SessionPin | undefined,
+): BatchSpillPlan["metadata"] {
+  const accounting = accountingOf(classified, candidate, emptyProviderUsage(), pin, 0, null);
+  return {
+    ...accounting,
+    deploymentId: candidate.deployment.id,
+    location: candidate.deployment.location,
+    transport: candidate.deployment.transport,
+    boundary: work.routing.boundary,
+    trajectoryHash: accounting.trajectoryHash,
+    decodeTps: null,
+    queueWaitMs: 0,
+    decisionReason: decision.reason,
+    selectionReasonCode: decision.selectionReason.code,
+    selectionReasonDetail: decision.selectionReason.detail,
+    exclusionJson: JSON.stringify(decision.exclusions),
+    taskKind: decision.assessment.task,
+    difficulty: decision.assessment.difficulty,
+    requestedEffort: decision.assessment.requestedEffort,
+    saturation: decision.saturation.verified && decision.saturation.saturated,
+    cacheObservation:
+      accounting.cachedInputTokens === null
+        ? "unknown"
+        : accounting.cachedInputTokens > 0
+          ? "observed-hit"
+          : "observed-miss",
+    decisionTraceJson: JSON.stringify(decision),
+  };
+}
+
+function reportOpenRouterCompletion(
+  candidate: RankedCandidate,
+  options: RouterOptions,
+  generationId: unknown,
+): void {
+  if (candidate.deployment.transport === "openrouter")
+    options.onOpenRouterCompleted?.(candidate.deployment, generationId);
+}
 function dispatch(
   work: RouterWork,
   options: RouterOptions,
@@ -660,31 +1250,13 @@ function dispatch(
   reservation: Reservation,
   pin: SessionPin | undefined,
   decision: RouteDecision,
+  serviceTier?: "flex",
 ): Effect.Effect<RoutedCompletion | RoutedStream, RouterFailure> {
   return Effect.gen(function* () {
     if (options.onBeforeDispatch !== undefined) {
       yield* options.onBeforeDispatch(work, reservation);
     }
-    const credential =
-      candidate.deployment.credentialEnvVar === null
-        ? undefined
-        : credentials(candidate.deployment.credentialEnvVar);
-    const adapterRequest: AdapterRequest = {
-      deployment: candidate.deployment,
-      messages: work.messages,
-      tools: work.tools,
-      toolChoice: work.toolChoice,
-      responseFormat: work.responseFormat,
-      sampling: work.sampling,
-      maxCompletionTokens: Math.min(
-        work.maxCompletionTokens ?? work.policy.maxCompletionTokens,
-        work.policy.maxCompletionTokens,
-        candidate.deployment.maxOutputTokens,
-      ),
-      requestedEffort: candidate.requestedEffort,
-      appliedEffort: candidate.appliedEffort,
-      credential,
-    };
+    const adapterRequest = adapterRequestFor(work, candidate, credentials, serviceTier);
     const adapter = adapters[candidate.deployment.transport];
     const startedAt = yield* Clock.currentTimeMillis;
     if (stream) {
@@ -715,6 +1287,7 @@ function dispatch(
               )
           : undefined,
         startedAt,
+        (generationId) => reportOpenRouterCompletion(candidate, options, generationId),
       );
       return {
         headers,
@@ -731,6 +1304,7 @@ function dispatch(
       catch: () => new ProviderFailure({ message: "Invalid local token usage" }),
     });
     persistPin(sessions, work, candidate, classified.assessment, finishedAt);
+    reportOpenRouterCompletion(candidate, options, completion.body.id);
     return {
       headers,
       reservation,
@@ -752,13 +1326,17 @@ function persistPin(
   sessions: SessionStore,
   work: RouterWork,
   candidate: RankedCandidate,
-  assessment: Assessment,
+  assessment: Assessment | null,
   nowMs: number,
 ): void {
   sessions.set(work.keyId, work.routing.sessionId, {
     deploymentId: candidate.deployment.id,
-    requestedEffort: pinRequestedEffort(candidate.requestedEffort),
-    appliedEffort: candidate.appliedEffort === "none" ? "low" : candidate.appliedEffort,
+    requestedEffort:
+      assessment === null
+        ? candidate.requestedEffort
+        : pinRequestedEffort(candidate.requestedEffort),
+    appliedEffort:
+      assessment === null || candidate.appliedEffort !== "none" ? candidate.appliedEffort : "low",
     continuityKey: continuityKey({
       messages: work.messages,
       tools: work.tools,
@@ -839,13 +1417,13 @@ function denialDecision(
     selectionReason: { code: "no-eligible", detail: selected.detail },
     exclusions: exclusionsOf(selected.denials),
     assessment: {
-      task: classified.assessment.task,
-      difficulty: classified.assessment.difficulty.value,
-      difficultyConfidence: classified.assessment.difficulty.confidence,
-      localSufficiency: classified.assessment.localSufficiency,
-      freshFacts: classified.assessment.freshFacts,
-      trivialChat: classified.assessment.trivialChat,
-      effortConfidence: classified.assessment.effort.confidence,
+      task: classified.assessment?.task ?? null,
+      difficulty: classified.assessment?.difficulty.value ?? null,
+      difficultyConfidence: classified.assessment?.difficulty.confidence ?? null,
+      localSufficiency: classified.assessment?.localSufficiency ?? null,
+      freshFacts: classified.assessment?.freshFacts ?? null,
+      trivialChat: classified.assessment?.trivialChat ?? null,
+      effortConfidence: classified.assessment?.effort.confidence ?? null,
       requestedEffort: null,
       appliedEffort: null,
     },

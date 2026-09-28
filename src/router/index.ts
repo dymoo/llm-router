@@ -24,6 +24,7 @@ export type {
   RouterOptions,
   RouterFailure,
   Classification,
+  BatchSpillPlan,
 } from "./model-router.ts";
 export type { RouteDecision, RouteDecisionReason } from "./decision.ts";
 export { ROUTE_DECISION_REASONS, decideReason } from "./decision.ts";
@@ -36,6 +37,7 @@ export { cloudSpillPermitted, preferredLocationFromBias, UNKNOWN_SATURATION } fr
 export type { SaturationEvidence } from "./locality.ts";
 export {
   adaptersFor,
+  gufoAdapter,
   halogenAdapter,
   llamaCppAdapter,
   openAiCompatibleAdapter,

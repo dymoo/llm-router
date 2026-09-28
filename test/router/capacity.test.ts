@@ -160,4 +160,37 @@ describe("capacity", () => {
     a.release();
     b.release();
   });
+
+  it("atomically refuses idle-only acquisition when foreground work appears", () => {
+    const pool = createCapacityPool();
+    let checks = 0;
+    const permit = pool.tryAcquireIdleOnly([localQwen], "low", () => {
+      checks += 1;
+      return checks === 1;
+    });
+    assert.equal(permit, undefined);
+    assert.equal(checks, 2);
+    assert.equal(pool.snapshot(localQwen.id).runningLow, 0);
+    assert.equal(pool.snapshot(localQwen.id).waiting, 0);
+  });
+
+  it("keeps reserved interactive slots out of the deferred lane", () => {
+    const tight = {
+      ...localQwen,
+      capacity: { maxParallel: 2, reservedInteractiveSlots: 1 },
+    };
+    const pool = createCapacityPool();
+    const deferred = pool.tryAcquireIdleOnly([tight], "high", () => true);
+    assert.ok(deferred);
+    assert.equal(pool.snapshot(tight.id).runningLow, 1);
+    assert.equal(pool.snapshot(tight.id).runningHigh, 0);
+    assert.equal(
+      pool.tryAcquireIdleOnly([tight], "high", () => true),
+      undefined,
+    );
+    const interactive = pool.tryAcquire(tight, "high");
+    assert.ok(interactive);
+    deferred.release();
+    interactive.release();
+  });
 });

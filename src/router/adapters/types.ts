@@ -1,7 +1,7 @@
 import type { Effect } from "effect";
 import type { SamplingOptions } from "../../sampling.ts";
 import type { AppliedEffort, Deployment, RequestedEffort } from "../../domain.ts";
-import type { ProviderFailure } from "../../errors.ts";
+import type { LocalOverloaded, ProviderFailure } from "../../errors.ts";
 import type { ProviderUsage } from "../accounting.ts";
 import type { SaturationEvidence } from "../locality.ts";
 import type { ChatMessage } from "../messages.ts";
@@ -10,6 +10,7 @@ export interface AdapterRequest {
   readonly deployment: Deployment;
   readonly messages: readonly ChatMessage[];
   readonly tools: unknown;
+  readonly parallelToolCalls?: boolean;
   readonly toolChoice: unknown;
   readonly responseFormat: unknown;
   readonly sampling?: SamplingOptions;
@@ -17,6 +18,10 @@ export interface AdapterRequest {
   readonly requestedEffort: RequestedEffort;
   readonly appliedEffort: AppliedEffort;
   readonly credential: string | undefined;
+  /** Router request id, forwarded where the runtime logs it. */
+  readonly requestId?: string;
+  /** OpenAI service tier; Gufo serves `flex` only from spare capacity. */
+  readonly serviceTier?: "flex";
 }
 
 export interface AdapterCompletion {
@@ -25,8 +30,12 @@ export interface AdapterCompletion {
 }
 
 export interface ProviderAdapter {
-  readonly complete: (request: AdapterRequest) => Effect.Effect<AdapterCompletion, ProviderFailure>;
-  readonly stream: (request: AdapterRequest) => Effect.Effect<Response, ProviderFailure>;
+  readonly complete: (
+    request: AdapterRequest,
+  ) => Effect.Effect<AdapterCompletion, ProviderFailure | LocalOverloaded>;
+  readonly stream: (
+    request: AdapterRequest,
+  ) => Effect.Effect<Response, ProviderFailure | LocalOverloaded>;
   readonly probeUnavailable: (
     deployment: Deployment,
     credential: string | undefined,

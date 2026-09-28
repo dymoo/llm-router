@@ -427,7 +427,11 @@ function decodePolicy(payload: unknown, path: string): KeyPolicy {
     throw new AdminApiError(500, "unknown", `Invalid priority at ${path}.`);
   }
   const localityBias = decodeLocalityBias(payload);
-  const allowedModels = decodeAllowedModels(payload.allowedModels, `${path}.allowedModels`);
+  const overloadAction = payload.overloadAction === undefined ? "report" : payload.overloadAction;
+  if (overloadAction !== "report" && overloadAction !== "failover") {
+    throw new AdminApiError(500, "unknown", "Invalid overloadAction at " + path + ".");
+  }
+  const allowedModels = decodeAllowedModels(payload.allowedModels, path + ".allowedModels");
   const bias = payload.bias;
   if (!isRecord(bias)) {
     throw new AdminApiError(500, "unknown", `Invalid bias at ${path}.`);
@@ -440,8 +444,9 @@ function decodePolicy(payload: unknown, path: string): KeyPolicy {
     allowedModels,
     requestsPerMinute: requiredInt(payload.requestsPerMinute, `${path}.requestsPerMinute`),
     maxConcurrent: requiredInt(payload.maxConcurrent, `${path}.maxConcurrent`),
-    maxWaitMs: requiredInt(payload.maxWaitMs, `${path}.maxWaitMs`),
-    maxEstimatedUsd: optionalFinite(payload.maxEstimatedUsd, `${path}.maxEstimatedUsd`),
+    maxWaitMs: requiredInt(payload.maxWaitMs, path + ".maxWaitMs"),
+    overloadAction,
+    maxEstimatedUsd: optionalFinite(payload.maxEstimatedUsd, path + ".maxEstimatedUsd"),
     bias: {
       cost: requiredFinite(bias.cost, `${path}.bias.cost`),
       quality: requiredFinite(bias.quality, `${path}.bias.quality`),
@@ -486,7 +491,9 @@ export function decodeHealth(payload: unknown): HealthSnapshot {
       evidence:
         classifierRaw.evidence === "runtime-probe" ||
         classifierRaw.evidence === "configuration-only" ||
-        classifierRaw.evidence === "unavailable"
+        classifierRaw.evidence === "unavailable" ||
+        classifierRaw.evidence === "unqualified" ||
+        classifierRaw.evidence === "deterministic-rules"
           ? classifierRaw.evidence
           : undefined,
     },

@@ -14,6 +14,7 @@ out
 coverage
 catalog*.json
 !catalog*.example.json
+classifier-qualification.json
 third_party
 *.gguf
 *.tsbuildinfo

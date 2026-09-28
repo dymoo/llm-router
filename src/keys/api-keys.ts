@@ -13,6 +13,12 @@ export class ApiKeys extends Context.Service<
     revokeKey: KeyRepository["Service"]["revokeKey"];
     rotateKey: KeyRepository["Service"]["rotateKey"];
     admit: KeyRepository["Service"]["admit"];
+    admitByKeyId: KeyRepository["Service"]["admitByKeyId"];
+    attach: KeyRepository["Service"]["attach"];
+    defer: KeyRepository["Service"]["defer"];
+    recheckDeferred: KeyRepository["Service"]["recheckDeferred"];
+    finalizeDeferred: KeyRepository["Service"]["finalizeDeferred"];
+    finalizeInterrupted: KeyRepository["Service"]["finalizeInterrupted"];
     authenticate: KeyRepository["Service"]["authenticate"];
     recheck: KeyRepository["Service"]["recheck"];
     finalize: KeyRepository["Service"]["finalize"];
@@ -35,13 +41,26 @@ export const apiKeysLayer: Layer.Layer<ApiKeys, never, KeyRepository> = Layer.ef
       revokeKey: (id) => keys.revokeKey(id),
       rotateKey: (input) => keys.rotateKey(input),
       admit: (rawKey) => keys.admit(rawKey),
+      admitByKeyId: (keyId) => keys.admitByKeyId(keyId),
+      attach: (admission: Admission, itemId: string) => keys.attach(admission, itemId),
+      defer: (
+        admission: Admission,
+        itemId: string,
+        metadata: Omit<FinalizeOutcome, "status">,
+        deadlineAt: number,
+      ) => keys.defer(admission, itemId, metadata, deadlineAt),
+      recheckDeferred: (admission: Admission) => keys.recheckDeferred(admission),
+      finalizeDeferred: (keyId: string, requestId: string, outcome: FinalizeOutcome) =>
+        keys.finalizeDeferred(keyId, requestId, outcome),
+      finalizeInterrupted: (keyId: string, itemId: string) =>
+        keys.finalizeInterrupted(keyId, itemId),
       authenticate: (rawKey) => keys.authenticate(rawKey),
       recheck: (admission: Admission) => keys.recheck(admission),
       finalize: (admission: Admission, outcome: FinalizeOutcome) =>
         keys.finalize(admission, outcome),
       usageSummary: (input) => keys.usageSummary(input),
       recentRequests: (input) => keys.recentRequests(input),
-      analytics: (input) => keys.analytics(input),
+      analytics: (input, qualifications) => keys.analytics(input, qualifications),
     });
   }),
 );

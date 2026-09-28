@@ -6,20 +6,20 @@ Run **one gateway process** with local SQLite. Session pins, model permits and p
 
 The gateway's resource registry is process-owned so Next instrumentation and route bundles share admission leases, capacity pools, session routing, health state and disposal. A production HTTP regression holds a generation open while SIGTERM arrives, rejects new work, and checks that the admitted response and SQLite finalization complete before exit. Restart the process after server-code or catalogue changes rather than hot-swapping live ownership.
 
-Compose always provides `gateway` and CPU `laya`; choose either `llamacpp` or `halogen` as the GPU profile, or run optimized native llama.cpp through `host.docker.internal`. Optional profiles are `npu` (FastFlowLM) and `webui`. Only gateway and WebUI publish ports, both loopback by default. See [runtime selection](runtime-selection.md) before changing engines.
+Compose defaults to `gateway` with Rules routing. CPU `laya` is behind the opt-in `laya` profile and is not built or started for Rules/Jev. Choose either `llamacpp` or `halogen` as the GPU profile, or run optimized native llama.cpp through `host.docker.internal`. Optional profiles also include `npu` (FastFlowLM) and `webui`. Only gateway and WebUI publish ports, both loopback by default. See [runtime selection](runtime-selection.md) before changing engines.
 
 ## Storage and privacy
 
 | Volume | Contents |
 | --- | --- |
-| `sqlite-data` | Keys, policy versions, admission leases, metadata usage and audit |
+| `sqlite-data` | Keys, policy versions, admission leases, metadata usage and audit; opt-in batch inputs/results in a separate private content store |
 | `laya-cache` | Local classifier weights and optional ONNX artifacts |
 | `fastflowlm-models` | Optional NPU model downloads |
 | `webui-data` | Open WebUI conversations and document state — separate from gateway metadata |
 | `LLAMACPP_MODELS_DIR` bind | GGUF weights and SSD-backed PLE table |
 | `HALOGEN_MODELS_DIR`, `HALOGEN_CACHE_DIR_HOST` binds | HGN weights/quality overlay and sensitive derived prompt-cache state |
 
-Catalogues are read-only bind mounts. Secrets live in private `.env` files, not images or the repository. Keep `API_KEY_PEPPER` stable: changing it invalidates stored key authentication. The gateway never stores prompts/completions. Open WebUI does store conversations by design. FastFlowLM v1.0.6 prints inputs/transcripts, so the supplied profile disables Docker log persistence.
+Catalogues are read-only bind mounts. Secrets live in private `.env` files, not images or the repository. Keep `API_KEY_PEPPER` stable: changing it invalidates stored key authentication. Ordinary inference stores request metadata, not prompts/completions; submitting a batch explicitly stores its inputs and results in a bounded private store beside `control.sqlite`, outside Analytics, until acknowledgement or the 24 h post-terminal TTL ([batch.md](batch.md#result-holding)). Open WebUI stores conversations by design. FastFlowLM v1.0.6 prints inputs/transcripts, so the supplied profile disables Docker log persistence.
 
 Request metadata retention is 30 days; audit retention is 90 days. Maintenance runs on repository activity. These defaults are not a compliance policy.
 
@@ -33,21 +33,91 @@ node scripts/restore.mjs --compose --replace ./data/backups/control-….sqlite
 docker compose up -d --no-deps gateway
 ```
 
-Native backup uses `SQLITE_PATH=... node scripts/backup.mjs`. Preserve the matching pepper separately. Test restores on an isolated copy before replacing a live database. Current migrations upgrade the identified v1 schema through v4 in a locked transaction and preserve existing keys; arbitrary older/foreign databases are rejected, not guessed.
+Native backup uses `SQLITE_PATH=... node scripts/backup.mjs`. Preserve the matching pepper separately. Test restores on an isolated copy before replacing a live database. Both scripts validate against the same `migrations/` directory that `src/db/migrate.ts` consumes (currently v5, the batch ledger): the control-plane identity must match, `settings.schema_version` must equal `PRAGMA user_version`, and the version must sit inside the supported range. Identified older schemas (v1–v4) are accepted and upgraded in a locked transaction on the next gateway start, preserving existing keys; foreign, corrupt, inconsistent or newer-than-supported databases are refused, not guessed.
 
 Native restore requires stopping the gateway and passing `--replace --offline`. Restore validates the source, stages a private complete snapshot, retains the previous database, and replaces the destination only after verification. Compose restore uses an actual helper container mounted on the gateway volume; a failed copy is an error, never a success message. Backup refuses to overwrite an existing destination.
 
+Before upgrading an existing identified control-plane database, gateway startup automatically makes a WAL-aware, verified copy in `dirname(SQLITE_PATH)/backups/control-pre-v<target>-<UTC timestamp>.sqlite` (directory mode `0700`, file mode `0600`). It keeps the five newest automatic copies for that target version without touching other backups; if the copy cannot be created or verified, startup refuses the migration and leaves the old schema intact. Fresh and already-current databases do not get a pre-migration copy.
+
+Restore quarantines batch state; an ordinary restart does not. On a normal restart the ledger leaves never-dispatched queued items untouched, interrupts only locally in-flight running work, and re-polls confirmed remote groups by their proven upstream ids — durable inputs keep queued work recoverable. A restore is a different safety case: a snapshot cannot prove that a queued or locally-running item was not executed after the snapshot was taken. Before the staged copy replaces the destination, restore terminalizes pending batch items with the explicit `restore_review_required` outcome, finalizes the running request rows linked to those items as `abandoned` (spend metadata preserved — deferred remote requests skip ordinary lease recovery and would otherwise stay running forever), marks unconfirmed submit intents `unknown` (no new POST is ever derived from them), and closes non-terminal jobs that own no pending confirmed remote — jobs still holding an unharvested confirmed remote stay nonterminal, and their running items and linked requests stay running, so the proven id can re-poll and finish normally. The original backup file is never modified; quarantined rows need review before the restored database is used.
+
+Batch content is backed up separately, or not at all. `backup.mjs` copies only `control.sqlite`: the sensitive content store (request bodies and result rows under `dirname(SQLITE_PATH)/batch-content`, or `BATCH_RESULTS_DIR`) lives outside the database, is bounded by the 24-hour post-terminal TTL and the per-job/per-key budgets, and is never silently added to metadata backups. To keep it deliberately, copy the directory separately with its own retention — ad-hoc copies must not outlive the TTL bounds that keep this store short-lived.
+
 Pins do not survive a restart or restore. Clients must start a new task or declare a checkpoint. Abandoned leases recover through the normal repository maintenance/admission path.
+
+## Automatic redeploys
+
+After `ci` succeeds for a push to `main`, `deploy-k3s` checks out that exact commit, builds the linux/amd64 gateway image, audits every saved image layer for environment files, SQLite files and private data, and pushes `ghcr.io/dymoo/llm-router:<full source SHA>`. It records the **pushed digest**, not the mutable tag, in the infra overlay. The workflow also accepts `workflow_dispatch` with a required full `sha` and `allow_migration` (default `false`). Only successful push-triggered CI runs auto-deploy; PR CI does not. Deployments serialize rather than cancel each other.
+
+The deployer reads `# source-commit: <full 40-character SHA>` from `dymoo/dylans-infra/k8s/apps/llm-router/kustomization.yaml`. If that commit is missing or unknown, or `git diff --name-only PREV..SHA -- migrations/ src/db/` has changes, it treats the release as a **possible forward-only migration**. The automatic run stops and tells the operator to dispatch `deploy-k3s` manually with the exact `sha` and `allow_migration=true`. On startup the new gateway takes its own verified pre-migration copy (see Backup and restore) and refuses to migrate if that copy fails; an extra operator backup beforehand is still recommended. Preserve the matching `API_KEY_PEPPER` outside the image. An older binary refuses a newer schema, so never roll it back onto a migrated database. On rollout failure without a migration, the workflow runs `kubectl rollout undo`, reverts its infra write-back commit and pushes that revert, then fails. Aft…
+
+Deployment restarts the single gateway process. `Recreate` drains the old pod (up to the 780-second termination grace period); active or locally running work may be interrupted and clients should retry or resume from a checkpoint. Never treat a restart as a restored snapshot: queued/recoverable batch work follows the normal restart behavior above. Secrets are **not synced** from the router repository or the image; provision and rotate runtime Kubernetes Secrets out of band.
+
+Infra contract for `dymoo/dylans-infra`:
+
+- Namespace `llm-router`, overlay `k8s/apps/llm-router/`; `kustomization.yaml` must contain exactly one `# source-commit: <full SHA>` line and one `images` entry named `ghcr.io/dymoo/llm-router` with exactly one `digest: sha256:<64 lowercase hex>` line. The workflow changes only those two lines, commits `deploy(llm-router): <short SHA>` to infra `main` and applies `infra/k8s/apps/llm-router`.
+- A Deployment named `llm-router` with one replica, `Recreate`, `terminationGracePeriodSeconds: 780`, PVC mounted at `/var/lib/llm-router`, and private GHCR image pinned by digest. Runtime secrets remain out of band.
+- GitHub App runner scale set label `llm-router-deploy-runners`; repository secrets `GHCR_PAT` (registry push only; checkout uses the default repository access), `DEPLOY_SSH_KEY` (infra `main` write-back) and `KUBECONFIG_B64` (cluster access). The `GHCR_PAT` publisher logs in as `dymoo`, matching the established infra pipeline. `secrets.GITHUB_TOKEN` is empty on these runners. GitHub SSH host key is pinned, with strict verification, not learned at runtime.
+- Kubernetes deployer credentials need only the resource verbs required to apply the overlay and to read/watch deployment rollout status and undo the Deployment. They must have **no Secret verbs**; out-of-band administrators own Secret creation and updates.
 
 ## Health
 
 - `/health/live`: 200 while the HTTP process is alive. No inference, classifier or provider call.
-- `/health/ready`: cached readiness; 200 only when persistence, the selected classifier, and at least one non-optional chat deployment are ready. Otherwise 503.
+- `/health/ready`: cached readiness; 200 only when persistence, the selected routing mode, and at least one non-optional chat deployment are ready. Otherwise 503. Rules itself is always ready; Laya/Jev require classifier readiness and qualification.
 - `/api/health`: the same detailed snapshot with HTTP 200 for the console, including degraded optional deployments.
 
-Probe rounds are coalesced and cached for five seconds. Runtime HTTP probes have bounded deadlines. Laya's actual revision must match the configured pin. llama.cpp uses its root `/health`, not `/v1/health`. Its `/slots` telemetry is the evidence for saturation; gateway permit counts and an absent runtime are not equivalent to saturation.
+Probe rounds are coalesced and cached for five seconds. Runtime HTTP probes have bounded deadlines. The Classifier module owns backend readiness: Laya readiness and uncached classification both require HTTP `200`, `ok: true`, `ready: true`, and a model revision matching the configured pin. The readiness probe has a separate two-second budget that includes reading the response body. Readiness probes do not populate the Assessment exact cache.
+
+llama.cpp uses its root `/health`, not `/v1/health`. Its `/slots` telemetry is the evidence for saturation; gateway permit counts and an absent runtime are not equivalent to saturation.
 
 Cloud health uses non-generating metadata/account endpoints. Jev has no documented free authenticated readiness probe, so its status explicitly says `configuration-only`; it does not claim that a classification call succeeded. NPU model-list reachability establishes service availability, not measured inference quality or hardware performance.
+
+## Metrics
+
+Set `METRICS_PORT` to an integer from 1–65535, different from the application `PORT` (default 3000), to enable the dedicated Prometheus listener. Unset disables it. Only `GET /metrics` is served there; the application port never serves metrics. Expose the metrics port solely to Prometheus via Kubernetes NetworkPolicy; do not route it through Caddy/Authentik or publish it publicly. The listener stops during graceful shutdown. `SOURCE_COMMIT` in the image supplies the build label, or `unknown` when absent.
+
+The `llm_router_` families export build/process and scrape timing; cached readiness and qualification; terminal admissions, request duration and concurrency; queue/capacity and routing decisions; stream outcomes; classifier latency/usage; known token and separate cost categories; cache observations; and read-only SQLite counts for key and batch state. Histograms use fixed buckets and seconds; counters end in `_total`. Missing usage from a dispatched request increments `usage_unknown_total` rather than fabricating a zero token count. The current Gufo adapter does not decode draft acceptance counts, so no draft-token metric is emitted.
+
+For OpenRouter, `llm_router_provider_pin_total{deployment,result="match|mismatch|unknown"}`
+counts post-completion generation-metadata checks only for cloud deployments
+with a provider restriction; unpinned and non-cloud requests do not emit this metric. A single delayed, bounded
+`GET /api/v1/generation?id=…` reads the documented `data.provider_name`; no
+extra inference is purchased and client responses never wait on the check.
+Alert when mismatch increases; investigate unknown lookups separately. Lookups
+are skipped during shutdown. Provider names are never metric labels.
+Cache request counts remain
+`llm_router_cache_observations_total{deployment,result="hit|miss|unknown"}`.
+`llm_router_cache_eligible_prompt_tokens_total{deployment}` counts prompt tokens
+only when the same request has known cached-token usage. The token-weighted hit
+fraction, under the deployment selection, is
+`sum by(deployment)(rate(llm_router_tokens_total{kind="cached",deployment=~"${deployment:regex}"}[$__rate_interval])) / sum by(deployment)(rate(llm_router_cache_eligible_prompt_tokens_total{deployment=~"${deployment:regex}"}[$__rate_interval]))`.
+Known zero cached tokens publish a zero-valued cached-token series (0%); requests
+with missing cached-token usage are excluded from the denominator, not counted
+as misses. No cloud
+`llm_router_cost_usd_total{kind="cache_savings"}` series is fabricated:
+OpenRouter's `cache_discount` does not explicitly document a USD unit, and
+rate-card estimates are not provider-reported savings. The dashboard savings
+panel stays empty until an explicit provider-reported USD amount is available.
+
+Only a validated UUID `key_id` labels per-key request, token and cost series; `key_info` exposes the active key name (truncated to 64 characters) alongside its policy limits. Never use API key prefixes, digests, secrets, prompts, completions, session/request/correlation/job/item IDs or free-text details as labels or metric values. Unknown enum/catalogue labels collapse to `other`, and unrouted requests use deployment and location `none`. Restrict access to this port because active key names and UUIDs are operational metadata.
+
+The Grafana dashboard JSON lives at `deploy/grafana/llm-router.json` and uses the `prometheus` datasource UID.
+
+## Routing mode configuration
+
+Set `CLASSIFIER_MODE=rules` to route without a classifier (the example configuration now selects it). Neither `LAYA_URL`, `TYPESAFE_API_KEY` nor `CLASSIFIER_QUALIFICATION` is required or consulted for routing in Rules mode. A mounted qualification file may remain in Compose, but the gateway does not read it. Existing installations retain their explicitly configured mode until the operator changes it and restarts the gateway; no live configuration is changed by this release.
+
+Both health endpoints preserve the classifier-shaped section as `{backend:"rules", ready:true, local:true, evidence:"deterministic-rules"}`. Here `local` describes in-process routing, not the selected generator. The console displays **Routing mode Rules**. Readiness still requires persistence and a ready non-optional chat deployment; optional auxiliaries cannot make chat ready. Metrics use bounded backend `rules` and decision `deterministic-rules`, emit no classifier-call metrics, and do not claim classifier qualification for Rules.
+
+Rules applies the lowest supported deployment effort, no semantic difficulty estimate. Review Key locality/overload policies before enabling: down locals immediately report `local_overloaded` for report Keys, while failover Keys may use eligible paid cloud before dispatch. Oversize/missing-capability requests can use cloud even for report Keys. See [routing-policy.md](routing-policy.md#rules-mode) for the full distinction and [clients.md](clients.md) for wire behavior. Planned Gufo downtime needs no automatic classifier or model replay.
+
+## Classifier qualification
+
+Assessment is gated on the selected Classifier's qualification record (`CLASSIFIER_QUALIFICATION`): measured Calibration per question, a `pass` verdict, and sourced token rates for exactly the selected backend, model revision and question schema. For each question, record `cases` (labelled cases), `errors` (wrong answers), and, whenever `maxFalsePositiveRate` is non-null, `negativeCases` (labelled negative opportunities, greater than zero) and `falsePositives` (incorrect positive answers among those negatives). Total error rate is `errors / cases`; FPR is `falsePositives / negativeCases`, not the fraction of all cases or all errors. `negativeCases` must not exceed `cases`, and `falsePositives` must not exceed `negativeCases` or `errors`. `localSufficiency` and `trivialChat` require non-null FPR bounds. `maxErrorRate` and `maxFalsePositiveRate` are policy thresholds chosen and justified separately from the measured counts, not measured rates or defaults supplied by this repo. The gate re-checks measured metrics against those bounds — a `pass` verdict alone is not evidence — before the exact cache and before any backend call. Without a matching record the Router fails closed: readiness reports `unqualified`, chat returns `503 classifier_unqualified`, and no backend is contacted. `REPLACE_` placeholder records are rejected. See `classifier-qualification.example.json` for the shape; it is deliberately unusable as evidence.
+
+On Compose the record is a host file mounted read-only at `/etc/llm-router/classifier-qualification.json`, selected by `CLASSIFIER_QUALIFICATION_FILE` (a host path consumed by Docker); native deployments set `CLASSIFIER_QUALIFICATION` to a local file path read by the gateway process itself. The JSON shape is identical, the path semantics are not: Compose always reads the pinned container path and ignores any `CLASSIFIER_QUALIFICATION` value in `.env`, so never copy one form into the other environment. The shipped example's single-case counts and zero bounds are synthetic schema-only sentinels, **not** measurements or endorsed policy; its `REPLACE_` source/date fields and `fail` verdict intentionally leave it unqualified. Leaving the default mount in place keeps routing fail-closed while `/health/live` can still report process liveness. Before attempting real qualification, replace all illustrative counts and bounds with a labelled evaluation set, its label source and as-of date, measurement date and method, per-question negative opportunities for every bounded FPR, justified operator-selected limits, and rate provenance. Never treat a test fixture or the shipped example as calibration evidence.
+
+Classifier spend accounting follows the same evidence rules: exact-cache and session reuse are real zero (no call was made), while missing token counts, an unmatched backend or revision, or rates that cannot cover the persisted usage stay unknown and are counted as such. Only input token counts are persisted, so a backend with a non-zero output rate cannot be priced. The previously hardcoded Jev rate in Analytics is gone; rates come from the qualification record with their provenance.
 
 ## Drain and upgrades
 
@@ -69,7 +139,7 @@ Gateway-only upgrades do not restart the native generator, Laya, FastFlowLM, or 
 | Overall inference deadline | 11 minutes |
 | Durable request lease | 12 minutes |
 
-There is no lease heartbeat or crash-resume of generation. FastFlowLM's pinned ASR handler ignores cancellation during execution; its resource permit is retained through response/deadline instead of pretending the NPU is immediately idle.
+The overall chat deadline applies through the end of a streamed response, not merely until its headers are sent. Its timer is cancelled once chat work settles, including completed, failed, and cancelled requests; a completed request does not retain an eleven-minute timer. There is no lease heartbeat or crash-resume of generation. FastFlowLM's pinned ASR handler ignores cancellation during execution; its resource permit is retained through response/deadline instead of pretending the NPU is immediately idle.
 
 ## Accounting and analytics
 
@@ -84,7 +154,7 @@ The console separates:
 
 Local chat returns OpenRouter-shaped nested usage details and `usage.cost` on JSON and the final SSE usage event. Reasoning tokens already included in completion tokens are not charged twice. Unknown cached-token counts prevent a cache-discount calculation; equal configured cached/uncached rates can still produce a known total without claiming a cache hit. Price provenance `unknown` yields unknown accounting, not a zero bill.
 
-Classifier costs are separately estimated for fresh pinned Jev-1.13.0 input at its published rate. Exact-cache and session reuse incur no new classifier call. Completed-result classifier caching is tenant/model/schema/state/catalogue scoped and bounded; there is no in-flight request coalescing or fuzzy cache.
+Classifier costs are priced from the selected Classifier's qualification record for fresh classified rows, with unknown rates left unknown rather than estimated. Exact-cache and session reuse incur no new classifier call and are recorded as real zero. Completed-result classifier caching is tenant/model/schema/state/catalogue scoped and bounded; there is no in-flight request coalescing or fuzzy cache.
 
 `maxEstimatedUsd` is a cold-cache generation estimate ceiling, not a monthly budget or provider invoice guarantee. It excludes classifier/tool charges. Auxiliary unknown pricing also fails closed when a ceiling is configured.
 

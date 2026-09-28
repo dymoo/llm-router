@@ -29,7 +29,10 @@ const loadEnv = () =>
       API_KEY_PEPPER: z.string().min(1),
       MODEL_CATALOG: z.string().min(1),
       AUXILIARY_CATALOG: z.string().min(1).optional(),
-      CLASSIFIER_MODE: z.enum(["laya", "jev"]),
+      BATCH_CATALOG: z.string().min(1).optional(),
+      BATCH_RESULTS_DIR: z.string().min(1).optional(),
+      CLASSIFIER_MODE: z.enum(["rules", "laya", "jev"]),
+      CLASSIFIER_QUALIFICATION: z.string().min(1).optional(),
       LAYA_URL: z.string().url().optional(),
       LAYA_MODEL_REVISION: z.string().min(1).default("1c5edc17a7acd8701df6fc341c0d179f1c62c982"),
       TYPESAFE_API_KEY: z.string().min(1).optional(),
@@ -37,6 +40,7 @@ const loadEnv = () =>
       TYPESAFE_BASE_URL: z.string().url().default("https://api.typesafe.ai"),
       OPENROUTER_API_KEY: z.string().min(1).optional(),
       ADMIN_BASIC_AUTH: adminBasicAuth,
+      METRICS_PORT: z.coerce.number().int().min(1).max(65535).optional(),
     },
     client: {},
     runtimeEnv: {
@@ -45,7 +49,10 @@ const loadEnv = () =>
       API_KEY_PEPPER: process.env.API_KEY_PEPPER,
       MODEL_CATALOG: process.env.MODEL_CATALOG,
       AUXILIARY_CATALOG: process.env.AUXILIARY_CATALOG,
+      BATCH_CATALOG: process.env.BATCH_CATALOG,
+      BATCH_RESULTS_DIR: process.env.BATCH_RESULTS_DIR,
       CLASSIFIER_MODE: process.env.CLASSIFIER_MODE,
+      CLASSIFIER_QUALIFICATION: process.env.CLASSIFIER_QUALIFICATION,
       LAYA_URL: process.env.LAYA_URL,
       LAYA_MODEL_REVISION: process.env.LAYA_MODEL_REVISION,
       TYPESAFE_API_KEY: process.env.TYPESAFE_API_KEY,
@@ -53,6 +60,7 @@ const loadEnv = () =>
       TYPESAFE_BASE_URL: process.env.TYPESAFE_BASE_URL,
       OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
       ADMIN_BASIC_AUTH: process.env.ADMIN_BASIC_AUTH,
+      METRICS_PORT: process.env.METRICS_PORT,
     },
     emptyStringAsUndefined: true,
   });
@@ -63,7 +71,10 @@ export interface Env {
   API_KEY_PEPPER: string;
   MODEL_CATALOG: string;
   AUXILIARY_CATALOG?: string;
-  CLASSIFIER_MODE: "laya" | "jev";
+  BATCH_CATALOG?: string;
+  BATCH_RESULTS_DIR?: string;
+  CLASSIFIER_MODE: "rules" | "laya" | "jev";
+  CLASSIFIER_QUALIFICATION?: string;
   LAYA_URL?: string;
   LAYA_MODEL_REVISION: string;
   TYPESAFE_API_KEY?: string;
@@ -71,6 +82,7 @@ export interface Env {
   TYPESAFE_BASE_URL: string;
   OPENROUTER_API_KEY?: string;
   ADMIN_BASIC_AUTH?: { username: string; password: string };
+  METRICS_PORT?: number;
 }
 
 let loaded: Env | undefined;
@@ -78,7 +90,13 @@ let loaded: Env | undefined;
 /** Parse and cache env at first runtime use. Importing this module does not read secrets. */
 export const getEnv = (): Env => {
   if (loaded === undefined) {
-    loaded = loadEnv();
+    const parsed = loadEnv();
+    if (
+      parsed.METRICS_PORT !== undefined &&
+      parsed.METRICS_PORT === Number(process.env.PORT ?? 3000)
+    )
+      throw new Error("METRICS_PORT must differ from the application PORT");
+    loaded = parsed;
   }
   return loaded;
 };

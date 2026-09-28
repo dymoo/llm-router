@@ -57,6 +57,7 @@ describe("SqliteDatabase", () => {
         const names = columns.map((column) => column.name);
         assert.equal(names.includes("locality_bias"), true);
         assert.equal(names.includes("selection_reason_detail"), true);
+        assert.equal(names.includes("deferred"), true, "v5 adds requests.deferred");
       }),
     );
     await runtime.dispose();
@@ -123,7 +124,7 @@ describe("SqliteDatabase", () => {
     assert.doesNotMatch(sql, /login_buckets/);
   });
 
-  it("upgrades a v1 database and keeps existing keys", async () => {
+  it("upgrades a v1 database to v5, keeping existing rows and adding the batch ledger", async () => {
     const path = tempDb();
     const sqlite = new DatabaseSync(path);
     sqlite.exec(CONTROL_PLANE_V1_SQL);
@@ -155,6 +156,11 @@ describe("SqliteDatabase", () => {
         }),
         1,
       );
+    sqlite
+      .prepare(
+        "INSERT INTO requests (id, key_id, started_at, lease_expires_at, finished_at, status) VALUES (?, ?, ?, ?, ?, 'success')",
+      )
+      .run("request-kept", "upgrade-key", 1_700_000_000_000, 1_700_000_060_000, 1_700_000_030_000);
     sqlite.close();
     const runtime = ManagedRuntime.make(sqliteDatabaseLayer(path));
     await runtime.runPromise(
@@ -176,6 +182,121 @@ describe("SqliteDatabase", () => {
           columns.some((column) => column.name === "locality_bias"),
           true,
         );
+        const request = db.sqlite
+          .prepare("SELECT id, status FROM requests WHERE id = ?")
+          .get("request-kept") as { id: string; status: string } | undefined;
+        assert.equal(request?.status, "success");
+        const deferred = db.sqlite
+          .prepare("SELECT deferred FROM requests WHERE id = ?")
+          .get("request-kept") as { deferred: number } | undefined;
+        assert.equal(deferred?.deferred, 0, "existing requests default to deferred 0");
+        db.sqlite.prepare("UPDATE requests SET deferred = 1 WHERE id = ?").run("request-kept");
+        assert.equal(
+          (
+            db.sqlite.prepare("SELECT deferred FROM requests WHERE id = ?").get("request-kept") as {
+              deferred: number;
+            }
+          ).deferred,
+          1,
+          "remote-deferred requests are storable",
+        );
+        assert.throws(
+          () =>
+            db.sqlite.prepare("UPDATE requests SET deferred = 2 WHERE id = ?").run("request-kept"),
+          /CHECK constraint failed/,
+          "deferred stays boolean",
+        );
+        const tables = db.sqlite
+          .prepare(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name LIKE 'batch_%'",
+          )
+          .all() as Array<{ name: string; sql: string }>;
+        assert.deepEqual(tables.map((table) => table.name).sort(), [
+          "batch_items",
+          "batch_jobs",
+          "batch_remotes",
+        ]);
+        for (const table of tables) {
+          assert.match(table.sql, /STRICT/);
+        }
+        const remoteColumns = (
+          db.sqlite.prepare("PRAGMA table_info(batch_remotes)").all() as Array<{ name: string }>
+        ).map((column) => column.name);
+        for (const expected of [
+          "id",
+          "job_id",
+          "group_key",
+          "intent",
+          "submit_token",
+          "remote_batch_id",
+          "usage_json",
+          "harvested_at",
+          "confirmed_at",
+        ]) {
+          assert.equal(remoteColumns.includes(expected), true, `batch_remotes.${expected}`);
+        }
+        const jobColumns = (
+          db.sqlite.prepare("PRAGMA table_info(batch_jobs)").all() as Array<{ name: string }>
+        ).map((column) => column.name);
+        for (const expected of [
+          "id",
+          "key_id",
+          "model",
+          "status",
+          "spill_at",
+          "usage_json",
+          "request_counts_total",
+        ]) {
+          assert.equal(jobColumns.includes(expected), true, `batch_jobs.${expected}`);
+        }
+        assert.equal(jobColumns.includes("remote_batch_id"), false, "no overwriteable remote id");
+        assert.equal(jobColumns.includes("results_consumed_at"), false, "no consume-once stamp");
+        const itemColumns = (
+          db.sqlite.prepare("PRAGMA table_info(batch_items)").all() as Array<{ name: string }>
+        ).map((column) => column.name);
+        for (const expected of [
+          "id",
+          "job_id",
+          "custom_id",
+          "status",
+          "dispatched_at",
+          "remote_id",
+        ]) {
+          assert.equal(itemColumns.includes(expected), true, `batch_items.${expected}`);
+        }
+        assert.match(
+          (
+            db.sqlite.prepare("SELECT sql FROM sqlite_master WHERE name = 'batch_items'").get() as {
+              sql: string;
+            }
+          ).sql,
+          /interrupted/,
+          "item status vocabulary includes interrupted",
+        );
+        const customIndex = db.sqlite
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'batch_items_job_custom_uq'",
+          )
+          .get() as { sql: string } | undefined;
+        assert.match(customIndex?.sql ?? "", /UNIQUE/, "custom_id stays durably unique per job");
+        assert.doesNotMatch(customIndex?.sql ?? "", /WHERE/, "identity is unique across ALL items");
+        db.sqlite
+          .prepare(
+            "INSERT INTO batch_jobs (id, key_id, model, status, completion_window_ms, created_at, finalized_at, spill_at, usage_json, request_counts_total, request_counts_completed, request_counts_failed, error_code) VALUES (?, ?, ?, 'validating', ?, ?, NULL, ?, NULL, ?, 0, 0, NULL)",
+          )
+          .run(
+            "batch_upgraded",
+            "upgrade-key",
+            "test-model",
+            86_400_000,
+            1_700_000_000_000,
+            1_700_000_000_000,
+            3,
+          );
+        const job = db.sqlite
+          .prepare("SELECT key_id FROM batch_jobs WHERE id = ?")
+          .get("batch_upgraded") as { key_id: string } | undefined;
+        assert.equal(job?.key_id, "upgrade-key");
       }),
     );
     await runtime.dispose();

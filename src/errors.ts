@@ -92,6 +92,24 @@ export class ClassifierContextExceeded extends Schema.TaggedError<ClassifierCont
   },
 ) {}
 
+export class ClassifierUnqualified extends Schema.TaggedError<ClassifierUnqualified>()(
+  "ClassifierUnqualified",
+  {
+    message: Schema.String,
+    reason: Schema.Literals([
+      "missing",
+      "identity-mismatch",
+      "placeholder",
+      "not-passed",
+      "metric-invalid",
+      "unmeasured",
+      "error-rate",
+      "false-positive-rate",
+    ]),
+    questionId: Schema.optional(Schema.String),
+  },
+) {}
+
 export class BriefRequired extends Schema.TaggedError<BriefRequired>()("BriefRequired", {
   message: Schema.String,
   inputTokens: Schema.NullOr(Schema.Int),
@@ -125,6 +143,13 @@ export class ProviderFailure extends Schema.TaggedError<ProviderFailure>()(
   Message,
 ) {}
 
+export class LocalOverloaded extends Schema.TaggedError<LocalOverloaded>()("LocalOverloaded", {
+  message: Schema.String,
+  retryAfterSeconds: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Gufo refused a `service_tier: "flex"` request for lack of spare capacity. */
+  flexRefused: Schema.optional(Schema.Boolean),
+}) {}
+
 export class RequestTimeout extends Schema.TaggedError<RequestTimeout>()(
   "RequestTimeout",
   Message,
@@ -145,6 +170,7 @@ export type ClassifierError =
   | ClassifierInvalidResponse
   | ClassifierInputTooLarge
   | ClassifierContextExceeded
+  | ClassifierUnqualified
   | BriefRequired;
 
 export type KeyLifecycleError =
@@ -170,5 +196,6 @@ export type DomainError =
   | MissingSession
   | CapacityBusy
   | ProviderFailure
+  | LocalOverloaded
   | RequestTimeout
   | Cancelled;

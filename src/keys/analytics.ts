@@ -1,5 +1,14 @@
 import { sql, type SQL } from "drizzle-orm";
-import type { AnalyticsBucket, AnalyticsSnapshot, Priority } from "../domain.ts";
+import {
+  ASSESSMENT_QUESTION_SCHEMA_VERSION,
+  classifierCostUsd,
+  type AnalyticsBucket,
+  type AnalyticsSnapshot,
+  type ClassificationReuse,
+  type ClassifierQualification,
+  type ClassifierRates,
+  type Priority,
+} from "../domain.ts";
 import type { ControlPlaneDb } from "../db/sqlite.ts";
 import { InvalidInput } from "../errors.ts";
 
@@ -12,6 +21,20 @@ export interface AnalyticsQuery {
 }
 
 type MetricRow = Record<string, number | string | null>;
+
+type ClassifierFactRow = {
+  dim: number | string | null;
+  backend: string | null;
+  modelRevision: string | null;
+  reuse: string | null;
+  inputKnown: number;
+  groupRows: number;
+  tokenSum: number | null;
+};
+
+/** Priced classifier spend for one dimension; null est means no row in it could be priced. */
+type ClassifierSpend = { estimatedUsd: number | null; unknownCount: number };
+
 const DAY_MS = 86_400_000;
 const DIMENSION_LIMIT = 100;
 const METRICS = sql.raw(`
@@ -26,8 +49,6 @@ const METRICS = sql.raw(`
   sum(classifier_reuse = 'session') AS sessionReuse,
   sum(classifier_reuse = 'classified') AS classifiedFresh,
   sum(CASE WHEN classifier_reuse = 'classified' THEN classifier_input_tokens END) AS classifierInputTokens,
-  sum(CASE WHEN classifier_backend = 'jev' AND classifier_reuse = 'classified'
-    AND classifier_model_revision = 'jev-1.13.0' THEN classifier_input_tokens * 0.042 / 1000000.0 END) AS classifierEstimatedUsd,
   sum(prompt_tokens) AS promptTokens,
   sum(completion_tokens) AS completionTokens,
   sum(reasoning_tokens) AS reasoningTokens,
@@ -47,7 +68,12 @@ const count = (row: MetricRow | undefined, key: string): number => Number(row?.[
 const measured = (row: MetricRow | undefined, key: string): number | null =>
   row?.[key] === null || row?.[key] === undefined ? null : Number(row[key]);
 
-function bucket(row: MetricRow | undefined, startMs: number, endMs: number): AnalyticsBucket {
+function bucket(
+  row: MetricRow | undefined,
+  startMs: number,
+  endMs: number,
+  classifier?: ClassifierSpend,
+): AnalyticsBucket {
   return {
     startMs,
     endMs,
@@ -62,7 +88,8 @@ function bucket(row: MetricRow | undefined, startMs: number, endMs: number): Ana
     sessionReuse: count(row, "sessionReuse"),
     classifiedFresh: count(row, "classifiedFresh"),
     classifierInputTokens: measured(row, "classifierInputTokens"),
-    classifierEstimatedUsd: measured(row, "classifierEstimatedUsd"),
+    classifierEstimatedUsd: classifier?.estimatedUsd ?? null,
+    classifierCostUnknownCount: classifier?.unknownCount ?? 0,
     promptTokens: measured(row, "promptTokens"),
     completionTokens: measured(row, "completionTokens"),
     reasoningTokens: measured(row, "reasoningTokens"),
@@ -130,17 +157,101 @@ function groupedRows(db: ControlPlaneDb, where: SQL, dimension: SQL, limit: numb
   `);
 }
 
-function breakdown(db: ControlPlaneDb, where: SQL, column: SQL, input: AnalyticsQuery) {
+/** Grouped classifier facts for one module-owned dimension; pricing happens in JS. */
+function classifierFacts(db: ControlPlaneDb, where: SQL, dimension: SQL): ClassifierFactRow[] {
+  return db.all<ClassifierFactRow>(sql`
+    WITH selected AS (SELECT *, ${dimension} AS dim FROM requests WHERE ${where})
+    SELECT dim,
+      classifier_backend AS backend,
+      classifier_model_revision AS modelRevision,
+      classifier_reuse AS reuse,
+      (classifier_input_tokens IS NOT NULL) AS inputKnown,
+      count(*) AS groupRows,
+      sum(classifier_input_tokens) AS tokenSum
+    FROM selected
+    GROUP BY dim, classifier_backend, classifier_model_revision, classifier_reuse,
+      classifier_input_tokens IS NOT NULL
+  `);
+}
+
+function ratesFor(
+  qualifications: readonly ClassifierQualification[],
+  backend: string | null,
+  modelRevision: string | null,
+): ClassifierRates | undefined {
+  if (backend === null || modelRevision === null) return undefined;
+  return qualifications.find(
+    (record) =>
+      record.backend === backend &&
+      record.modelRevision === modelRevision &&
+      record.questionSchemaVersion === ASSESSMENT_QUESTION_SCHEMA_VERSION,
+  )?.rates;
+}
+
+/**
+ * Prices grouped facts through classifierCostUsd so rates come from qualification
+ * records and SQL never carries a price. Group token sums are linear (the rate is
+ * constant within a group), reuse groups are real zero, and unpriceable groups are
+ * counted unknown instead of dropped. A dimension with no priceable rows reports
+ * null, never zero.
+ */
+function classifierSpend(
+  db: ControlPlaneDb,
+  where: SQL,
+  dimension: SQL,
+  qualifications: readonly ClassifierQualification[],
+): Map<string, ClassifierSpend> {
+  const totals = new Map<string, { usd: number; priced: number; unknownCount: number }>();
+  for (const fact of classifierFacts(db, where, dimension)) {
+    if (fact.reuse === null) continue;
+    const reuse = fact.reuse as ClassificationReuse;
+    const cost = classifierCostUsd(
+      reuse,
+      fact.inputKnown === 1 ? Number(fact.tokenSum) : null,
+      reuse === "classified"
+        ? ratesFor(qualifications, fact.backend, fact.modelRevision)
+        : undefined,
+    );
+    const key = String(fact.dim);
+    const total = totals.get(key) ?? { usd: 0, priced: 0, unknownCount: 0 };
+    if (cost._tag === "unknown") {
+      total.unknownCount += Number(fact.groupRows);
+    } else {
+      total.priced += 1;
+      total.usd += cost.usd;
+    }
+    totals.set(key, total);
+  }
+  return new Map<string, ClassifierSpend>(
+    [...totals].map(([dim, total]) => [
+      dim,
+      { estimatedUsd: total.priced > 0 ? total.usd : null, unknownCount: total.unknownCount },
+    ]),
+  );
+}
+
+function breakdown(
+  db: ControlPlaneDb,
+  where: SQL,
+  column: SQL,
+  input: AnalyticsQuery,
+  qualifications: readonly ClassifierQualification[],
+) {
+  const spend = classifierSpend(db, where, column, qualifications);
   return Object.fromEntries(
     groupedRows(db, where, column, DIMENSION_LIMIT)
       .filter((row) => row.dim !== null && row.dim !== undefined && String(row.dim).length > 0)
-      .map((row) => [String(row.dim), bucket(row, input.since, input.until)]),
+      .map((row) => [
+        String(row.dim),
+        bucket(row, input.since, input.until, spend.get(String(row.dim))),
+      ]),
   );
 }
 
 export function queryAnalyticsSnapshot(
   db: ControlPlaneDb,
   input: AnalyticsQuery,
+  qualifications: readonly ClassifierQualification[],
 ): AnalyticsSnapshot {
   if (
     !Number.isSafeInteger(input.since) ||
@@ -152,16 +263,18 @@ export function queryAnalyticsSnapshot(
     throw new InvalidInput({ message: "Analytics range must be ordered and at most 31 days" });
   }
   const where = filter(input);
-  const window = bucket(groupedRows(db, where, sql`'window'`, 1)[0], input.since, input.until);
-  const byPriority = breakdown(db, where, sql`priority`, input);
+  const window = bucket(
+    groupedRows(db, where, sql`'window'`, 1)[0],
+    input.since,
+    input.until,
+    classifierSpend(db, where, sql`'window'`, qualifications).get("window"),
+  );
+  const byPriority = breakdown(db, where, sql`priority`, input, qualifications);
   const span = input.until - input.since;
   const bucketMs = span <= DAY_MS ? 3_600_000 : span <= 7 * DAY_MS ? 21_600_000 : DAY_MS;
-  const timeRows = groupedRows(
-    db,
-    where,
-    sql`CAST(started_at / ${bucketMs} AS INTEGER) * ${bucketMs}`,
-    750,
-  );
+  const timeDimension = sql`CAST(started_at / ${bucketMs} AS INTEGER) * ${bucketMs}`;
+  const timeRows = groupedRows(db, where, timeDimension, 750);
+  const timeSpend = classifierSpend(db, where, timeDimension, qualifications);
   const timeMap = new Map(timeRows.map((row) => [Number(row.dim), row]));
   const series: AnalyticsBucket[] = [];
   for (
@@ -174,6 +287,7 @@ export function queryAnalyticsSnapshot(
         timeMap.get(start),
         Math.max(start, input.since),
         Math.min(start + bucketMs - 1, input.until),
+        timeSpend.get(String(start)),
       ),
     );
   }
@@ -191,17 +305,17 @@ export function queryAnalyticsSnapshot(
     window,
     series,
     bucketMs,
-    byKeyId: breakdown(db, where, sql`key_id`, input),
+    byKeyId: breakdown(db, where, sql`key_id`, input, qualifications),
     byPriority: {
       high: byPriority.high ?? bucket(undefined, input.since, input.until),
       medium: byPriority.medium ?? bucket(undefined, input.since, input.until),
       low: byPriority.low ?? bucket(undefined, input.since, input.until),
     },
-    byDeploymentId: breakdown(db, where, sql`deployment_id`, input),
-    byTask: breakdown(db, where, sql`task_kind`, input),
-    byDifficulty: breakdown(db, where, sql`difficulty`, input),
-    byEffort: breakdown(db, where, sql`requested_effort`, input),
-    bySelectionCode: breakdown(db, where, sql`selection_reason_code`, input),
+    byDeploymentId: breakdown(db, where, sql`deployment_id`, input, qualifications),
+    byTask: breakdown(db, where, sql`task_kind`, input, qualifications),
+    byDifficulty: breakdown(db, where, sql`difficulty`, input, qualifications),
+    byEffort: breakdown(db, where, sql`requested_effort`, input, qualifications),
+    bySelectionCode: breakdown(db, where, sql`selection_reason_code`, input, qualifications),
     exclusions: Object.fromEntries(exclusions.map((row) => [row.code, row.count])),
     errors: Object.fromEntries(errors.map((row) => [row.code, row.count])),
   };
