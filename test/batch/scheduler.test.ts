@@ -600,6 +600,121 @@ test(
   },
 );
 
+test(
+  "a Gufo flex refusal leaves the batch item queued until capacity returns",
+  {
+    timeout: 5_000,
+  },
+  async (t) => {
+    const local: Deployment = { ...localQwen, transport: "gufo", credentialEnvVar: "GUFO_KEY" };
+    const tiers: unknown[] = [];
+    const runtime = ManagedRuntime.make(
+      modelRouterLayer({
+        mode: "rules",
+        catalogue: [local],
+        catalogueVersion: "batch-flex",
+        credentials: (name) => (name === "GUFO_KEY" ? "fixture-key" : undefined),
+        fetch: async (url, init) => {
+          if (init?.method === "GET") {
+            return String(url).endsWith("/models")
+              ? Response.json({ data: [{ id: local.modelId }] })
+              : new Response(null, { status: 404 });
+          }
+          tiers.push((JSON.parse(String(init?.body)) as Record<string, unknown>).service_tier);
+          if (tiers.length === 1) {
+            return Response.json({ error: { code: "resource_unavailable" } }, { status: 429 });
+          }
+          return Response.json({
+            model: local.modelId,
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" } }],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          });
+        },
+      }),
+    );
+    t.after(() => runtime.dispose());
+    const h = harness(t, {
+      completion: async (work) => {
+        const result = await runtime.runPromise(
+          ModelRouter.use((router) => router.completeBatch(work, work.requestedModel)),
+        );
+        return {
+          body: result.body,
+          deploymentId: result.headers.deploymentId,
+          metadata: () => result.accounting,
+        };
+      },
+    });
+    await settle(h);
+    await waitFor(() => tiers.length === 1, "batch item was not dispatched");
+    await waitFor(
+      () => h.ledger.items(h.jobId)[0]?.status === "queued",
+      () => `refused item is ${h.ledger.items(h.jobId)[0]?.status}, not queued`,
+    );
+    await settle(h);
+    await waitFor(
+      () => h.ledger.items(h.jobId)[0]?.status === "completed",
+      "item did not complete once Gufo accepted it",
+    );
+    assert.deepEqual(tiers, ["flex", "flex"]);
+  },
+);
+
+test(
+  "a full Gufo queue keeps the report key's batch overload policy",
+  {
+    timeout: 5_000,
+  },
+  async (t) => {
+    const local: Deployment = { ...localQwen, transport: "gufo", credentialEnvVar: "GUFO_KEY" };
+    const tiers: unknown[] = [];
+    const runtime = ManagedRuntime.make(
+      modelRouterLayer({
+        mode: "rules",
+        catalogue: [local],
+        catalogueVersion: "batch-flex",
+        credentials: (name) => (name === "GUFO_KEY" ? "fixture-key" : undefined),
+        fetch: async (url, init) => {
+          if (init?.method === "GET") {
+            return String(url).endsWith("/models")
+              ? Response.json({ data: [{ id: local.modelId }] })
+              : new Response(null, { status: 404 });
+          }
+          tiers.push((JSON.parse(String(init?.body)) as Record<string, unknown>).service_tier);
+          if (tiers.length === 1) {
+            return Response.json({ error: { code: "queue_full" } }, { status: 429 });
+          }
+          return Response.json({
+            model: local.modelId,
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" } }],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          });
+        },
+      }),
+    );
+    t.after(() => runtime.dispose());
+    const h = harness(t, {
+      completion: async (work) => {
+        const result = await runtime.runPromise(
+          ModelRouter.use((router) => router.completeBatch(work, work.requestedModel)),
+        );
+        return {
+          body: result.body,
+          deploymentId: result.headers.deploymentId,
+          metadata: () => result.accounting,
+        };
+      },
+    });
+    await settle(h);
+    await waitFor(
+      () => h.ledger.items(h.jobId)[0]?.status === "failed",
+      () => `queue_full item is ${h.ledger.items(h.jobId)[0]?.status}, not failed`,
+    );
+    assert.equal(resultErrorCode(h.results.rows(h.jobId)[0]), "LocalOverloaded");
+    assert.deepEqual(tiers, ["flex"]);
+  },
+);
+
 test("remote preparation waits until spillAt", { timeout: 5_000 }, async (t) => {
   const h = harness(t, { spillAt: NOW + 100 });
   h.inference.idle = false;

@@ -326,6 +326,8 @@ export function decodeChatCompletion(
   if (maxCompletionTokens !== undefined) {
     request.maxCompletionTokens = maxCompletionTokens;
   }
+  // Other OpenAI tiers (auto, default, scale, priority) are accepted and served normally.
+  if (value.service_tier === "flex") request.serviceTier = "flex";
   return request;
 }
 

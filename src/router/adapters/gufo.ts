@@ -1,6 +1,7 @@
-import { Effect, Schema } from "effect";
+import { Clock, Effect, Schema } from "effect";
 import type { Deployment } from "../../domain.ts";
 import { LocalOverloaded, ProviderFailure } from "../../errors.ts";
+import { UNKNOWN_SATURATION, type SaturationEvidence } from "../locality.ts";
 import type { AdapterRequest, ProviderAdapter } from "./types.ts";
 import {
   bearerHeaders,
@@ -18,6 +19,7 @@ const GufoChunk = Schema.Struct({ model: Schema.String, choices: Schema.Array(Sc
 const decodeGufoChunk = Schema.decodeUnknownSync(GufoChunk);
 const MAX_SSE_EVENT_BYTES = 256 * 1024;
 const GUFO_NO_QUEUE = { "X-Gufo-No-Queue": "1" };
+const SATURATION_TTL_MS = 1_000;
 
 const NamedTool = Schema.Struct({
   type: Schema.Literals(["function"]),
@@ -25,10 +27,23 @@ const NamedTool = Schema.Struct({
 });
 const decodeNamedTool = Schema.decodeUnknownSync(NamedTool);
 
+// Definitive refusals before any work (docs/ROUTER.md in Gufo): a full queue,
+// no spare capacity for a flex request, or maintenance drain.
 const GufoQueueRefusal = Schema.Struct({
-  error: Schema.Struct({ code: Schema.Literals(["queue_full", "client_queue_full"]) }),
+  error: Schema.Struct({
+    code: Schema.Literals(["queue_full", "client_queue_full", "resource_unavailable"]),
+  }),
 });
 const decodeGufoQueueRefusal = Schema.decodeUnknownSync(GufoQueueRefusal);
+const GufoDraining = Schema.Struct({
+  error: Schema.Struct({ code: Schema.Literals(["draining"]) }),
+});
+const decodeGufoDraining = Schema.decodeUnknownSync(GufoDraining);
+const GufoRuntime = Schema.Struct({
+  contract_version: Schema.Number,
+  accepting: Schema.Struct({ default: Schema.Boolean }),
+});
+const decodeGufoRuntime = Schema.decodeUnknownEffect(GufoRuntime);
 
 const fetchGufoResponse = Effect.fn("Gufo.fetchResponse")(function* (
   fetchImpl: FetchImpl,
@@ -46,7 +61,7 @@ const fetchGufoResponse = Effect.fn("Gufo.fetchResponse")(function* (
       }),
   });
   if (response.ok) return response;
-  if (response.status === 429) {
+  if (response.status === 429 || response.status === 503) {
     const zeroLength = response.headers.get("content-length") === "0";
     const body = response.body;
     const text =
@@ -57,22 +72,30 @@ const fetchGufoResponse = Effect.fn("Gufo.fetchResponse")(function* (
       yield* Effect.promise(() => body.cancel().catch(() => undefined));
     }
     if (text !== null) {
-      let queueRefusal = text === "" && new Headers(init.headers).get("X-Gufo-No-Queue") === "1";
+      let queueRefusal =
+        response.status === 429 &&
+        text === "" &&
+        new Headers(init.headers).get("X-Gufo-No-Queue") === "1";
+      let flexRefused = false;
       if (!queueRefusal) {
         try {
           const parsed: unknown = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
-          decodeGufoQueueRefusal(parsed);
+          if (response.status === 429) {
+            flexRefused = decodeGufoQueueRefusal(parsed).error.code === "resource_unavailable";
+          } else decodeGufoDraining(parsed);
           queueRefusal = true;
         } catch {
-          // An ambiguous 429 is a provider failure, not proof that Gufo refused admission.
+          // An ambiguous 429/503 is a provider failure, not proof that Gufo refused admission.
         }
       }
       if (queueRefusal) {
         const header = response.headers.get("retry-after")?.trim();
         const seconds = header !== undefined && /^\d+$/.test(header) ? Number(header) : NaN;
         return yield* new LocalOverloaded({
-          message: "Gufo declined admission before enqueue",
+          message:
+            response.status === 503 ? "Gufo is draining" : "Gufo declined admission before enqueue",
           retryAfterSeconds: Number.isSafeInteger(seconds) ? seconds : null,
+          ...(flexRefused ? { flexRefused } : {}),
         });
       }
     }
@@ -245,7 +268,7 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
       joinUrl(request.deployment.endpoint, "/v1/chat/completions"),
       {
         method: "POST",
-        headers: bearerHeaders(credential, GUFO_NO_QUEUE),
+        headers: bearerHeaders(credential, gufoHeaders(request)),
         body,
       },
     );
@@ -274,7 +297,7 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
       joinUrl(request.deployment.endpoint, "/v1/chat/completions"),
       {
         method: "POST",
-        headers: bearerHeaders(credential, GUFO_NO_QUEUE),
+        headers: bearerHeaders(credential, gufoHeaders(request)),
         body,
       },
     );
@@ -309,7 +332,57 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
     );
     return !available;
   });
-  return { complete, stream, probeUnavailable };
+
+  // Runtime evidence for locality spill: saturated when Gufo would refuse a
+  // default-tier request. Unknown (not saturated) when the runtime cannot say.
+  // One observation per deployment serves for a second, so a slow Gufo adds
+  // at most one probe delay per second rather than one per request.
+  const observed = new Map<string, { readonly at: number; readonly value: SaturationEvidence }>();
+  const readSaturation = Effect.fn("Gufo.readSaturation")(function* (
+    deployment: Deployment,
+    credential: string | undefined,
+  ) {
+    if (credential === undefined || credential.trim().length === 0 || /[\r\n]/.test(credential)) {
+      return UNKNOWN_SATURATION;
+    }
+    const now = yield* Clock.currentTimeMillis;
+    const cached = observed.get(deployment.id);
+    if (cached !== undefined && now - cached.at < SATURATION_TTL_MS) return cached.value;
+    const value = yield* Effect.gen(function* () {
+      const response = yield* fetchResponse(
+        fetchImpl,
+        joinUrl(deployment.endpoint, "/v1/runtime"),
+        {
+          method: "GET",
+          headers: bearerHeaders(credential),
+          redirect: "error",
+        },
+      );
+      const text = yield* readBoundedBody(response);
+      const parsed = yield* Effect.try({
+        try: () => JSON.parse(text) as unknown,
+        catch: () => new ProviderFailure({ message: "Gufo runtime response is not JSON" }),
+      });
+      const runtime = yield* decodeGufoRuntime(parsed).pipe(
+        Effect.mapError(() => new ProviderFailure({ message: "Gufo runtime response is invalid" })),
+      );
+      return runtime.contract_version === 1
+        ? { verified: true, saturated: !runtime.accepting.default }
+        : UNKNOWN_SATURATION;
+    }).pipe(
+      Effect.timeout("1500 millis"),
+      Effect.catch(() => Effect.succeed(UNKNOWN_SATURATION)),
+    );
+    observed.set(deployment.id, { at: yield* Clock.currentTimeMillis, value });
+    return value;
+  });
+  return { complete, stream, probeUnavailable, readSaturation };
+}
+
+function gufoHeaders(request: AdapterRequest): Record<string, string> {
+  return request.requestId === undefined
+    ? GUFO_NO_QUEUE
+    : { ...GUFO_NO_QUEUE, "X-Request-ID": request.requestId };
 }
 
 export function gufoBody(request: AdapterRequest, stream: boolean): Record<string, unknown> {
@@ -320,6 +393,7 @@ export function gufoBody(request: AdapterRequest, stream: boolean): Record<strin
     reasoning_effort: request.appliedEffort === "none" ? "off" : request.appliedEffort,
     stream,
   };
+  if (request.serviceTier === "flex") body.service_tier = "flex";
   const sampling = request.sampling;
   if (sampling?.temperature !== undefined) body.temperature = sampling.temperature;
   if (sampling?.top_p !== undefined) body.top_p = sampling.top_p;

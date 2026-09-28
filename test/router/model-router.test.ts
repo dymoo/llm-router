@@ -869,6 +869,68 @@ it("tries every eligible local permit before escalating to cloud", async () => {
 });
 for (const mode of ["classifier", "rules"] as const) {
   describe(`${mode} Gufo admission safety`, () => {
+    it("keeps client flex requests local: no permit wait, no cloud failover", async () => {
+      const local = {
+        ...localQwen,
+        transport: "gufo" as const,
+        credentialEnvVar: "GUFO_KEY",
+        modelId: "gufo-local",
+      };
+      const tiers: unknown[] = [];
+      const contacts: string[] = [];
+      const layer = modelRouterLayer({
+        catalogue: [
+          { ...local, capacity: { maxParallel: 1, reservedInteractiveSlots: 0 } },
+          cloudGlm,
+        ],
+        catalogueVersion: "gufo-flex",
+        ...(mode === "rules"
+          ? { mode }
+          : { classify: () => Effect.succeed(classifyAs(easyLocalCoding)) }),
+        credentials: () => "fixture-key",
+        fetch: async (url, init) => {
+          const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
+          if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
+          contacts.push(address);
+          tiers.push((JSON.parse(String(init?.body)) as Record<string, unknown>).service_tier);
+          return Response.json(
+            { error: { code: "resource_unavailable" } },
+            { status: 429, headers: { "retry-after": "1" } },
+          );
+        },
+      });
+      await Effect.runPromise(
+        ModelRouter.use((router) =>
+          Effect.gen(function* () {
+            const refused = yield* router
+              .complete(
+                work({
+                  requestId: "flex",
+                  serviceTier: "flex",
+                  policy: {
+                    ...balancedPolicy,
+                    overloadAction: "failover",
+                    localityBias: 1,
+                    maxWaitMs: 1_000,
+                  },
+                  routing: { sessionId: "flex", boundary: "new-task" },
+                }),
+              )
+              .pipe(Effect.result);
+            assert.equal(refused._tag, "Failure");
+            if (refused._tag === "Failure") {
+              assert.equal(refused.failure._tag, "LocalOverloaded");
+              if (refused.failure._tag === "LocalOverloaded")
+                assert.equal(refused.failure.flexRefused, true);
+            }
+          }),
+        ).pipe(Effect.provide(layer)),
+      );
+      assert.deepEqual(tiers, ["flex"]);
+      assert.equal(contacts.filter((address) => address.includes(cloudGlm.id)).length, 0);
+    });
+
     it("handles Gufo pre-enqueue overload per key action and releases its permit", async () => {
       const local = {
         ...localQwen,
@@ -889,6 +951,7 @@ for (const mode of ["classifier", "rules"] as const) {
         credentials: () => "fixture-key",
         fetch: async (url) => {
           const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
           if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
           contacts.push(address);
           if (
@@ -1009,6 +1072,7 @@ for (const mode of ["classifier", "rules"] as const) {
           credentials: (envVar) => (envVar === "GUFO_KEY" ? "fixture-key" : undefined),
           fetch: async (url) => {
             const address = String(url);
+            if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
             if (address.includes("/models"))
               return Response.json({ data: [{ id: local.modelId }] });
             contacted.push(address);
@@ -1063,6 +1127,7 @@ for (const mode of ["classifier", "rules"] as const) {
         credentials: () => "fixture-key",
         fetch: async (url) => {
           const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
           if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
           contacted.push(address);
           return Response.json({ error: { code: "other_failure" } }, { status: 503 });
@@ -1104,6 +1169,7 @@ for (const mode of ["classifier", "rules"] as const) {
         credentials: () => "fixture-key",
         fetch: async (url, init) => {
           const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
           if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
           contacts.push(address.includes(local.id) ? "local" : "cloud");
           if (address.includes(local.id))
@@ -1165,6 +1231,7 @@ for (const mode of ["classifier", "rules"] as const) {
         credentials: () => "fixture-key",
         fetch: async (url) => {
           const address = String(url);
+          if (address.endsWith("/v1/runtime")) return new Response(null, { status: 404 });
           if (address.includes("/models")) return Response.json({ data: [{ id: local.modelId }] });
           contacts.push(address.includes(local.id) ? "local" : "cloud");
           if (contacts.length === 1)

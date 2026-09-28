@@ -57,7 +57,7 @@ Do not claim a per-stream TPS floor or a measured host throughput. Those are unv
 
 ## Local overload action
 
-Local overload is an admission observation, **not Verified saturation**: no immediately available Router-owned permit for any Key-eligible local Deployment, or a definitive local runtime pre-execution rejection (Gufo HTTP 429 queue_full or client_queue_full). Gateway permit counts alone do not prove the runtime is saturated. Unknown health and uncertain provider failures are not local overload evidence.
+Local overload is an admission observation, **not Verified saturation**: no immediately available Router-owned permit for any Key-eligible local Deployment, or a definitive local runtime pre-execution rejection (Gufo HTTP 429 `queue_full`, `client_queue_full` or `resource_unavailable`, or HTTP 503 `draining`). Verified saturation from Gufo is its `GET /v1/runtime` report that a default request could not start now (`accepting.default: false`); an unreadable or unknown-version report is unknown, not saturation. Gateway permit counts alone do not prove the runtime is saturated. Unknown health and uncertain provider failures are not local overload evidence.
 
 Each Key has an editable overloadAction, persisted with its policy. Missing values on historical policies and all suggestions default to report. A full-policy PATCH from an older client that omits the field preserves the stored action. No paid cloud dispatch is enabled by this default.
 

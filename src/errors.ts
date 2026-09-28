@@ -146,6 +146,8 @@ export class ProviderFailure extends Schema.TaggedError<ProviderFailure>()(
 export class LocalOverloaded extends Schema.TaggedError<LocalOverloaded>()("LocalOverloaded", {
   message: Schema.String,
   retryAfterSeconds: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Gufo refused a `service_tier: "flex"` request for lack of spare capacity. */
+  flexRefused: Schema.optional(Schema.Boolean),
 }) {}
 
 export class RequestTimeout extends Schema.TaggedError<RequestTimeout>()(

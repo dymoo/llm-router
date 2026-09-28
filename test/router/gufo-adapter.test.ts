@@ -76,7 +76,66 @@ describe("Gufo ProviderAdapter", () => {
     assert.equal(await Effect.runPromise(malformed.probeUnavailable(gufo, "fixture-key")), true);
     assert.equal(await Effect.runPromise(invalid.probeUnavailable(gufo, "fixture-key")), true);
     assert.equal(await Effect.runPromise(unauthorized.probeUnavailable(gufo, "fixture-key")), true);
-    assert.equal(healthy.readSaturation, undefined);
+    assert.equal(typeof healthy.readSaturation, "function");
+  });
+
+  it("reads verified saturation only from a known runtime contract", async () => {
+    const reader = (body: unknown, status = 200) =>
+      gufoAdapter(async (url, init) => {
+        assert.equal(String(url), "http://127.0.0.1:9/v1/runtime");
+        assert.equal(init?.method, "GET");
+        return Response.json(body, { status });
+      }).readSaturation!;
+    const runtime = (accepting: boolean, version = 1) => ({
+      contract_version: version,
+      accepting: { default: accepting, flex: false },
+    });
+    const read = (body: unknown, status?: number) =>
+      Effect.runPromise(reader(body, status)(gufo, "fixture-key"));
+    assert.deepEqual(await read(runtime(false)), { verified: true, saturated: true });
+    assert.deepEqual(await read(runtime(true)), { verified: true, saturated: false });
+    assert.deepEqual(await read(runtime(false, 2)), { verified: false, saturated: false });
+    assert.deepEqual(await read({ error: { code: "not_found" } }, 404), {
+      verified: false,
+      saturated: false,
+    });
+    assert.deepEqual(await Effect.runPromise(reader(runtime(false))(gufo, undefined)), {
+      verified: false,
+      saturated: false,
+    });
+  });
+
+  it("reuses one runtime observation for a second", async () => {
+    let calls = 0;
+    const adapter = gufoAdapter(async () => {
+      calls += 1;
+      return Response.json({ contract_version: 1, accepting: { default: false, flex: false } });
+    });
+    const read = () => Effect.runPromise(adapter.readSaturation!(gufo, "fixture-key"));
+    assert.deepEqual(await read(), { verified: true, saturated: true });
+    assert.deepEqual(await read(), { verified: true, saturated: true });
+    assert.equal(calls, 1);
+  });
+
+  it("sends batch work as flex and forwards the router request id", async () => {
+    let seen: { body: Record<string, unknown>; requestId: string | null } | undefined;
+    const adapter = gufoAdapter(async (_url, init) => {
+      seen = {
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        requestId: new Headers(init?.headers).get("X-Request-ID"),
+      };
+      return Response.json({
+        model: gufo.modelId,
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    });
+    await Effect.runPromise(adapter.complete(request({ serviceTier: "flex", requestId: "r-1" })));
+    assert.equal(seen?.body.service_tier, "flex");
+    assert.equal(seen?.requestId, "r-1");
+    await Effect.runPromise(adapter.complete(request()));
+    assert.equal("service_tier" in (seen?.body ?? {}), false);
+    assert.equal(seen?.requestId, null);
   });
 
   it("sends Gufo's exact completion protocol and returns tool and usage data", async () => {
@@ -363,7 +422,7 @@ describe("Gufo ProviderAdapter", () => {
 
   it("marks only Gufo pre-enqueue queue refusals as typed local overload", async () => {
     for (const operation of ["complete", "stream"] as const) {
-      for (const code of ["queue_full", "client_queue_full"]) {
+      for (const code of ["queue_full", "client_queue_full", "resource_unavailable"]) {
         const adapter = gufoAdapter(
           async () =>
             new Response(JSON.stringify({ error: { code } }), {
@@ -378,6 +437,7 @@ describe("Gufo ProviderAdapter", () => {
         await assert.rejects(run, (error: unknown) => {
           assert.ok(error instanceof LocalOverloaded);
           assert.equal(error.retryAfterSeconds, 2);
+          assert.equal(error.flexRefused === true, code === "resource_unavailable");
           return true;
         });
       }
@@ -436,6 +496,28 @@ describe("Gufo ProviderAdapter", () => {
             : Effect.runPromise(adapter.stream(request()));
         await assert.rejects(run, failure(/HTTP 429/));
       }
+    }
+  });
+
+  it("treats a draining Gufo as local overload before enqueue", async () => {
+    for (const operation of ["complete", "stream"] as const) {
+      const adapter = gufoAdapter(
+        async () =>
+          new Response(JSON.stringify({ error: { code: "draining" } }), {
+            status: 503,
+            headers: { "retry-after": "1" },
+          }),
+      );
+      const run =
+        operation === "complete"
+          ? Effect.runPromise(adapter.complete(request()))
+          : Effect.runPromise(adapter.stream(request()));
+      await assert.rejects(run, (error: unknown) => {
+        assert.ok(error instanceof LocalOverloaded);
+        assert.match(error.message, /draining/);
+        assert.equal(error.retryAfterSeconds, 1);
+        return true;
+      });
     }
   });
 

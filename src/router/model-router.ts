@@ -112,6 +112,11 @@ export interface RouterWork {
   readonly freshFactsAvailable: boolean;
   readonly cacheEvidence?: CacheEvidence;
   readonly stream: boolean;
+  /**
+   * Client `service_tier: "flex"`: local spare capacity only. Never waits for a
+   * Router permit, never spills or fails over to cloud; a refusal is returned.
+   */
+  readonly serviceTier?: "flex";
 }
 
 export interface RouteHeaders {
@@ -515,6 +520,7 @@ function executeLocked(
     if (
       localUnavailable &&
       (work.policy.overloadAction === "report" ||
+        work.serviceTier === "flex" ||
         work.routing.boundary === "continue" ||
         selected._tag === "Denied")
     ) {
@@ -564,6 +570,7 @@ function executeLocked(
     }
     const spill =
       mode.kind === "interactive" &&
+      work.serviceTier !== "flex" &&
       (classified.assessment === null
         ? chosen.candidates[0]?.deployment.location === "cloud"
         : cloudSpillPermitted(
@@ -614,6 +621,7 @@ function executeLocked(
 
     const overloadFailover =
       mode.kind === "interactive" &&
+      work.serviceTier !== "flex" &&
       work.policy.overloadAction === "failover" &&
       work.routing.boundary !== "continue" &&
       rankedDeployments[0]?.location === "local";
@@ -644,7 +652,7 @@ function executeLocked(
       permit = yield* pool
         .acquire(rankedDeployments, work.policy.priority, {
           requestId: work.requestId,
-          waitMs: overloadFailover ? 0 : waitBudgetMs(work.policy),
+          waitMs: overloadFailover || work.serviceTier === "flex" ? 0 : waitBudgetMs(work.policy),
           spill: spill && work.routing.boundary !== "continue",
           onQueue: (event) => {
             if (event.state === "queued") {
@@ -815,6 +823,8 @@ function executeLocked(
             routeReservation,
             pin,
             routeDecision,
+            // Batch work runs only on runtime-verified spare capacity.
+            mode.kind === "batch-local" ? "flex" : work.serviceTier,
           ),
         (held, exit) =>
           Effect.sync(() => {
@@ -845,8 +855,17 @@ function executeLocked(
               work,
             );
           };
+          if (mode.kind === "batch-local" && error.flexRefused === true) {
+            // No spare capacity right now: the batch item stays queued. A full
+            // queue or a draining runtime keeps the key's overload policy.
+            reportRejected();
+            return yield* new CapacityBusy({
+              message: "local runtime has no spare capacity for batch work",
+            });
+          }
           if (
             mode.kind !== "interactive" ||
+            work.serviceTier === "flex" ||
             work.policy.overloadAction !== "failover" ||
             work.routing.boundary === "continue" ||
             candidate.deployment.location !== "local"
@@ -1129,6 +1148,7 @@ function adapterRequestFor(
   work: RouterWork,
   candidate: RankedCandidate,
   credentials: (envVar: string) => string | undefined,
+  serviceTier?: "flex",
 ): AdapterRequest {
   const credential =
     candidate.deployment.credentialEnvVar === null
@@ -1150,6 +1170,8 @@ function adapterRequestFor(
     requestedEffort: candidate.requestedEffort,
     appliedEffort: candidate.appliedEffort,
     credential,
+    requestId: work.requestId,
+    ...(serviceTier === undefined ? {} : { serviceTier }),
   };
 }
 
@@ -1210,12 +1232,13 @@ function dispatch(
   reservation: Reservation,
   pin: SessionPin | undefined,
   decision: RouteDecision,
+  serviceTier?: "flex",
 ): Effect.Effect<RoutedCompletion | RoutedStream, RouterFailure> {
   return Effect.gen(function* () {
     if (options.onBeforeDispatch !== undefined) {
       yield* options.onBeforeDispatch(work, reservation);
     }
-    const adapterRequest = adapterRequestFor(work, candidate, credentials);
+    const adapterRequest = adapterRequestFor(work, candidate, credentials, serviceTier);
     const adapter = adapters[candidate.deployment.transport];
     const startedAt = yield* Clock.currentTimeMillis;
     if (stream) {
