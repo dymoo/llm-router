@@ -1,12 +1,26 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { ChevronRightIcon } from "lucide-react";
+import { useId, useMemo, useState, type ReactNode } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cachedInputRatio } from "./api";
-import { Dialog } from "./Dialog";
+import { AdminSheet } from "./AdminSheet";
+import { Companion } from "./Companion";
 import { formatCount, formatEpoch, formatRatio, formatUnknown, formatUsd } from "./format";
 import type {
   BreakdownRow,
   CountRow,
+  Priority,
   PublicKey,
   RequestPage,
   RoutingRow,
@@ -16,10 +30,19 @@ import type {
 } from "./types";
 
 const PERIODS = [
-  { id: "24h", label: "24 hours", ms: 24 * 60 * 60 * 1000 },
-  { id: "7d", label: "7 days", ms: 7 * 24 * 60 * 60 * 1000 },
-  { id: "30d", label: "30 days", ms: 30 * 24 * 60 * 60 * 1000 },
+  { id: "24h", label: "24 Hours", ms: 24 * 60 * 60 * 1000 },
+  { id: "7d", label: "7 Days", ms: 7 * 24 * 60 * 60 * 1000 },
+  { id: "30d", label: "30 Days", ms: 30 * 24 * 60 * 60 * 1000 },
 ] as const;
+
+const PRIORITY_ITEMS: { value: Priority | null; label: string }[] = [
+  { value: null, label: "All priorities" },
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
+];
+
+const listCard = "gap-0 rounded-[20px] bg-surface py-0 ring-0";
 
 export function UsageView({
   keys,
@@ -47,270 +70,253 @@ export function UsageView({
     }
     return Math.abs(query.until - query.since - period.ms) < 60_000;
   });
-  const deployments = usage.breakdowns.byDeployment;
   const keyLabels = useMemo(() => new Map(keys.map((key) => [key.id, key.name])), [keys]);
+  const periodId = useId();
+  const a = usage.aggregates;
 
   return (
-    <section aria-labelledby="usage-heading">
-      <h2 id="usage-heading" className="sr-only">
-        Analytics
-      </h2>
-      <div className="toolbar">
-        <fieldset className="fieldset-plain">
-          <legend className="field-label">Period</legend>
-          <div className="chips">
+    <div className="space-y-8">
+      <div className="space-y-4">
+        <div>
+          <p id={periodId} className="type-footnote font-semibold text-label-2">
+            Period
+          </p>
+          <ToggleGroup
+            aria-labelledby={periodId}
+            className="mt-2 grid w-full grid-cols-3 gap-1 rounded-full bg-fill p-1 sm:w-fit sm:min-w-96"
+            value={activePeriod ? [activePeriod.id] : []}
+            onValueChange={(value: string[]) => {
+              const period = PERIODS.find((item) => item.id === value[0]);
+              if (!period) return;
+              const until = Date.now();
+              onQuery({ ...query, since: until - period.ms, until });
+            }}
+          >
             {PERIODS.map((period) => (
-              <button
+              <ToggleGroupItem
                 key={period.id}
-                type="button"
-                className="chip"
-                aria-pressed={activePeriod?.id === period.id}
-                onClick={() => {
-                  const until = Date.now();
-                  onQuery({ ...query, since: until - period.ms, until });
-                }}
+                value={period.id}
+                className="type-subhead h-11 rounded-full px-4 font-semibold text-label-2 hover:bg-transparent hover:text-label aria-pressed:bg-raised aria-pressed:text-label aria-pressed:shadow-sm"
               >
                 {period.label}
-              </button>
+              </ToggleGroupItem>
             ))}
-          </div>
-        </fieldset>
-        <label className="field">
-          <span>Key</span>
-          <select
-            value={query.keyId ?? ""}
-            onChange={(event) =>
-              onQuery({
-                ...query,
-                keyId: event.target.value.length === 0 ? null : event.target.value,
-              })
-            }
-          >
-            <option value="">All keys</option>
-            {keys.map((key) => (
-              <option key={key.id} value={key.id}>
-                {key.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span>Priority</span>
-          <select
-            value={query.priority ?? ""}
-            onChange={(event) =>
-              onQuery({
-                ...query,
-                priority:
-                  event.target.value === "high" ||
-                  event.target.value === "medium" ||
-                  event.target.value === "low"
-                    ? event.target.value
-                    : null,
-              })
-            }
-          >
-            <option value="">All tiers</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
-        </label>
-        <label className="field">
-          <span>Deployment</span>
-          <select
-            value={query.deploymentId ?? ""}
-            onChange={(event) =>
-              onQuery({
-                ...query,
-                deploymentId: event.target.value.length === 0 ? null : event.target.value,
-              })
-            }
-          >
-            <option value="">All deployments</option>
-            {deployments.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          </ToggleGroup>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <FilterSelect
+            label="Key"
+            value={query.keyId}
+            items={[
+              { value: null, label: "All keys" },
+              ...keys.map((key) => ({ value: key.id, label: key.name })),
+            ]}
+            onChange={(keyId) => onQuery({ ...query, keyId })}
+          />
+          <FilterSelect
+            label="Priority"
+            value={query.priority}
+            items={PRIORITY_ITEMS}
+            onChange={(priority) => onQuery({ ...query, priority })}
+          />
+          <FilterSelect
+            label="Deployment"
+            value={query.deploymentId}
+            items={[
+              { value: null, label: "All deployments" },
+              ...usage.breakdowns.byDeployment.map((item) => ({
+                value: item.id,
+                label: item.label,
+              })),
+            ]}
+            onChange={(deploymentId) => onQuery({ ...query, deploymentId })}
+          />
+        </div>
       </div>
+
       {!usage.available ? (
-        <p className="usage-note">
-          Analytics are unavailable. Missing measurements stay unknown — they are not filled with
-          demo data.
-        </p>
+        <Card className={`${listCard} items-center px-6 py-10 text-center`}>
+          <Companion mood="sad" size={56} />
+          <p className="type-headline mt-3">Analytics are unavailable</p>
+          <p className="type-footnote mt-1 max-w-sm text-label-2">
+            Missing measurements stay unknown. They’re never filled with demo data.
+          </p>
+        </Card>
       ) : (
         <>
-          <p className="usage-note">
-            HTTP success is not task success. Transcripts are not collected. Provider billed spend,
-            token estimate, and local COGS are separate. A billed amount of $0 is not free compute
-            and is not an OpenRouter charge. Local notional COGS can be above zero while billed API
-            spend is zero. Unknown prices stay unknown.
-          </p>
-          <dl className="stats">
-            <Stat label="Requests" value={formatCount(usage.aggregates.requestCount)} />
-            <Stat
-              label="HTTP errors"
-              value={formatCount(usage.aggregates.errorCount)}
-              hint={`Cancel ${formatUnknown(usage.aggregates.cancelCount)} · Saturation ${formatUnknown(usage.aggregates.saturationCount)}`}
-            />
-            <Stat
-              label="Cached input"
-              value={formatRatio(ratio)}
-              hint="Observed cached input / prompt tokens"
-            />
-            <Stat
-              label="Local share"
-              value={formatRatio(
-                localShare(usage.aggregates.localRequests, usage.aggregates.cloudRequests),
-              )}
-              hint="Known locations only."
-            />
-            <Stat
-              label="Token estimate"
-              value={formatUsd(usage.aggregates.estimatedUsd)}
-              hint={`Unknown usage ${formatUnknown(usage.aggregates.unknownUsageCount)}`}
-            />
-            <Stat
-              label="Provider reported"
-              value={formatUsd(usage.aggregates.actualUsd)}
-              hint="Billed API spend. $0 is a real price, not free electricity."
-            />
-            <Stat
-              label="Local COGS"
-              value={formatUsd(usage.aggregates.localComputeUsd)}
-              hint="Notional cost from configured local token rates. Unknown if the rate or tokens are missing."
-            />
-            <Stat
-              label="Queue wait · P50"
-              value={formatUnknown(usage.aggregates.queueWaitMs, ms)}
-              hint={`P95 ${formatUnknown(usage.aggregates.p95QueueWaitMs, ms)}`}
-            />
-            <Stat
-              label="TTFT · P50"
-              value={formatUnknown(usage.aggregates.ttftMs, ms)}
-              hint={`P95 ${formatUnknown(usage.aggregates.p95TtftMs, ms)}`}
-            />
-            <Stat
-              label="Generation · P50"
-              value={formatUnknown(usage.aggregates.elapsedMs, ms)}
-              hint={`P95 ${formatUnknown(usage.aggregates.p95ElapsedMs, ms)}`}
-            />
-            <Stat
-              label="Cache savings estimate"
-              value={formatUsd(usage.aggregates.cacheSavingsUsd)}
-              hint="Observed cached tokens × configured rate difference; not affinity."
-            />
-            <Stat
-              label="Decode TPS"
-              value={formatUnknown(usage.aggregates.decodeTps, (value) => value.toFixed(1))}
-            />
-          </dl>
+          <div className="space-y-3">
+            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              <Stat label="Requests" value={formatCount(a.requestCount)} />
+              <Stat
+                label="HTTP errors"
+                value={formatCount(a.errorCount)}
+                hint={`Cancelled ${formatUnknown(a.cancelCount)} · Saturated ${formatUnknown(a.saturationCount)}`}
+              />
+              <Stat
+                label="Cached input"
+                value={formatRatio(ratio)}
+                hint="Observed cached input / prompt tokens"
+              />
+              <Stat
+                label="Local share"
+                value={formatRatio(localShare(a.localRequests, a.cloudRequests))}
+                hint="Known locations only."
+              />
+              <Stat
+                label="Token estimate"
+                value={formatUsd(a.estimatedUsd)}
+                hint={`Unknown usage ${formatUnknown(a.unknownUsageCount)}`}
+              />
+              <Stat
+                label="Provider reported"
+                value={formatUsd(a.actualUsd)}
+                hint="Billed API spend. $0 is a real price, not free electricity."
+              />
+              <Stat
+                label="Local COGS"
+                value={formatUsd(a.localComputeUsd)}
+                hint="Notional cost from configured local token rates."
+              />
+              <Stat
+                label="Queue wait · P50"
+                value={formatUnknown(a.queueWaitMs, ms)}
+                hint={`P95 ${formatUnknown(a.p95QueueWaitMs, ms)}`}
+              />
+              <Stat
+                label="TTFT · P50"
+                value={formatUnknown(a.ttftMs, ms)}
+                hint={`P95 ${formatUnknown(a.p95TtftMs, ms)}`}
+              />
+              <Stat
+                label="Generation · P50"
+                value={formatUnknown(a.elapsedMs, ms)}
+                hint={`P95 ${formatUnknown(a.p95ElapsedMs, ms)}`}
+              />
+              <Stat
+                label="Cache savings"
+                value={formatUsd(a.cacheSavingsUsd)}
+                hint="Observed cached tokens × configured rate difference."
+              />
+              <Stat
+                label="Decode TPS"
+                value={formatUnknown(a.decodeTps, (value) => value.toFixed(1))}
+              />
+            </dl>
+            <p className="type-footnote max-w-2xl text-label-2">
+              HTTP success isn’t task success, and transcripts aren’t collected. Provider billed
+              spend, token estimate and local COGS are separate: $0 billed isn’t free compute, local
+              COGS can be above zero while billed spend is zero, and unknown prices stay unknown.
+            </p>
+          </div>
           <TrendChart points={usage.series} />
-          <BreakdownTable
+          <BreakdownSection
             title="By key"
             rows={usage.breakdowns.byKey.map((row) => ({
               ...row,
               label: keyLabels.get(row.id) ?? row.label,
             }))}
           />
-          <BreakdownTable title="By priority" rows={usage.breakdowns.byPriority} />
-          <BreakdownTable title="By deployment" rows={usage.breakdowns.byDeployment} />
-          <CountTable
-            title="Errors"
-            rows={usage.errors}
-            empty="No recorded errors for this window."
-          />
+          <BreakdownSection title="By priority" rows={usage.breakdowns.byPriority} />
+          <BreakdownSection title="By deployment" rows={usage.breakdowns.byDeployment} />
+          <CountSection title="Errors" rows={usage.errors} empty="No recorded errors." />
         </>
       )}
-      <div className="panel">
+
+      <Section title="Requests">
         {rows.length === 0 ? (
-          <div className="empty">
-            <h2>No request metadata</h2>
-            <p>Completed routes appear here without prompts, completions, or secrets.</p>
-          </div>
+          <Card className={`${listCard} items-center px-6 py-10 text-center`}>
+            <Companion size={56} />
+            <p className="type-headline mt-3">No requests yet</p>
+            <p className="type-footnote mt-1 max-w-sm text-label-2">
+              Completed requests appear here, without prompts, completions or secrets.
+            </p>
+          </Card>
         ) : (
-          <div className="table-wrap">
-            <table className="keys stack">
-              <thead>
-                <tr>
-                  <th>When</th>
-                  <th>Key</th>
-                  <th>Deployment</th>
-                  <th>HTTP outcome</th>
-                  <th>Reason</th>
-                  <th>Cache</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <tr key={row.id}>
-                    <td className="muted" data-label="When">
-                      {formatEpoch(row.createdAt)}
-                    </td>
-                    <td data-label="Key">
-                      <button
-                        className="btn btn-ghost btn-row"
-                        type="button"
-                        onClick={() => setSelected(row)}
-                      >
-                        {(row.keyName === null ? undefined : keyLabels.get(row.keyName)) ??
-                          row.keyName ??
-                          row.keyPrefix ??
-                          row.id}
-                      </button>
-                    </td>
-                    <td className="muted" data-label="Deployment">
-                      {row.deploymentId ?? "—"}
-                    </td>
-                    <td data-label="HTTP outcome">{row.outcome}</td>
-                    <td className="muted" data-label="Reason">
-                      {row.decisionReason ?? "—"}
-                    </td>
-                    <td className="muted" data-label="Cache">
-                      {row.cacheHit === null
-                        ? "—"
-                        : row.cacheHit
-                          ? "Observed hit"
-                          : "Observed miss"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Card className={listCard}>
+            <ul>
+              {rows.map((row, index) => (
+                <li key={row.id}>
+                  <button
+                    type="button"
+                    onClick={() => setSelected(row)}
+                    className="flex w-full pl-4 text-left transition-colors hover:bg-fill focus-visible:bg-fill focus-visible:-outline-offset-2 active:bg-fill"
+                  >
+                    <span
+                      className={`flex min-h-16 min-w-0 flex-1 items-center gap-3 py-3 pr-4 ${index === 0 ? "" : "border-t border-separator"}`}
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2">
+                          <span className="type-headline truncate">
+                            {(row.keyName === null ? undefined : keyLabels.get(row.keyName)) ??
+                              row.keyName ??
+                              row.keyPrefix ??
+                              row.id}
+                          </span>
+                          <Badge
+                            variant={/error|fail/i.test(row.outcome) ? "destructive" : "secondary"}
+                            className="h-6 shrink-0 px-2.5 text-xs font-semibold"
+                          >
+                            {row.outcome}
+                          </Badge>
+                        </span>
+                        <span className="type-footnote mt-0.5 block truncate text-label-2">
+                          {[
+                            formatEpoch(row.createdAt),
+                            row.deploymentId,
+                            row.decisionReason,
+                            row.cacheHit === null
+                              ? null
+                              : row.cacheHit
+                                ? "Cache hit"
+                                : "Cache miss",
+                          ]
+                            .filter((part) => part !== null)
+                            .join(" · ")}
+                        </span>
+                      </span>
+                      <ChevronRightIcon
+                        size={18}
+                        strokeWidth={1.8}
+                        className="shrink-0 text-label-3"
+                        aria-hidden="true"
+                      />
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </Card>
         )}
         {requests.nextCursor ? (
-          <div className="more">
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={onLoadMore}
-              disabled={loadingMore}
-            >
-              {loadingMore ? "Loading…" : "Load More Requests"}
-            </button>
-          </div>
+          <Button
+            variant="secondary"
+            className="mt-4 w-full sm:w-auto"
+            onClick={onLoadMore}
+            disabled={loadingMore}
+          >
+            {loadingMore ? "Loading…" : "Load More Requests"}
+          </Button>
         ) : null}
-      </div>
+      </Section>
+
       {selected ? (
-        <Dialog
-          open
+        <AdminSheet
           title="Request"
-          description="Metadata only. Prompts, completions, and reasoning text are not stored here. Task success is not inferred from HTTP success."
+          description="Metadata only. Prompts, completions and reasoning aren’t stored, and task success isn’t inferred from HTTP success."
           onClose={() => setSelected(null)}
-          footer={
-            <button className="btn btn-primary" type="button" onClick={() => setSelected(null)}>
-              Close
-            </button>
-          }
         >
-          <dl className="drill">
+          <dl className="divide-y divide-white/10">
             <Item label="ID" value={selected.id} />
             <Item label="When" value={formatEpoch(selected.createdAt)} />
-            <Item label="Key" value={selected.keyName ?? selected.keyPrefix ?? "—"} />
+            <Item
+              label="Key"
+              value={
+                (selected.keyName === null ? undefined : keyLabels.get(selected.keyName)) ??
+                selected.keyName ??
+                selected.keyPrefix ??
+                "—"
+              }
+            />
             <Item
               label="App"
               value={
@@ -345,8 +351,60 @@ export function UsageView({
             <Item label="Provider billed" value={formatUsd(selected.actualUsd)} />
             <Item label="Local COGS" value={formatUsd(selected.localComputeUsd)} />
           </dl>
-        </Dialog>
+        </AdminSheet>
       ) : null}
+    </div>
+  );
+}
+
+function FilterSelect<T extends string>({
+  label,
+  value,
+  items,
+  onChange,
+}: {
+  label: string;
+  value: T | null;
+  items: { value: T | null; label: string }[];
+  onChange: (value: T | null) => void;
+}) {
+  const labelId = useId();
+  return (
+    <div className="min-w-0">
+      <p id={labelId} className="type-footnote font-semibold text-label-2">
+        {label}
+      </p>
+      <Select items={items} value={value} onValueChange={(next) => onChange(next as T | null)}>
+        <SelectTrigger
+          aria-labelledby={labelId}
+          className="mt-2 w-full rounded-xl border-0 bg-fill px-3 text-[1rem] hover:bg-white/10 data-[size=default]:h-11"
+        >
+          <SelectValue className="min-w-0 truncate" />
+        </SelectTrigger>
+        <SelectContent className="glass glass-thick rounded-[22px] p-1.5">
+          {items.map((item) => (
+            <SelectItem
+              key={item.value ?? ""}
+              value={item.value}
+              className="min-h-11 rounded-2xl px-3 text-[0.9375rem]"
+            >
+              {item.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  const id = useId();
+  return (
+    <section aria-labelledby={id}>
+      <h2 id={id} className="type-title-2 mb-3">
+        {title}
+      </h2>
+      {children}
     </section>
   );
 }
@@ -356,162 +414,140 @@ function TrendChart({ points }: { points: TrendPoint[] }) {
     if (points.length === 0) {
       return null;
     }
-    const values = points.map((point) => point.requests);
-    const max = Math.max(...values, 1);
+    const max = Math.max(...points.map((point) => point.requests), 1);
     const width = 640;
     const height = 120;
     const gap = 2;
     const barWidth = Math.max(2, (width - gap * (points.length - 1)) / points.length);
-    return { max, width, height, gap, barWidth, values };
+    return { max, width, height, gap, barWidth };
   }, [points]);
 
-  if (!chart) {
-    return <p className="usage-note">No trend series for this window.</p>;
-  }
-
   return (
-    <figure className="chart">
-      <figcaption>Requests over time</figcaption>
-      <svg
-        role="img"
-        aria-label="Requests over the selected window"
-        viewBox={`0 0 ${chart.width} ${chart.height}`}
-        className="chart-svg"
-      >
-        {points.map((point, index) => {
-          const barHeight = (point.requests / chart.max) * chart.height;
-          const x = index * (chart.barWidth + chart.gap);
-          return (
-            <rect
-              key={point.t}
-              x={x}
-              y={chart.height - barHeight}
-              width={chart.barWidth}
-              height={barHeight}
-              rx={1}
-              className="chart-bar"
-            >
-              <title>
-                {formatEpoch(point.t)} · {formatCount(point.requests)} requests
-              </title>
-            </rect>
-          );
-        })}
-      </svg>
-    </figure>
+    <Section title="Requests over time">
+      {chart ? (
+        <Card className={`${listCard} p-4`}>
+          <svg
+            role="img"
+            aria-label="Requests over the selected window"
+            viewBox={`0 0 ${chart.width} ${chart.height}`}
+            className="block h-auto w-full"
+          >
+            {points.map((point, index) => {
+              const barHeight = (point.requests / chart.max) * chart.height;
+              return (
+                <rect
+                  key={point.t}
+                  x={index * (chart.barWidth + chart.gap)}
+                  y={chart.height - barHeight}
+                  width={chart.barWidth}
+                  height={barHeight}
+                  rx={1}
+                  className="fill-label-2"
+                >
+                  <title>
+                    {formatEpoch(point.t)} · {formatCount(point.requests)} requests
+                  </title>
+                </rect>
+              );
+            })}
+          </svg>
+        </Card>
+      ) : (
+        <p className="type-footnote text-label-2">No trend for this window.</p>
+      )}
+    </Section>
   );
 }
 
-function BreakdownTable({ title, rows }: { title: string; rows: BreakdownRow[] }) {
-  if (rows.length === 0) {
-    return (
-      <div className="panel">
-        <div className="empty">
-          <h2>{title}</h2>
-          <p>No breakdown for this window.</p>
-        </div>
-      </div>
-    );
-  }
+function BreakdownSection({ title, rows }: { title: string; rows: BreakdownRow[] }) {
   return (
-    <div className="panel">
-      <h3 className="panel-title">{title}</h3>
-      <div className="table-wrap">
-        <table className="keys stack">
-          <thead>
-            <tr>
-              <th>{title}</th>
-              <th>Requests</th>
-              <th>Local / cloud</th>
-              <th>Estimate</th>
-              <th>Billed</th>
-              <th>Local COGS</th>
-              <th>Errors</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td className="name">{row.label}</td>
-                <td className="muted" data-label="Requests">
-                  {formatCount(row.requests)}
-                </td>
-                <td className="muted" data-label="Local / cloud">
-                  {formatUnknown(row.local)} / {formatUnknown(row.cloud)}
-                </td>
-                <td className="muted" data-label="Estimate">
-                  {formatUsd(row.estimatedUsd)}
-                </td>
-                <td className="muted" data-label="Billed">
-                  {formatUsd(row.actualUsd)}
-                </td>
-                <td className="muted" data-label="Local COGS">
-                  {formatUsd(row.localComputeUsd)}
-                </td>
-                <td className="muted" data-label="Errors">
-                  {formatUnknown(row.errors)} · cancel {formatUnknown(row.cancels)} · sat{" "}
-                  {formatUnknown(row.saturation)}
-                </td>
-              </tr>
+    <Section title={title}>
+      {rows.length === 0 ? (
+        <p className="type-footnote text-label-2">No breakdown for this window.</p>
+      ) : (
+        <Card className={listCard}>
+          <ul>
+            {rows.map((row, index) => (
+              <li key={row.id} className="px-4">
+                <div className={`py-3 ${index === 0 ? "" : "border-t border-separator"}`}>
+                  <p className="type-headline truncate">{row.label}</p>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-6">
+                    <Pair label="Requests" value={formatCount(row.requests)} />
+                    <Pair
+                      label="Local / cloud"
+                      value={`${formatUnknown(row.local)} / ${formatUnknown(row.cloud)}`}
+                    />
+                    <Pair label="Estimate" value={formatUsd(row.estimatedUsd)} />
+                    <Pair label="Billed" value={formatUsd(row.actualUsd)} />
+                    <Pair label="Local COGS" value={formatUsd(row.localComputeUsd)} />
+                    <Pair
+                      label="Errors · cancel · sat"
+                      value={`${formatUnknown(row.errors)} · ${formatUnknown(row.cancels)} · ${formatUnknown(row.saturation)}`}
+                    />
+                  </dl>
+                </div>
+              </li>
             ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+          </ul>
+        </Card>
+      )}
+    </Section>
   );
 }
 
-function CountTable({ title, rows, empty }: { title: string; rows: CountRow[]; empty: string }) {
-  if (rows.length === 0) {
-    return (
-      <div className="panel">
-        <div className="empty">
-          <h2>{title}</h2>
-          <p>{empty}</p>
-        </div>
-      </div>
-    );
-  }
+function CountSection({ title, rows, empty }: { title: string; rows: CountRow[]; empty: string }) {
   return (
-    <div className="panel">
-      <h3 className="panel-title">{title}</h3>
-      <div className="table-wrap">
-        <table className="keys">
-          <thead>
-            <tr>
-              <th>Reason</th>
-              <th>Count</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td>{row.label}</td>
-                <td className="muted">{formatCount(row.count)}</td>
-              </tr>
+    <Section title={title}>
+      {rows.length === 0 ? (
+        <p className="type-footnote text-label-2">{empty}</p>
+      ) : (
+        <Card className={listCard}>
+          <ul>
+            {rows.map((row, index) => (
+              <li key={row.id} className="px-4">
+                <div
+                  className={`flex min-h-12 items-center justify-between gap-4 py-2 ${index === 0 ? "" : "border-t border-separator"}`}
+                >
+                  <span className="type-subhead min-w-0 [overflow-wrap:anywhere]">{row.label}</span>
+                  <span className="type-subhead text-label-2 tabular-nums">
+                    {formatCount(row.count)}
+                  </span>
+                </div>
+              </li>
             ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+          </ul>
+        </Card>
+      )}
+    </Section>
   );
 }
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="stat">
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-      {hint ? <p className="sub">{hint}</p> : null}
+    <div className="min-w-0 rounded-[20px] bg-surface p-4">
+      <dt className="type-footnote text-label-2">{label}</dt>
+      <dd className="mt-1">
+        <span className="type-title-2 block tabular-nums [overflow-wrap:anywhere]">{value}</span>
+        {hint ? <span className="type-caption mt-1 block text-label-2">{hint}</span> : null}
+      </dd>
+    </div>
+  );
+}
+
+function Pair({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="type-caption text-label-2">{label}</dt>
+      <dd className="type-subhead tabular-nums [overflow-wrap:anywhere]">{value}</dd>
     </div>
   );
 }
 
 function Item({ label, value }: { label: string; value: string }) {
   return (
-    <div className="drill-row">
-      <dt>{label}</dt>
-      <dd>{value}</dd>
+    <div className="grid grid-cols-[7.5rem_1fr] gap-3 py-2.5">
+      <dt className="type-footnote font-semibold text-glass-label-2">{label}</dt>
+      <dd className="type-subhead [overflow-wrap:anywhere]">{value}</dd>
     </div>
   );
 }

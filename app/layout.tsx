@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Keys",
+  title: "LLM Router",
   description: "Issue and control inference API keys.",
   robots: { index: false, follow: false },
 };
@@ -11,18 +11,20 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f5f5f7" },
-    { media: "(prefers-color-scheme: dark)", color: "#000000" },
-  ],
+  viewportFit: "cover",
+  colorScheme: "dark",
+  themeColor: "#18181a",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>
-        <a className="skip-link" href="#main">
-          Skip to keys
+        <a
+          className="sr-only z-50 rounded-full bg-primary px-5 py-3 text-primary-foreground focus:not-sr-only focus:fixed focus:top-[calc(var(--safe-top)+0.5rem)] focus:left-4"
+          href="#main"
+        >
+          Skip to Content
         </a>
         {children}
       </body>

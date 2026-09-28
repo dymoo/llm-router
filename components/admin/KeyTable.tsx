@@ -1,5 +1,12 @@
 "use client";
 
+import { ChevronRightIcon } from "lucide-react";
+import { useId } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { policySummary } from "./explain";
 import { filterLoadedKeys, LOADED_FILTER_HINT, LOADED_FILTER_LABEL } from "./filter";
 import { formatCount, formatEpoch, keyLifecycle } from "./format";
@@ -13,8 +20,6 @@ export function KeyTable({
   onQuery,
   onLoadMore,
   onEdit,
-  onRotate,
-  onRevoke,
 }: {
   keys: PublicKey[];
   query: string;
@@ -23,166 +28,133 @@ export function KeyTable({
   onQuery: (value: string) => void;
   onLoadMore: () => void;
   onEdit: (key: PublicKey) => void;
-  onRotate: (key: PublicKey) => void;
-  onRevoke: (key: PublicKey) => void;
 }) {
   const visible = filterLoadedKeys(keys, query);
-
-  if (keys.length === 0) {
-    return null;
-  }
+  const searchId = useId();
+  const hintId = useId();
 
   return (
-    <>
-      <div className="toolbar">
-        <label className="field toolbar-search">
-          <span>{LOADED_FILTER_LABEL}</span>
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => onQuery(event.target.value)}
-            placeholder="Name or prefix"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <span className="hint">{LOADED_FILTER_HINT}</span>
-        </label>
+    <div className="space-y-4">
+      <div>
+        <Label htmlFor={searchId} className="sr-only">
+          {LOADED_FILTER_LABEL}
+        </Label>
+        <Input
+          id={searchId}
+          type="search"
+          value={query}
+          onChange={(event) => onQuery(event.target.value)}
+          placeholder="Filter by name or prefix"
+          autoComplete="off"
+          spellCheck={false}
+          aria-describedby={hintId}
+          className="h-11 rounded-xl border-0 bg-fill px-4 text-[1rem] placeholder:text-label-3 focus-visible:ring-0 focus-visible:inset-ring-[1.5px] focus-visible:inset-ring-label-3 md:text-[1rem]"
+        />
+        <p id={hintId} className="type-footnote mt-2 text-label-2">
+          {LOADED_FILTER_HINT}
+        </p>
       </div>
-      <div className="panel">
-        <div className="table-wrap">
-          <table className="keys">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Prefix</th>
-                <th>Status</th>
-                <th>Requests</th>
-                <th>Last used</th>
-                <th>
-                  <span className="sr-only">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((key) => (
-                <tr key={key.id}>
-                  <td>
-                    <div className="name">{key.name}</div>
-                    <div className="muted">{policySummary(key.policy)}</div>
-                  </td>
-                  <td className="mono">{key.prefix}</td>
-                  <td>
-                    <StatusPill keyRecord={key} />
-                  </td>
-                  <td className="muted">{counterLabel(key)}</td>
-                  <td className="muted">{formatEpoch(key.lastUsedAt)}</td>
-                  <td>
-                    <RowActions
-                      keyRecord={key}
-                      onEdit={onEdit}
-                      onRotate={onRotate}
-                      onRevoke={onRevoke}
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="cards">
-          {visible.map((key) => (
-            <article className="card" key={key.id}>
-              <div className="card-head">
-                <div>
-                  <div className="name">{key.name}</div>
-                  <div className="mono">{key.prefix}</div>
-                </div>
-                <StatusPill keyRecord={key} />
-              </div>
-              <p className="muted">{policySummary(key.policy)}</p>
-              <p className="muted">{counterLabel(key)}</p>
-              <p className="muted">Last used {formatEpoch(key.lastUsedAt)}</p>
-              <RowActions keyRecord={key} onEdit={onEdit} onRotate={onRotate} onRevoke={onRevoke} />
-            </article>
-          ))}
-        </div>
+      <Card className="gap-0 rounded-[20px] bg-surface py-0 ring-0">
         {visible.length === 0 ? (
-          <div className="empty">
-            <h2>No loaded keys match</h2>
-            <p>The filter only applies to keys already on this page.</p>
+          <div className="px-4 py-8 text-center">
+            <p className="type-headline">No loaded keys match</p>
+            <p className="type-footnote mt-1 text-label-2">
+              The filter only covers keys already on this page.
+            </p>
           </div>
-        ) : null}
-        {nextCursor ? (
-          <div className="more">
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={onLoadMore}
-              disabled={loadingMore}
-            >
-              {loadingMore ? "Loading…" : "Load More Keys"}
-            </button>
-          </div>
-        ) : null}
-      </div>
-    </>
+        ) : (
+          <ul>
+            {visible.map((key, index) => (
+              <li key={key.id}>
+                <KeyRow keyRecord={key} first={index === 0} onEdit={onEdit} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+      {nextCursor ? (
+        <Button
+          variant="secondary"
+          className="w-full sm:w-auto"
+          onClick={onLoadMore}
+          disabled={loadingMore}
+        >
+          {loadingMore ? "Loading…" : "Load More Keys"}
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
-function StatusPill({ keyRecord }: { keyRecord: PublicKey }) {
-  const status = keyLifecycle(keyRecord);
-  const tone = status === "active" ? "ok" : status === "expired" ? "warn" : "bad";
-  const label = status === "active" ? "Active" : status === "expired" ? "Expired" : "Revoked";
-  return (
-    <span className="pill" data-tone={tone}>
-      {label}
-    </span>
-  );
-}
-
-function RowActions({
+function KeyRow({
   keyRecord,
+  first,
   onEdit,
-  onRotate,
-  onRevoke,
 }: {
   keyRecord: PublicKey;
+  first: boolean;
   onEdit: (key: PublicKey) => void;
-  onRotate: (key: PublicKey) => void;
-  onRevoke: (key: PublicKey) => void;
 }) {
-  const revoked = keyRecord.revokedAt !== null;
+  const status = keyLifecycle(keyRecord);
+  const revoked = status === "revoked";
+  const usage = `${counterLabel(keyRecord)} · Last used ${formatEpoch(keyRecord.lastUsedAt)}`;
+  const body = (
+    <span
+      className={`flex min-h-[76px] min-w-0 flex-1 items-center gap-3 py-3 pr-4 ${first ? "" : "border-t border-separator"}`}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2">
+          <span className={`type-headline truncate ${revoked ? "text-label-2" : ""}`}>
+            {keyRecord.name}
+          </span>
+          {status === "active" ? null : (
+            <Badge
+              variant={revoked ? "destructive" : "secondary"}
+              className="h-6 shrink-0 px-2.5 text-xs font-semibold"
+            >
+              {revoked ? "Revoked" : "Expired"}
+            </Badge>
+          )}
+        </span>
+        <span className="type-footnote mt-0.5 block truncate text-label-2">
+          {policySummary(keyRecord.policy)} · <span className="font-mono">{keyRecord.prefix}</span>
+        </span>
+        <span className="type-footnote mt-0.5 block truncate text-label-2 sm:hidden">{usage}</span>
+      </span>
+      <span className="type-footnote hidden shrink-0 text-right text-label-2 sm:block">
+        {counterLabel(keyRecord)}
+        <br />
+        Last used {formatEpoch(keyRecord.lastUsedAt)}
+      </span>
+      {revoked ? (
+        <span className="size-[18px] shrink-0" aria-hidden="true" />
+      ) : (
+        <ChevronRightIcon
+          size={18}
+          strokeWidth={1.8}
+          className="shrink-0 text-label-3"
+          aria-hidden="true"
+        />
+      )}
+    </span>
+  );
+
+  if (revoked) {
+    return <div className="flex pl-4">{body}</div>;
+  }
   return (
-    <div className="row-actions">
-      <button
-        className="btn btn-ghost btn-row"
-        type="button"
-        disabled={revoked}
-        onClick={() => onEdit(keyRecord)}
-      >
-        Edit
-      </button>
-      <button
-        className="btn btn-ghost btn-row"
-        type="button"
-        disabled={revoked}
-        onClick={() => onRotate(keyRecord)}
-      >
-        Rotate
-      </button>
-      <button
-        className="btn btn-danger-ghost btn-row"
-        type="button"
-        disabled={revoked}
-        onClick={() => onRevoke(keyRecord)}
-      >
-        Revoke
-      </button>
-    </div>
+    <button
+      type="button"
+      onClick={() => onEdit(keyRecord)}
+      className="flex w-full pl-4 text-left transition-colors hover:bg-fill focus-visible:bg-fill focus-visible:-outline-offset-2 active:bg-fill"
+    >
+      <span className="sr-only">Edit </span>
+      {body}
+    </button>
   );
 }
 
 function counterLabel(key: PublicKey): string {
   const running = key.runningCount > 0 ? ` · ${formatCount(key.runningCount)} running` : "";
-  return `${formatCount(key.requestCount)} req${running} · ${formatCount(key.successCount)} ok · ${formatCount(key.errorCount)} err`;
+  return `${formatCount(key.requestCount)} requests${running} · ${formatCount(key.successCount)} ok · ${formatCount(key.errorCount)} errors`;
 }

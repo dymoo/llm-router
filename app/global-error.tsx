@@ -1,6 +1,8 @@
 "use client";
 
 import "./globals.css";
+import { StatusScreen } from "@/components/admin/StatusScreen";
+import { Button } from "@/components/ui/button";
 
 export default function GlobalError({
   error,
@@ -12,17 +14,20 @@ export default function GlobalError({
   return (
     <html lang="en">
       <body>
-        <main className="error-page">
-          <h1>The console could not be shown</h1>
-          <p>
-            {error.digest
+        <StatusScreen
+          mood="sad"
+          title="The console couldn’t be shown"
+          detail={
+            error.digest
               ? `Reference ${error.digest}. Reload the page or try again.`
-              : "Reload the page or try again."}
-          </p>
-          <button className="btn btn-primary" type="button" onClick={() => retry()}>
-            Try Again
-          </button>
-        </main>
+              : "Reload the page or try again."
+          }
+          action={
+            <Button size="lg" onClick={() => retry()}>
+              Try Again
+            </Button>
+          }
+        />
       </body>
     </html>
   );

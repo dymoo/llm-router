@@ -1,6 +1,11 @@
 "use client";
 
+import { PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   AdminApiError,
   createKey,
@@ -14,13 +19,15 @@ import {
   unavailableUsage,
   updateKey,
 } from "./api";
-import { Dialog } from "./Dialog";
+import { AdminSheet } from "./AdminSheet";
+import { Companion, COMPANION_NAME } from "./Companion";
 import { HealthStatus } from "./HealthStatus";
 import { KeyEditor } from "./KeyEditor";
 import { KeyTable } from "./KeyTable";
 import { defaultDraft } from "./presets";
 import { cloneDraft, draftFromKey, resolveStaleEdit } from "./policy";
 import { SecretReveal } from "./SecretReveal";
+import { StatusScreen } from "./StatusScreen";
 import { UsageView } from "./UsageView";
 import type {
   HealthSnapshot,
@@ -278,129 +285,148 @@ export function AdminApp() {
     if (confirm.action === "revoke") {
       return {
         title: `Revoke ${confirm.key.name}?`,
-        body: "Agents using this key will be denied. This cannot be undone.",
+        body: "Apps and agents using this key are refused from now on. This can’t be undone.",
         action: "Revoke Key",
         danger: true,
       };
     }
     return {
-      title: `Rotate ${confirm.key.name}?`,
-      body: "The current secret stops working immediately. There is no overlap period.",
-      action: "Rotate Key",
+      title: `Rotate the secret for ${confirm.key.name}?`,
+      body: "The current secret stops working straight away. There’s no overlap period.",
+      action: "Rotate Secret",
       danger: false,
     };
   }, [confirm]);
 
   if (session === "checking") {
-    return (
-      <div className="page" aria-busy="true">
-        <header className="chrome">
-          <h1>Keys</h1>
-        </header>
-        <main className="main">
-          <div className="skeleton">
-            <div className="skel title" />
-            <div className="skel line" />
-            <div className="skel line" />
-          </div>
-        </main>
-      </div>
-    );
+    return <StatusScreen mood="sleepy" title={`${COMPANION_NAME} is fetching your keys…`} busy />;
   }
 
   if (session === "error") {
     return (
-      <main className="error-page">
-        <h1>The console could not be shown</h1>
-        <p>{banner ?? "The admin API is unreachable."}</p>
-        <button
-          className="btn btn-primary"
-          type="button"
-          onClick={() => {
-            setSession("checking");
-            setBanner(null);
-            void (async () => {
-              try {
-                await loadConsole(defaultUsageQuery());
-                setSession("ready");
-              } catch (error) {
-                setBanner(
-                  error instanceof AdminApiError ? error.message : "Could not load the console.",
-                );
-                setSession("error");
-              }
-            })();
-          }}
-        >
-          Try Again
-        </button>
-      </main>
+      <StatusScreen
+        mood="sad"
+        title="The console couldn’t load"
+        detail={banner ?? "The admin API is unreachable. Your keys are unchanged."}
+        action={
+          <Button
+            size="lg"
+            onClick={() => {
+              setSession("checking");
+              setBanner(null);
+              void (async () => {
+                try {
+                  await loadConsole(defaultUsageQuery());
+                  setSession("ready");
+                } catch (error) {
+                  setBanner(
+                    error instanceof AdminApiError ? error.message : "Could not load the console.",
+                  );
+                  setSession("error");
+                }
+              })();
+            }}
+          >
+            Try Again
+          </Button>
+        }
+      />
     );
   }
 
+  const createButton = (className: string) => (
+    <Button size="lg" className={className} onClick={openCreate}>
+      <PlusIcon strokeWidth={1.8} aria-hidden="true" className="size-5" />
+      Create Key
+    </Button>
+  );
+  const editedKey =
+    editor?.mode === "edit" ? keys.find((item) => item.id === editor.id) : undefined;
+  const confirmFromEditor = (action: Confirm["action"]) =>
+    editedKey
+      ? () => {
+          setEditor(null);
+          setEditorError(null);
+          setConfirm({ action, key: editedKey });
+        }
+      : undefined;
+
   return (
-    <div className="page">
-      <div className="live" aria-live="polite">
+    <Tabs
+      value={tab}
+      onValueChange={(value) => setTab(value === "usage" ? "usage" : "keys")}
+      className="min-h-dvh gap-0"
+    >
+      <div className="sr-only" aria-live="polite">
         {live}
       </div>
-      <header className="chrome">
-        <h1>{tab === "keys" ? "Keys" : "Usage"}</h1>
-        <nav className="tabs" aria-label="Console">
-          <button
-            type="button"
-            aria-current={tab === "keys" ? "page" : undefined}
-            onClick={() => setTab("keys")}
+      <header className="sticky top-0 z-30 bg-bg/80 pt-[var(--safe-top)] backdrop-blur-xl">
+        <div className="mx-auto flex h-14 max-w-5xl items-center gap-2 pr-[max(1rem,var(--safe-right))] pl-[max(1rem,var(--safe-left))] sm:gap-3 sm:px-8">
+          <Companion size={30} />
+          <p className="font-display text-[1.125rem] font-extrabold tracking-[-0.02em] max-[23rem]:sr-only">
+            LLM <span className="text-label-2">Router</span>
+          </p>
+          <div className="flex-1" />
+          <TabsList
+            aria-label="Console"
+            className="rounded-full bg-fill p-0.5 group-data-horizontal/tabs:h-12"
           >
-            Keys
-          </button>
-          <button
-            type="button"
-            aria-current={tab === "usage" ? "page" : undefined}
-            onClick={() => setTab("usage")}
+            <TabsTrigger value="keys" className={tabClass}>
+              Keys
+            </TabsTrigger>
+            <TabsTrigger value="usage" className={tabClass}>
+              Usage
+            </TabsTrigger>
+          </TabsList>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Refresh"
+            title="Refresh"
+            className="-mr-2 text-label-2"
+            onClick={() => {
+              void refresh().then(() => announce("Refreshed."));
+            }}
           >
-            Usage
-          </button>
-        </nav>
-        <div className="chrome-spacer" />
-        <HealthStatus health={health} />
-        {tab === "keys" ? (
-          <button className="btn btn-primary" type="button" onClick={openCreate}>
-            Create Key
-          </button>
-        ) : null}
-        <button
-          className="btn btn-secondary"
-          type="button"
-          onClick={() => {
-            void refresh().then(() => announce("Refreshed."));
-          }}
-        >
-          Refresh
-        </button>
+            <RefreshCwIcon strokeWidth={1.8} aria-hidden="true" className="size-[22px]" />
+          </Button>
+        </div>
       </header>
-      <main className="main" id="main">
-        {banner ? (
-          <div className="banner" role="alert">
-            <div>
-              <h2>Something went wrong</h2>
-              <p>{banner}</p>
+      <main
+        id="main"
+        className={`mx-auto w-full max-w-5xl px-4 pt-6 sm:px-8 sm:pb-16 ${tab === "keys" ? "pb-[calc(7rem+var(--safe-bottom))]" : "pb-[calc(3rem+var(--safe-bottom))]"}`}
+      >
+        <div className="flex items-end justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="type-title-1">{tab === "keys" ? "Keys" : "Usage"}</h1>
+            <div className="mt-2">
+              <HealthStatus health={health} />
             </div>
-            <button className="btn btn-ghost" type="button" onClick={() => setBanner(null)}>
-              Dismiss
-            </button>
           </div>
-        ) : null}
-        {tab === "keys" ? (
-          empty ? (
-            <div className="panel">
-              <div className="empty">
-                <h2>No keys yet</h2>
-                <p>Create a key to admit coding agents through the router.</p>
-                <button className="btn btn-primary" type="button" onClick={openCreate}>
-                  Create Key
-                </button>
-              </div>
+          {tab === "keys" ? createButton("hidden sm:inline-flex") : null}
+        </div>
+        {banner ? (
+          <Alert className="mt-6 flex items-center gap-3 rounded-[20px] border-0 bg-surface p-4">
+            <Companion mood="sad" size={36} className="size-9" />
+            <div className="min-w-0 flex-1">
+              <AlertTitle className="type-headline">Something went wrong</AlertTitle>
+              <AlertDescription className="type-footnote text-label-2">{banner}</AlertDescription>
             </div>
+            <Button variant="ghost" className="-mr-2 text-label-2" onClick={() => setBanner(null)}>
+              Dismiss
+            </Button>
+          </Alert>
+        ) : null}
+        <TabsContent value="keys" className="mt-6">
+          {empty ? (
+            <Card className="items-center gap-0 rounded-[28px] bg-surface px-6 py-12 text-center ring-0">
+              <Companion size={92} />
+              <h2 className="type-title-2 mt-5">No keys yet</h2>
+              <p className="type-subhead mt-2 max-w-sm text-label-2">
+                Create a key for each app or agent that should use the router. Its secret is shown
+                once.
+              </p>
+            </Card>
           ) : (
             <KeyTable
               keys={keys}
@@ -419,11 +445,10 @@ export function AdminApp() {
                   conflict: false,
                 });
               }}
-              onRotate={(key) => setConfirm({ action: "rotate", key })}
-              onRevoke={(key) => setConfirm({ action: "revoke", key })}
             />
-          )
-        ) : (
+          )}
+        </TabsContent>
+        <TabsContent value="usage" className="mt-6">
           <UsageView
             keys={keys}
             query={usageQuery}
@@ -433,8 +458,13 @@ export function AdminApp() {
             onQuery={(next) => void changeUsageQuery(next)}
             onLoadMore={() => void loadMoreRequests()}
           />
-        )}
+        </TabsContent>
       </main>
+      {tab === "keys" ? (
+        <div className="fixed inset-x-0 bottom-0 z-20 bg-linear-to-t from-bg via-bg/90 to-transparent px-4 pt-6 pb-[max(1rem,var(--safe-bottom))] sm:hidden">
+          {createButton("w-full shadow-[var(--glass-shadow)]")}
+        </div>
+      ) : null}
       {editor ? (
         <KeyEditor
           mode={editor.mode}
@@ -450,37 +480,30 @@ export function AdminApp() {
             }
           }}
           onSubmit={() => void saveEditor()}
+          onRotate={confirmFromEditor("rotate")}
+          onRevoke={confirmFromEditor("revoke")}
         />
       ) : null}
       {confirm && confirmCopy ? (
-        <Dialog
-          open
+        <AdminSheet
           title={confirmCopy.title}
           description={confirmCopy.body}
           onClose={busy ? undefined : () => setConfirm(null)}
           footer={
             <>
-              <button
-                className="btn btn-secondary"
-                type="button"
-                disabled={busy}
-                onClick={() => setConfirm(null)}
-              >
+              <Button variant="secondary" disabled={busy} onClick={() => setConfirm(null)}>
                 Cancel
-              </button>
-              <button
-                className={confirmCopy.danger ? "btn btn-danger" : "btn btn-primary"}
-                type="button"
+              </Button>
+              <Button
+                variant={confirmCopy.danger ? "danger" : "default"}
                 disabled={busy}
                 onClick={() => void runConfirm()}
               >
                 {confirmCopy.action}
-              </button>
+              </Button>
             </>
           }
-        >
-          {null}
-        </Dialog>
+        />
       ) : null}
       {revealed ? (
         <SecretReveal
@@ -491,9 +514,12 @@ export function AdminApp() {
           }}
         />
       ) : null}
-    </div>
+    </Tabs>
   );
 }
+
+const tabClass =
+  "type-subhead h-full rounded-full px-4 font-semibold text-label-2 hover:text-label data-active:bg-raised data-active:text-label";
 
 function mergeKeys(current: PublicKey[], incoming: PublicKey[]): PublicKey[] {
   const seen = new Set<string>();
