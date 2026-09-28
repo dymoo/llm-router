@@ -105,6 +105,18 @@ describe("Gufo ProviderAdapter", () => {
     });
   });
 
+  it("reuses one runtime observation for a second", async () => {
+    let calls = 0;
+    const adapter = gufoAdapter(async () => {
+      calls += 1;
+      return Response.json({ contract_version: 1, accepting: { default: false, flex: false } });
+    });
+    const read = () => Effect.runPromise(adapter.readSaturation!(gufo, "fixture-key"));
+    assert.deepEqual(await read(), { verified: true, saturated: true });
+    assert.deepEqual(await read(), { verified: true, saturated: true });
+    assert.equal(calls, 1);
+  });
+
   it("sends batch work as flex and forwards the router request id", async () => {
     let seen: { body: Record<string, unknown>; requestId: string | null } | undefined;
     const adapter = gufoAdapter(async (_url, init) => {
@@ -425,6 +437,7 @@ describe("Gufo ProviderAdapter", () => {
         await assert.rejects(run, (error: unknown) => {
           assert.ok(error instanceof LocalOverloaded);
           assert.equal(error.retryAfterSeconds, 2);
+          assert.equal(error.flexRefused === true, code === "resource_unavailable");
           return true;
         });
       }

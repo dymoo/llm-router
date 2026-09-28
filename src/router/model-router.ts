@@ -847,8 +847,9 @@ function executeLocked(
               work,
             );
           };
-          if (mode.kind === "batch-local") {
-            // No spare capacity right now: the batch item stays queued.
+          if (mode.kind === "batch-local" && error.flexRefused === true) {
+            // No spare capacity right now: the batch item stays queued. A full
+            // queue or a draining runtime keeps the key's overload policy.
             reportRejected();
             return yield* new CapacityBusy({
               message: "local runtime has no spare capacity for batch work",

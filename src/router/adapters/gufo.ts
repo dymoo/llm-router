@@ -1,7 +1,7 @@
-import { Effect, Schema } from "effect";
+import { Clock, Effect, Schema } from "effect";
 import type { Deployment } from "../../domain.ts";
 import { LocalOverloaded, ProviderFailure } from "../../errors.ts";
-import { UNKNOWN_SATURATION } from "../locality.ts";
+import { UNKNOWN_SATURATION, type SaturationEvidence } from "../locality.ts";
 import type { AdapterRequest, ProviderAdapter } from "./types.ts";
 import {
   bearerHeaders,
@@ -19,6 +19,7 @@ const GufoChunk = Schema.Struct({ model: Schema.String, choices: Schema.Array(Sc
 const decodeGufoChunk = Schema.decodeUnknownSync(GufoChunk);
 const MAX_SSE_EVENT_BYTES = 256 * 1024;
 const GUFO_NO_QUEUE = { "X-Gufo-No-Queue": "1" };
+const SATURATION_TTL_MS = 1_000;
 
 const NamedTool = Schema.Struct({
   type: Schema.Literals(["function"]),
@@ -75,11 +76,13 @@ const fetchGufoResponse = Effect.fn("Gufo.fetchResponse")(function* (
         response.status === 429 &&
         text === "" &&
         new Headers(init.headers).get("X-Gufo-No-Queue") === "1";
+      let flexRefused = false;
       if (!queueRefusal) {
         try {
           const parsed: unknown = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
-          if (response.status === 429) decodeGufoQueueRefusal(parsed);
-          else decodeGufoDraining(parsed);
+          if (response.status === 429) {
+            flexRefused = decodeGufoQueueRefusal(parsed).error.code === "resource_unavailable";
+          } else decodeGufoDraining(parsed);
           queueRefusal = true;
         } catch {
           // An ambiguous 429/503 is a provider failure, not proof that Gufo refused admission.
@@ -92,6 +95,7 @@ const fetchGufoResponse = Effect.fn("Gufo.fetchResponse")(function* (
           message:
             response.status === 503 ? "Gufo is draining" : "Gufo declined admission before enqueue",
           retryAfterSeconds: Number.isSafeInteger(seconds) ? seconds : null,
+          ...(flexRefused ? { flexRefused } : {}),
         });
       }
     }
@@ -331,6 +335,9 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
 
   // Runtime evidence for locality spill: saturated when Gufo would refuse a
   // default-tier request. Unknown (not saturated) when the runtime cannot say.
+  // One observation per deployment serves for a second, so a slow Gufo adds
+  // at most one probe delay per second rather than one per request.
+  const observed = new Map<string, { readonly at: number; readonly value: SaturationEvidence }>();
   const readSaturation = Effect.fn("Gufo.readSaturation")(function* (
     deployment: Deployment,
     credential: string | undefined,
@@ -338,7 +345,10 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
     if (credential === undefined || credential.trim().length === 0 || /[\r\n]/.test(credential)) {
       return UNKNOWN_SATURATION;
     }
-    return yield* Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const cached = observed.get(deployment.id);
+    if (cached !== undefined && now - cached.at < SATURATION_TTL_MS) return cached.value;
+    const value = yield* Effect.gen(function* () {
       const response = yield* fetchResponse(
         fetchImpl,
         joinUrl(deployment.endpoint, "/v1/runtime"),
@@ -363,6 +373,8 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
       Effect.timeout("1500 millis"),
       Effect.catch(() => Effect.succeed(UNKNOWN_SATURATION)),
     );
+    observed.set(deployment.id, { at: yield* Clock.currentTimeMillis, value });
+    return value;
   });
   return { complete, stream, probeUnavailable, readSaturation };
 }
