@@ -142,14 +142,14 @@ describe("capacity", () => {
     next.release();
   });
 
-  it("spills to another eligible deployment only when allowed", async () => {
+  it("takes the first free deployment in the ranked order", async () => {
     const pool = createCapacityPool();
     const a = pool.tryAcquire(localQwen, "high");
     const b = pool.tryAcquire(localQwen, "high");
     assert.ok(a);
     assert.ok(b);
     const permit = await Effect.runPromise(
-      pool.acquire([localQwen, cloudGlm], "high", { requestId: "spill", waitMs: 0 }),
+      pool.acquire([localQwen, cloudGlm], "high", { requestId: "ranked", waitMs: 0 }),
     );
     assert.equal(permit.deploymentId, "cloud-glm");
     permit.release();
