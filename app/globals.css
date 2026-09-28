@@ -510,18 +510,18 @@ svg {
   border-bottom: 0;
 }
 
-.keys .name {
+:is(.keys, .card) .name {
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
-.keys .mono {
+:is(.keys, .card) .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.8125rem;
   color: var(--label-secondary);
 }
 
-.keys .muted {
+:is(.keys, .card) .muted {
   color: var(--label-secondary);
   font-size: 0.875rem;
 }
@@ -544,6 +544,14 @@ svg {
 
 .card:last-child {
   border-bottom: 0;
+}
+
+.card p {
+  margin: 0.35rem 0 0;
+}
+
+.card .row-actions {
+  margin-top: 0.5rem;
 }
 
 .card-head {
@@ -577,6 +585,8 @@ svg {
   z-index: 16;
   background: rgba(0, 0, 0, 0.4);
   display: grid;
+  /* A definite track, so the dialog's percentage width cannot grow with its content. */
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
     max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
@@ -597,7 +607,7 @@ svg {
 }
 
 .dialog h2 {
-  margin: 0 1.75rem 0.35rem 0;
+  margin: 0 4.5rem 0.35rem 0;
   font-size: 1.25rem;
   letter-spacing: -0.02em;
 }
@@ -789,12 +799,99 @@ details.advanced .form-grid {
   }
 }
 
+.table-wrap {
+  overflow-x: auto;
+}
+
 @media (max-width: 44rem) {
-  .table-wrap {
+  /* Tables with a card twin swap to it; the rest stay tables or stack. */
+  .table-wrap:has(+ .cards) {
     display: none;
   }
   .cards {
     display: block;
+  }
+
+  /* The header wraps to title + tabs, readiness, then actions, and scrolls away. */
+  .chrome {
+    position: static;
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+  }
+  .chrome h1 {
+    flex: 1;
+  }
+  .chrome-spacer {
+    display: none;
+  }
+  .chrome .health {
+    flex-basis: 100%;
+  }
+  .chrome .btn {
+    flex: 1;
+  }
+
+  /* Stacked tables: one block per row, each cell labelled by data-label. */
+  .stack thead {
+    display: none;
+  }
+  .stack,
+  .stack tbody,
+  .stack tr {
+    display: block;
+  }
+  .stack tr {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--separator);
+  }
+  .stack tr:last-child {
+    border-bottom: 0;
+  }
+  .stack td,
+  .stack tr:last-child td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-4);
+    min-height: 1.75rem;
+    padding: 0.15rem 0;
+    border: 0;
+    text-align: right;
+  }
+  .stack td[data-label]::before {
+    content: attr(data-label);
+    color: var(--label-tertiary);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: left;
+  }
+  .stack .btn-row {
+    min-height: 2.25rem;
+    padding: 0;
+  }
+
+  /* Dialogs become bottom sheets with their actions kept in reach. */
+  .scrim {
+    place-items: end center;
+    padding: max(2.5rem, env(safe-area-inset-top)) 0 0;
+  }
+  .dialog,
+  .dialog[data-size="lg"] {
+    width: 100%;
+    max-height: 100%;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    padding-bottom: 0;
+  }
+  .dialog-actions {
+    position: sticky;
+    bottom: 0;
+    margin: 1.25rem -1.25rem 0;
+    padding: 0.75rem 1.25rem max(0.75rem, env(safe-area-inset-bottom));
+    background: var(--bg-elevated);
+    border-top: 1px solid var(--separator);
+  }
+  .dialog-actions .btn {
+    flex: 1;
   }
 }
 
