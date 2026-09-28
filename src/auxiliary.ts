@@ -1,4 +1,5 @@
-import { Schema } from "effect";
+import { Predicate, Schema } from "effect";
+import { createDeadline } from "./deadline.ts";
 
 const Nonnegative = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0));
@@ -56,4 +57,36 @@ export function decodeAuxiliaryCatalogue(value: unknown): readonly AuxiliaryDepl
     ids.add(deployment.id);
   }
   return deployments;
+}
+
+/**
+ * Readiness: the deployment's `GET <endpoint>/models` lists its model. Kev on
+ * Gufo authenticates every route, so the probe sends the deployment's bearer.
+ */
+export async function probeAuxiliary(
+  deployment: AuxiliaryDeployment,
+  fetchImpl: typeof fetch = fetch,
+  credential: string | undefined = deployment.credentialEnvVar === undefined
+    ? undefined
+    : process.env[deployment.credentialEnvVar],
+): Promise<boolean> {
+  const deadline = createDeadline(2_000);
+  try {
+    const response = await fetchImpl(`${deployment.endpoint.replace(/\/$/, "")}/models`, {
+      redirect: "error",
+      signal: deadline.signal,
+      headers: credential ? { authorization: `Bearer ${credential}` } : {},
+    });
+    const body: unknown = await response.json();
+    return (
+      response.ok &&
+      Predicate.isObject(body) &&
+      Array.isArray(body.data) &&
+      body.data.some((item) => Predicate.isObject(item) && item.id === deployment.modelId)
+    );
+  } catch {
+    return false;
+  } finally {
+    deadline.clear();
+  }
 }

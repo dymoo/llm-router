@@ -6,7 +6,11 @@ import {
   auxiliaryResources,
   type AuxiliaryDeps,
 } from "../../src/http/auxiliary.ts";
-import { decodeAuxiliaryCatalogue, type AuxiliaryDeployment } from "../../src/auxiliary.ts";
+import {
+  decodeAuxiliaryCatalogue,
+  probeAuxiliary,
+  type AuxiliaryDeployment,
+} from "../../src/auxiliary.ts";
 import { memoryKeys, jsonRequest, samplePolicy, type MemoryKeys } from "./helpers.ts";
 
 const kev: AuxiliaryDeployment = {
@@ -179,4 +183,16 @@ test("auxiliary catalog rejects conflicting shared capacity and non-HTTP endpoin
     ]),
   );
   assert.throws(() => decodeAuxiliaryCatalogue([{ ...kev, endpoint: "file:///tmp/runtime" }]));
+});
+
+test("the readiness probe sends the deployment's bearer credential", async () => {
+  const seen: (string | null)[] = [];
+  const probe = (async (_url: string | URL, init?: RequestInit) => {
+    seen.push(new Headers(init?.headers).get("authorization"));
+    return new Response(JSON.stringify({ data: [{ id: kev.modelId }] }), { status: 200 });
+  }) as typeof fetch;
+  const withCredential = { ...kev, credentialEnvVar: "GUFO_TEST_KEY" };
+  assert.equal(await probeAuxiliary(withCredential, probe, "secret"), true);
+  assert.equal(await probeAuxiliary(kev, probe), true);
+  assert.deepEqual(seen, ["Bearer secret", null]);
 });

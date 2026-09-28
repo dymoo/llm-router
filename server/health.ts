@@ -1,8 +1,9 @@
 import "server-only";
-import { Effect, Predicate } from "effect";
+import { Effect } from "effect";
 import { getEnv, getProviderCredentials } from "../env.ts";
 import { createDeadline } from "../src/deadline.ts";
 import { RouterClassifier, type ClassifierHealth } from "../src/classifier.ts";
+import { probeAuxiliary } from "../src/auxiliary.ts";
 import { deploymentIsPlaceholder } from "../src/domain.ts";
 import { createHealthMonitor } from "../src/health.ts";
 import type { DeploymentHealth } from "../src/http/contracts.ts";
@@ -98,24 +99,7 @@ async function deployments(): Promise<DeploymentHealth[]> {
   );
   const auxiliary = await Promise.all(
     configuredAuxiliaryDeployments().map(async (deployment): Promise<DeploymentHealth> => {
-      let ready = false;
-      try {
-        ready = await boundedFetch(
-          `${deployment.endpoint.replace(/\/$/, "")}/models`,
-          undefined,
-          async (response) => {
-            const body: unknown = await response.json();
-            return (
-              response.ok &&
-              Predicate.isObject(body) &&
-              Array.isArray(body.data) &&
-              body.data.some((item) => Predicate.isObject(item) && item.id === deployment.modelId)
-            );
-          },
-        );
-      } catch {
-        ready = false;
-      }
+      const ready = await probeAuxiliary(deployment);
       return {
         id: deployment.id,
         ready,
