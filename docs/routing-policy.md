@@ -26,7 +26,7 @@ A Key's policy is the whole routing configuration:
 - **cloud** lets high and medium work leave Gufo for the first eligible cloud deployment. It may incur provider charges; nothing else does.
 - **requestsPerMinute** and **maxConcurrent** are admission limits (integers ≥ 0; 0 admits nothing).
 
-The admin API rejects any other policy field. Stored policies from before migration 0006 are rewritten by it (`cloud = overloadAction == "failover"`, the rest dropped), and an unmigrated row is read the same way.
+The admin API rejects any other policy field. Stored policies from before migration 0007 are rewritten by it (`cloud = overloadAction == "failover"`, the rest dropped), and an unmigrated row is read the same way.
 
 Suggestions (every field editable): **Interactive** `{high, cloud, 120 rpm, 4 concurrent}`, **Standard** `{medium, no cloud, 60 rpm, 2}`, **Background** `{low, no cloud, 30 rpm, 2}`.
 

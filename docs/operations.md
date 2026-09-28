@@ -39,7 +39,7 @@ Restore quarantines batch state; an ordinary restart does not. On a normal resta
 
 Batch content is backed up separately, or not at all. `backup.mjs` copies only `control.sqlite`: the sensitive content store (request bodies and result rows under `dirname(SQLITE_PATH)/batch-content`, or `BATCH_RESULTS_DIR`) lives outside the database, is bounded by the 24-hour post-terminal TTL and the per-job/per-key budgets, and is never silently added to metadata backups. To keep it deliberately, copy the directory separately with its own retention — ad-hoc copies must not outlive the TTL bounds that keep this store short-lived.
 
-Sessions do not survive a restart or restore; the next turn just routes normally. Migration 6 rewrites every stored key policy to `{ priority, cloud, requestsPerMinute, maxConcurrent }` with `cloud` true exactly where `overloadAction` was `failover`. Abandoned leases recover through the normal repository maintenance/admission path.
+Sessions do not survive a restart or restore; the next turn just routes normally. Migration 7 rewrites every stored key policy to `{ priority, cloud, requestsPerMinute, maxConcurrent }` with `cloud` true exactly where `overloadAction` was `failover`. Abandoned leases recover through the normal repository maintenance/admission path.
 
 ## Automatic redeploys
 
