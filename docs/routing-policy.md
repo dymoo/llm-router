@@ -1,187 +1,93 @@
 # Routing policy
 
-Normative product policy for dymoo/llm-router. The decisions below supersede conflicting controls in the original model-router handoff. Numeric defaults are editable suggestions, not measured optima, SLAs or calibrated success probabilities.
-
-Stack (given, not re-argued here): Effect 4 RC, Drizzle on SQLite, Next.js, T3 Env for typed configuration. Topology, env names, backup, and drain live in operator docs — do not copy them here.
+Normative product policy for dymoo/llm-router. The Router serves one local GPU runtime (Gufo, transport `gufo`) and one cloud tier (OpenRouter, transport `openrouter`); `openai-compatible` stays as a generic local escape hatch. Numeric defaults are named constants, not measured optima or SLAs.
 
 - Topology, accounting retention, timeouts: [operations.md](operations.md)
 - Env, bind, proxy-gated console: [setup.md](setup.md)
 - Open WebUI and System One: [ai-hub.md](ai-hub.md)
 - Live catalogue facts: [catalogue.md](catalogue.md)
-- Session metadata for coding agents: [clients.md](clients.md)
+- Client requests, sessions and effort: [clients.md](clients.md)
 - Domain language: [../CONTEXT.md](../CONTEXT.md)
-- Shape decisions: [adr/0001-assessment-versus-deterministic-routing.md](adr/0001-assessment-versus-deterministic-routing.md), [adr/0002-separate-runtime-deployment-and-licensing.md](adr/0002-separate-runtime-deployment-and-licensing.md), [adr/0003-metadata-analytics-without-transcripts.md](adr/0003-metadata-analytics-without-transcripts.md)
 
-## Authority and superseded handoff controls
+## Key policy
 
-| Status         | Control                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **In force**   | Explicit classifier-free Rules mode or qualified Kev/Jev assessment followed by deterministic chat routing; locality bias `[0,1]`; high/medium/low priority, with low keys on Gufo flex; hard limits; pinned task continuations; tenant-scoped exact classifier cache in assessed modes; explicit briefs without silent truncation; no classifier fallback; internal admin gated by an authenticating proxy; metadata-only accounting/analytics; Gufo as the local runtime; Open WebUI routes through the gateway.                                                                                                                                                                                                                     |
-| **Superseded** | Mandatory admin login / `admin_sessions`; optional admin Basic auth; priority `interactive \| background`; privacy `local-only \| cloud-allowed`; `routingPreference`; binary `allowCloudOverflow`; silent cloud spill; silent classifier fallback; silent classifier truncation; sample catalogue numbers as measurements; automatic paid classifier fallback; counters-only admin; treating HTTP 200 as task success; collecting chat transcripts by default; selectable local runtime adapters and Compose runtime profiles; a separate local classifier service; embeddings and transcription endpoints; omitting `usage.cost` on local; treating local API price 0 as COGS zero; inventing zero for unknown token counts or rates |
+A Key's policy is the whole routing configuration:
 
-The handoff remains useful for stack intent, reservation-through-execution, and “do not invent live model ids.” It is not authority for the superseded rows.
+```ts
+{
+  priority: "high" | "medium" | "low";
+  cloud: boolean;
+  requestsPerMinute: number;
+  maxConcurrent: number;
+}
+```
 
-## Hard constraints
+- **priority** sets the tier and queue order (below).
+- **cloud** lets high and medium work leave Gufo for the first eligible cloud deployment. It may incur provider charges; nothing else does.
+- **requestsPerMinute** and **maxConcurrent** are admission limits (integers ≥ 0; 0 admits nothing).
 
-A candidate is ineligible unless it satisfies **all** of:
+The admin API rejects any other policy field. Stored policies from before migration 0006 are rewritten by it (`cloud = overloadAction == "failover"`, the rest dropped), and an unmigrated row is read the same way.
 
-- Key allowlist (empty list denies all; unset means every configured deployment, including ones added later)
-- Key and deployment context / completion limits (input plus generation allowance must fit **both**)
-- Required capabilities (tools, JSON, vision) and supported reasoning
-- Configured minimum quality / health — when those fields are present and verified
-- `maxEstimatedUsd` when set (cold-cache, max-generation **estimate**, not an invoice cap; excludes classifier and tool charges)
+Suggestions (every field editable): **Interactive** `{high, cloud, 120 rpm, 4 concurrent}`, **Standard** `{medium, no cloud, 60 rpm, 2}`, **Background** `{low, no cloud, 30 rpm, 2}`.
 
-Locality bias, cost/quality/latency weights, and priority **cannot** compensate a failed hard constraint. If nothing is eligible, fail explicitly. Do not downgrade quality, widen a budget, or change locality to invent a candidate.
+## Eligibility
 
-## Locality bias
+A deployment could ever serve a request when it has the required capabilities (tools, JSON, vision) and the request fits its context (input estimate plus any requested `max_completion_tokens`) and output limit. A deployment is available now when its credential is configured and its health probe passes. A request no deployment the key may use could ever serve fails **422 `no_eligible_model`**; nothing is widened to invent a candidate.
 
-Per-key slider in `[0, 1]`. Preference, not a percentage of traffic, not a privacy mode, not a location lock.
+## Default tier: high and medium
 
-| Region                           | Intent                                                                                                                                        |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| **0 (less local / cloud-first)** | Complexity may escalate to cloud. Local stays eligible when it meets hard limits.                                                             |
-| **Intermediate**                 | Prefer local. Highly complex work may still use cloud. Verified saturation may also use cloud.                                                |
-| **1 (maximum local)**            | Stay local until **verified saturation**. Complexity alone does not escalate. Gateway permit counts and unknown telemetry are not saturation. |
+`POST /v1/chat/completions` with `model: "auto"`:
 
-Live UI copy must describe the current value (slider plus sentence), not a hidden enum. Escalation still waits for a **checkpoint** on an existing Session; `continue` does not silently migrate.
+1. **Gufo first.** Take a Router permit on an eligible, available local deployment and dispatch with `X-Gufo-No-Queue`. A deployment's `reservedInteractiveSlots` keep permits for **high** keys only; queue order is high, then medium, non-preemptive.
+2. **Wait, within a budget.** Wait for a permit, and retry Gufo's pre-enqueue refusals (429 `queue_full` / `client_queue_full`, 503 `draining`) after their `Retry-After` (floor 250 ms), for at most **5 s (high) / 30 s (medium)** (`LOCAL_WAIT_MS`). A refusal whose `Retry-After` ends past the budget stops the wait at once.
+3. **Then cloud, or report.** If local is unavailable (down, or cannot serve this request) or the wait runs out: with `cloud: true`, dispatch to the first eligible cloud deployment (waiting for its permit only within what remains of the budget); otherwise fail **503 `local_overloaded`** with `Retry-After` (Gufo's, else 1 s).
 
-## Priority and queues
+Nothing is retried after a provider may have started work: an ambiguous provider failure is `502 provider_failure`.
 
-Admission and wait order is **high, then medium, then low**. Non-preemptive: in-flight work is not cancelled for a higher key. A deployment's `reservedInteractiveSlots` keep that many permits for **high** keys only — see [operations.md](operations.md).
+## Flex tier: low, or `service_tier: "flex"`
 
-Priority also sets the Gufo service tier (Gufo `docs/ROUTER.md`):
+Low keys always run as flex; any key may ask for it per request. Flex is **local only, never cloud**, whatever `cloud` says.
 
-| Priority     | Tier     | Behaviour                                                                                                                                                                                                                                                     |
-| ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| high, medium | default  | Router permits and queue; overload per `overloadAction`                                                                                                                                                                                                       |
-| low          | **flex** | Idle local compute only. Gufo refuses flex while default work is queued or prefilling; the Router retries after its `Retry-After` until `maxWaitMs`, then returns 429 `resource_unavailable`. Never spills or fails over to cloud, whatever the locality bias |
+- Requests wait in a Router-side **FIFO flex queue per deployment**. At most `flex_limit` of them hold a slot and may be dispatched to Gufo at once, where `flex_limit` is Gufo's `GET /v1/runtime` `sessions.flex_limit` (cached 30 s; `DEFAULT_FLEX_LIMIT` = 2 when unknown).
+- The slot holder sends `service_tier: "flex"`. On Gufo's 429 `resource_unavailable` it keeps its slot, waits `Retry-After` (floor 250 ms) and retries, so waiting requests never all poll Gufo.
+- The wait is capped at **10 minutes** (`FLEX_MAX_WAIT_MS`, under the 11-minute gateway deadline); then **429 `resource_unavailable`** with `Retry-After`. A flex request no local deployment could ever serve fails 422 `no_eligible_model`.
 
-Any key can ask for flex per request with `service_tier: "flex"`; a low key cannot ask for more. Gufo measured flex as a trickle beside agent load, so keep medium for work that must finish while the machine is busy, and low for work that can wait for idle time. Deferred bulk work belongs on `/v1/batches`.
+## Streams
 
-Work waiting for local capacity must surface a **visible queued notice** to the client. It must not silently spill to cloud.
+Every tier takes the same streaming path: HTTP 200 is committed at once, `event: router.queue` notices and keepalives flow while the request waits, and a failure before provider output is a terminal `event: router.error` (with `retry_after_seconds` for `local_overloaded` and `resource_unavailable`). After provider output starts, a failure aborts the stream.
 
-Do not claim a per-stream TPS floor or a measured host throughput. Those are unverified on this hardware.
+## Sessions
 
-## Local overload action
+Best-effort stickiness, never an error. A session id comes from `routing.sessionId` or the Open WebUI `X-OpenWebUI-Chat-Id` header (namespaced `webui:`); `routing.boundary`, `taskBrief` and `qualityOverride` are accepted and ignored. Per key and session (bounded LRU, 30-minute TTL) the Router remembers the deployment the last turn ran on and tries it first next turn when it is still eligible and the key may use it (cloud requires `cloud: true`). A missing, expired or ineligible entry just routes normally.
 
-Local overload is an admission observation, **not Verified saturation**: no immediately available Router-owned permit for any Key-eligible local Deployment, or a definitive local runtime pre-execution rejection (Gufo HTTP 429 `queue_full`, `client_queue_full` or `resource_unavailable`, or HTTP 503 `draining`). Verified saturation from Gufo is its `GET /v1/runtime` report that a default request could not start now (`accepting.default: false`); an unreadable or unknown-version report is unknown, not saturation. Gateway permit counts alone do not prove the runtime is saturated. Unknown health and uncertain provider failures are not local overload evidence.
+## Reasoning effort
 
-Each Key has an editable overloadAction, persisted with its policy. Missing values on historical policies and all suggestions default to report. A full-policy PATCH from an older client that omits the field preserves the stored action. No paid cloud dispatch is enabled by this default.
+The standard `reasoning_effort` (`none | minimal | low | medium | high | xhigh`; `minimal` is `low`) passes through, mapped onto the chosen deployment's supported levels (next supported level up, else the highest). Absent, each deployment runs its cheapest level: off when supported, else its lowest graded level, or mandatory thinking `on`. A deployment that cannot think runs without.
 
-- **report**: retain the Key's local capacity wait up to maxWaitMs, then return local_overloaded: HTTP 503 with Retry-After for non-streaming requests, or a terminal SSE `router.error` event with `retry_after_seconds` for streams (their 200 SSE headers are already committed).
-- **failover**: while still **before provider dispatch**, switch only to an already eligible cloud Deployment. Key allowlist, required capabilities, context/completion limits, credential availability, and maxEstimatedUsd with usable pricing still apply. If none qualifies, report local overload instead; never waive limits or infer a price of zero.
+## Batch
 
-This action is separate from continuous Locality bias and must not turn incidental capacity into Verified saturation or alter locality-biased ranking spill. Never replay after uncertain provider contact. A pinned continue request does not silently migrate; only the existing safe-boundary rules permit switching. Operators must opt in to cloud failover per Key and understand it may incur provider charges.
+`/v1/batches` items run locally as flex, only while no interactive work runs. Undispatched items spill to OpenRouter Batch only when the submitting key has `cloud: true` (after `CLOUD_SPILL_DELAY_MS`, one hour, or at once when local can never serve them or Gufo is down, full or draining). Other jobs wait for local capacity until their 24-hour window expires. See [batch.md](batch.md#spill-rule).
 
-## Policy suggestions
+## System One
 
-Every field is editable. Biases and locality use sliders with live descriptions. Names are starting points for Dylan’s keys, a balanced key, and a cheap background key — not locked profiles.
-
-| Suggestion    | Priority | Ranking intent                | Locality intent                                                    | Queue                                 |
-| ------------- | -------- | ----------------------------- | ------------------------------------------------------------------ | ------------------------------------- |
-| Dylan         | high     | Quality-biased; usually cloud | Low locality bias; complexity may escalate                         | Does not sit behind low work          |
-| Balanced      | medium   | Cost-biased; usually local    | Mid-high locality; complexity or verified saturation may use cloud | After high                            |
-| Free Vibecode | low      | Strong cost                   | Local idle compute only (flex)                                     | Up to 30 s for idle compute, then 429 |
-
-Context, completion, RPM, concurrency, wait, allowlist, and `maxEstimatedUsd` remain operator-chosen. Earlier handoff tables (65k/131k/32k caps, 0.6/0.7 cost weights, `interactive`/`background`) are **not** mandatory. Relative intent stands: Dylan may receive a larger allowance than Free Vibecode; no number here is a tokenizer proof that a deployment can accept that cap.
-
-## Rules mode
-
-With `CLASSIFIER_MODE=rules`, the existing selection, reservation and dispatch path runs **without an Assessment**. No Kev/Jev client is constructed, no classifier endpoint/key is needed, and qualification files are neither loaded nor consulted (including admin analytics). This is an explicit mode, never an automatic fallback from an unqualified classifier.
-
-1. Hard eligibility still checks the Key allowlist, tools/JSON/vision requirements, input estimate **plus the full requested completion allowance**, Key/deployment context and output caps, usable credentials, health, and cold-cache generation estimate against `maxEstimatedUsd`. Unknown pricing cannot satisfy an estimate ceiling; it is not zero. A local deployment with unknown prices remains eligible when no ceiling is set.
-2. Among eligible deployments, locality orders first: bias **at least 0.5 prefers local**, below 0.5 prefers cloud, matching the existing locality preference seam. Within that location, existing cost/latency weights order candidates, with deployment ID as the stable final tie-break. There is no task-quality, difficulty, complexity-escalation, retrieval or expected-length judgment to invent. Output estimates use the full completion allowance. Quality bias and a highest-quality override cannot synthesize a task-quality signal.
-3. For local-preferring Keys, busy locals retain `overloadAction`: **report** waits up to `maxWaitMs` then returns `local_overloaded`; **failover** tries eligible local permits first, then eligible cloud before dispatch. Definitive Gufo pre-enqueue/fast rejections keep the same behavior. An uncertain provider failure is never replayed.
-4. A **down/unhealthy local that could otherwise serve this request** follows the same action. **report** immediately returns `local_overloaded` (HTTP 503 or terminal SSE `router.error`) without waiting `maxWaitMs` and without a paid-cloud call. **failover** can choose eligible cloud before dispatch. The existing bounded wire code is reused; the decision detail `local-unavailable` distinguishes downtime from exhausted permits. This covers Gufo’s planned 75–90 minute performance-test windows with :8000 down. A cloud-first Key can still choose cloud by preference, not because local is down.
-5. If no local can satisfy the request’s non-health constraints (e.g. too large, missing a capability, or missing required credentials), use eligible cloud **regardless of overloadAction**, even at locality 1. Missing credentials are hard ineligibility, not evidence of runtime downtime; without an eligible cloud return `no_eligible_model`, not local overload. Key-level invalid limits and an empty allowlist retain their existing explicit errors. Health is considered after the other candidate constraints, so a down local that could never fit cannot block this cloud route.
-6. Apply each deployment’s **lowest supported reasoning effort**: none/off when supported (Gufo maps `none` to `off`), otherwise the lowest graded level, or mandatory thinking `on`. No difficulty or task value is fabricated. Continuations retain the pin, including thinking-off; checkpoint hysteresis and safe-boundary switching remain in force. A down pinned local is reported rather than silently migrated, even for a failover Key.
-7. Capacity ownership through streaming, interactive priority and deferred batch admission remain shared. Batch items use the same Rules selection seam, not synchronous cloud dispatch. Before the batch spill deadline, local downtime/pre-enqueue overload may accelerate **remote batch** planning only for `overloadAction=failover` and a configured batch spill port. The batch-only catalogue, key allowlist/capability/context/credential/spend filters and pre-submit key recheck still apply; report keys do not spill merely because local is down. The ordinary deadline-driven batch spill policy remains separate. See [batch.md](batch.md#spill-rule).
-
-Fresh Rules decisions use bounded reason/selection code `deterministic-rules`; overload/failover keep their existing operational codes. Accounting records `classifierBackend: null`, no invented task/difficulty/confidence, no classifier usage, and no classifier-cache reuse (null; continuations still report session reuse). Deployment accounting and cache evidence remain unchanged.
-
-## Classification (Kev/Jev modes)
-
-- **Chat in assessed modes:** assess, then apply deterministic policy. This is not a fallback after a classifier-owned route. `/v1/systemone` requests name their deployment and are not assessed. A bounded Choice over already-filtered chat deployments remains a documented alternative, not the implemented design — [jev-routing.md](research/jev-routing.md).
-- Assess a **Task** at `new-task` / `checkpoint`. Tool-result turns of the same Task use `continue` and reuse the Assessment.
-- Classifier caching is exact, tenant-scoped and completed-result only: key + backend/model revision + question schema + state/brief + catalogue version. No fuzzy matching or in-flight coalescing.
-- Reuse stored judgments across locality/cost/quality **slider** edits when the brief, evidence, and question meanings are unchanged. Do not put slider weights into question text.
-- Include a semantic quality rubric in questions **only** when it changes meaning. Do not send mutable wait, load, or price text into classifier state for arithmetic — policy does that math.
-- Short work may be classified from the real input. Long work needs an explicit compact **task brief** plus non-secret metadata (size, tools, turns). The generation prompt is never shortened to feed the Classifier.
-- **Loss-awareness:** if neither the input nor the brief fits the selected Classifier (tokens, including question overhead), return an explicit context/brief error. Never silently truncate, guess a Route, or call the other Classifier.
-- **Kev:** the same TypeSafe System One client as Jev, pointed at the Kev deployment in the auxiliary catalogue (its endpoint and `GUFO_API_KEY`, model `kev-latest`). Kev and Jev give different probabilities for the same question, so each needs its own qualification record.
-- **Jev:** this product’s explicit selection bound for the brief is **32k** tokens. Official Jev documents a 64k total / 32k state+longest-question split, sourced in [jev-routing.md](research/jev-routing.md) and not re-measured here. Never silently shrink a larger brief. Cookbook cost/latency figures in that file are published examples, not this host.
-- `CLASSIFIER_MODE` is explicitly `rules`, `kev` or `jev`; production runs `rules`. Kev/Jev retain their qualification gate. Neither classifier mode falls back to Rules or to the other classifier on failure.
-
-Assessment confidence is concentration of the classifier’s output distribution, not the probability that generation will succeed.
-
-## Affinity versus three reuse signals
-
-These are different facts. Analytics and COGS must not collapse them.
-
-| Signal                     | What it is                                                             |
-| -------------------------- | ---------------------------------------------------------------------- |
-| **Cache hit**              | Observed cached **input tokens** on the generator, deployment-specific |
-| **Classifier exact cache** | Same Assessment reused for the same key/backend/schema/state/catalogue |
-| **Session reuse**          | `continue` from a pin; affinity only                                   |
-
-A pin, a repeated prompt, or a provider restriction is not a generation cache hit and must not apply a cached-input price. Deliberate migration at a checkpoint should expect a cold prefill.
+`/v1/systemone` passes each request to the named Kev or Jev deployment. Any key may use the configured deployments; priority orders its queue, which waits up to the high or medium budget.
 
 ## COGS and completeness
 
-Track per key, priority, and deployment, without storing prompts. Responses expose OpenRouter-compatible `usage.cost` on **both** non-stream completions and the **final** streaming usage. Official nested field schema is owned/verified with the HTTP path — this file does not invent extra usage keys.
+Responses expose OpenRouter-compatible `usage.cost` on non-stream completions and the final streaming usage.
 
-| Kind               | Meaning                                                                                                                                                                                 |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Actual (cloud)     | Provider-reported `usage.cost` and token fields, **passed through**                                                                                                                     |
-| Accounting (local) | Internal cost from configured per-deployment **input / cached-input / output** rates × observed tokens. Zero external API bill does **not** omit the field. This is **not** an invoice. |
-| Estimate           | Catalogue prices × estimated tokens, with provenance, used for ranking/`maxEstimatedUsd`                                                                                                |
-| Unknown            | Missing, cancelled, incomplete, or missing rates — **never coerce to zero**                                                                                                             |
+| Kind               | Meaning                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------ |
+| Actual (cloud)     | Provider-reported `usage.cost` and token fields, passed through                                  |
+| Accounting (local) | Configured per-deployment input / cached-input / output rates × observed tokens. Not an invoice. |
+| Unknown            | Missing, cancelled, incomplete, or missing rates: **never coerced to zero**                      |
 
-Preserve prompt, completion, cached-input, and reasoning **counts**. Do **not** add reasoning tokens twice (once as reasoning and again as completion) when computing accounting cost.
-
-A pin is not a cache hit and must not apply the cached-input rate. Local catalogue API price 0 is not COGS unless the operator set explicit local rates. `maxEstimatedUsd` is not a monthly budget. Classifier charges, tools, and unmodelled fees are out of generation `usage.cost` unless separately recorded.
+Preserve prompt, completion, cached-input and reasoning counts; never count reasoning tokens twice. A session pin is not a cache hit and never applies the cached-input rate.
 
 ## Analytics
 
-Analytics is a first-class console surface backed by bounded SQL aggregates and paginated metadata. Its date/key/priority/deployment filters apply to both totals and request drilldown.
-
-**Now (metadata only — no transcripts):**
-
-- Time trends and breakdowns by key, priority, and deployment
-- COGS reported vs estimated vs unknown
-- Local vs cloud share
-- Observed cached input tokens vs classifier exact cache vs session reuse
-- Policy decision reasons and candidate exclusions
-- Complexity and effort distributions
-- Queue wait, TTFT, decode TPS, and end-to-end latency when observed
-- Error, cancel, and saturation counts
-- Request **metadata** drilldown (ids, route, timings, usage fields — not prompt text)
-
-Missing timings stay unknown. Do not invent TPS from catalogue placeholders. HTTP success is not task success.
-
-**Not now:**
-
-- Full chat / transcript logging
-- A task-success classifier or paid evaluator
-
-**Later, explicitly opt-in roadmap** (do not build as defaults):
-
-- Full capture is sensitive. If added, it requires per-key opt-in, access control, retention, redaction, and a storage budget.
-- A later evaluator, if any, is async, sampled, and deduplicated, with **separate spend** from inference. No paid evaluator calls on the default path.
-- Distinguish **observed** test/tool outcomes from **model judgments**. Neither is HTTP 200.
+Metadata only, no transcripts: time trends and breakdowns by key, priority and deployment; COGS reported vs unknown; local vs cloud share; decision reasons; queue wait, TTFT, decode TPS and latency when observed; error and cancel counts; paginated request drilldown. Classifier and assessment fields remain in the response shapes for historical rows and are null or empty for new ones. HTTP success is not task success.
 
 ## Admin access
 
-The console is internal. There is **no login form and no admin session**. Reachability of the bound address is admin access, so deployments gate the console at the proxy (Authentik forward auth in front of everything except `/v1` and `/health`). See [setup.md](setup.md).
-
-- Inference keeps `jrv_` API keys. Keys never authorize administration.
-- Mutations still require the exact `APP_ORIGIN` and the existing same-origin admin header. That check is not a login.
-
-Default bind is loopback. LAN bind is a deliberate exposure of administration.
-
-## Runtime assumptions (unverified here)
-
-- **Gufo is the local runtime.** It is the owner's private GPU inference server, reached over HTTP with a bearer key and operated outside this repository. The generic `openai-compatible` transport remains for another local OpenAI server. [ADR 0002](adr/0002-separate-runtime-deployment-and-licensing.md) records the earlier adapter-choice design and is superseded.
-- Cloud chat is explicitly OpenRouter `z-ai/glm-5.3-flash`, with the selected endpoint and dated prices in [catalogue.md](catalogue.md). Public metadata was checked; paid generation and backend-specific graded effort were not. Binary thinking reports applied `on` truthfully.
-- Sample quality, latency, and `tokensPerSecond` values are not measurements.
-- Decode TPS and TTFT in analytics are observed request fields when present, not host benchmarks.
+The console is internal: no login form and no admin session. Deployments gate it at the proxy (forward auth in front of everything except `/v1` and `/health`), see [setup.md](setup.md). Inference keeps `jrv_` API keys, which never authorize administration. Mutations require the exact `APP_ORIGIN` and the same-origin admin header.

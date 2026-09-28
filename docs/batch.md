@@ -1,8 +1,8 @@
 # Batch
 
-Low-priority async chat: submit a job, let it run on idle local hardware first, and — only if it has not dispatched by its spill deadline — let undispatched items fall to the pinned OpenRouter Batch path. Batch is **our own compute spilling to our own OpenRouter account**, never a relayed or resold API (see [ToS posture](#tos-posture)). Domain terms: [../CONTEXT.md](../CONTEXT.md) "Batch". The result-retention exception to the metadata-only rule is [adr/0004](adr/0004_batch_result_holding.md).
+Low-priority async chat: submit a job, let it run on idle local hardware first, and — only for a key with `cloud: true`, and only if it has not dispatched by its spill deadline — let undispatched items fall to the pinned OpenRouter Batch path. Batch is **our own compute spilling to our own OpenRouter account**, never a relayed or resold API (see [ToS posture](#tos-posture)). Domain terms: [../CONTEXT.md](../CONTEXT.md) "Batch". The result-retention exception to the metadata-only rule is [adr/0004](adr/0004_batch_result_holding.md).
 
-Policy authority for locality, priority and hard limits: [routing-policy.md](routing-policy.md). Nothing here weakens the fail-closed classifier qualification gate, key policy, or `maxEstimatedUsd` behaviour.
+Policy authority for priority and the cloud switch: [routing-policy.md](routing-policy.md). Nothing here weakens key policy.
 
 ## Endpoints
 
@@ -88,8 +88,8 @@ Success is `202 Accepted` with the batch object:
 
 `id` is `batch_` + uuid. `created_at`/`finalized_at`/`local_wait_until`/`deadline_at` are Unix seconds. `endpoint` is always `/v1/chat/completions` (chat only). `completion_window` is always `"24h"` — the only value upstream accepts, and it is the **provider's** window measured from _upstream_ submission, not from our POST. Two gateway-owned clocks make that explicit:
 
-- **`local_wait_until`** = `spillAt` — the end of the local-first window (see [spill rule](#spill-rule)); before this instant only the explicit hard-ineligibility or opted-in overload exceptions below can leave for the provider.
-- **`deadline_at`** = `spillAt + completionWindowMs` (= `spillAt + 24h` for this single window) — our completion deadline for the job: local-first window plus provider window, so wall-clock from our POST can reach **~48 h**. The scheduler never expires a remote attempt at `created_at + 24h` while the provider legitimately still runs inside its own window.
+- **`local_wait_until`** = `spillAt` for a cloud key's job — the end of the local-first window (see [spill rule](#spill-rule)); before this instant only the local-ineligibility or overload exceptions below can leave for the provider. A local-only job reports `deadline_at` here: it waits locally for its whole window.
+- **`deadline_at`** = `spillAt + completionWindowMs` (= `spillAt + 24h` for this single window) — our completion deadline for the job: for a cloud key the local-first hour plus the provider window (~25 h from our POST), for a local-only job 24 h from our POST. The scheduler never expires a remote attempt at `created_at + 24h` while the provider legitimately still runs inside its own window.
 
 Expiry (`expired` status) is judged against `deadline_at`. Result retention is a **separate** 24 h clock that starts only once the job reaches a terminal status — it is not this deadline and not the provider's 30-day upstream retention.
 
@@ -110,7 +110,7 @@ Per-item failures — **only** for items with valid identity but an invalid body
 | `messages` missing or empty                    | `messages_invalid`                |
 | `max_tokens < 1`                               | `max_tokens_invalid`              |
 
-The effective model stays uniform because one job is one model; a multi-model fan-out needs one job per model. Top-level `model` accepts `"auto"` (our routed choice — the router picks) or a model slug; **slugs never bypass key allowlists, which are enforced at dispatch**. Exceeding the in-flight-job cap (≥ 4 non-terminal jobs for the key) is `409 conflict` — nothing accepted until an earlier job terminates.
+The effective model stays uniform because one job is one model; a multi-model fan-out needs one job per model. Top-level `model` accepts `"auto"` (our routed choice — the router picks) or a deployment id; an id no batch deployment serves fails at dispatch with `no_eligible_model`. Exceeding the in-flight-job cap (≥ 4 non-terminal jobs for the key) is `409 conflict` — nothing accepted until an earlier job terminates.
 
 Accepted-work edges — an accepted job is **never reported as `500`**: once create succeeds, **any** post-create persistence failure still returns `202` with the durable batch object showing `"status": "failed"`, a contractual `error.code`, and `request_counts.failed` counting every item — durable record first, reason readable via `GET`. Known codes: `input_store_rejected` (durable input store rejects the bodies — validation/cap/budget/ownership checks are all-or-nothing before any write; a mid-loop I/O failure leaves only fully-written files, never a torn one, and the handler purges that accounted prefix) and `result_rows_rejected` (the result store fails to persist pre-failed error rows after create). The observable invariant on either failure class is: **`202`, `status: "failed"`, store empty** — no partial rows, no orphan inputs; the purge itself is idempotent and file-level only, never touching the ledger. A failed scheduler nudge likewise still returns `202` — acceptance is state, not dispatch.
 
@@ -249,28 +249,24 @@ Divergence: OpenRouter's `DELETE` is a terminal-only purge — in-flight returns
 Batch never competes with interactive work. Concretely:
 
 - Items dispatch **only when the interactive capacity queues (high/medium/low) are empty and a permit is free**. Batch is last in line by construction, not by a priority value.
-- At dispatch, an item is an **ordinary routed request**: it admits through KeyService, gets a per-item Assessment (the existing fail-closed qualification gate; the exact classifier cache dedupes identical states), routes deterministically through the ModelRouter, and finalizes into the requests ledger with its `requestId`/`deploymentId`.
+- At dispatch, an item is an **ordinary routed request**: it admits through KeyService, routes through the ModelRouter, and finalizes into the requests ledger with its `requestId`/`deploymentId`.
 - **Once dispatched, non-preemptive**: neither `DELETE`, expiry, nor a higher-priority arrival takes an in-flight item away.
-- **On Gufo, items run as `service_tier: "flex"`**: Gufo admits them only when it has idle compute (a free session, no default request queued or prefilling, and fewer than its `--flex-sessions` flex requests running), which Router permits cannot see (direct clients share the runtime). A flex refusal (HTTP 429 `resource_unavailable`) is `CapacityBusy`: the item returns to `queued` and is retried on a later tick, not failed.
+- **On Gufo, items run as `service_tier: "flex"`**: Gufo admits them only when it has idle compute (a free session, no default request queued or prefilling, and fewer than its `--flex-sessions` flex requests running), which Router permits cannot see (direct clients share the runtime). A flex refusal (HTTP 429 `resource_unavailable`) is `CapacityBusy`: the item returns to `queued` and is retried on a later tick, not failed. A down, full or draining Gufo does the same for a key without `cloud`.
 
 ### Spill rule
 
-Each job carries a computed spill deadline:
+Each job records, at submit, whether its key had `cloud: true`, and a spill deadline:
 
-$$\texttt{spillAt} = \texttt{createdAt} + \operatorname{clamp}\big(24\text{h} \times \texttt{localityBias},\ 5\text{min},\ 23\text{h}55\text{m}\big)$$
+| Key policy     | `spillAt`                                  | Behaviour                                                                               |
+| -------------- | ------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `cloud: true`  | `createdAt + 1 h` (`CLOUD_SPILL_DELAY_MS`) | Local-first for an hour, then undispatched items may spill                              |
+| `cloud: false` | `createdAt`                                | Never spills: items wait for local capacity until the job expires at `createdAt + 24 h` |
 
-| `localityBias` (key policy) | Local-only window before spill is allowed |
-| --------------------------- | ----------------------------------------- |
-| `0` — cloud-preferred       | 5 min (floor)                             |
-| `0.5`                       | 12 h                                      |
-| `1` — local-until-saturated | 23 h 55 min (ceiling)                     |
-
-- **Before `spillAt`**: local deployments are preferred; only the explicit hard-ineligibility and opted-in overload exceptions below can accelerate remote work. The floor gives ordinary work a local-first window and the ceiling makes every job deadline-spill-eligible inside 24 h.
+- **Before `spillAt`**: local deployments are preferred; only the exceptions below can accelerate remote work, and only for a cloud key.
 - **At/after `spillAt`**: _undispatched_ items may route to the pinned OpenRouter Batch path. Spill fans out **one upstream batch per compatibility group** (model + response_format/reasoning config — upstream allows one shape per batch), so a job can carry **several** remote batch ids, one per group; each group's items stay bound to that group's proven id. Already-dispatched items are unaffected.
-- **Hard-constraint local ineligibility** (quality, context, allowlist): the item spills **immediately** when a cloud batch candidate remains; if none does, the item fails with `no_eligible_model`. Hard constraints are never relaxed to invent a candidate.
-- **Local downtime / definitive pre-enqueue overload**: before `spillAt`, only a Key with `overloadAction=failover` plus a configured spill port may enter remote batch planning. This uses the batch-only catalogue, not synchronous cloud dispatch. All Key/deployment allowlist, capability, context, credentials and spend constraints still pass through the real router planner and deferred key recheck; planning failure never makes a provider call. Report-only local work records the local overload instead of silently paying for cloud. Deadline-triggered spill remains a separate, unchanged batch authorization. A local-to-remote handoff keeps one request/admission and finalizes accounting once.
+- **Local ineligibility** (context, output, capabilities): a cloud key's item spills **immediately** when a cloud batch candidate remains; otherwise it fails with `no_eligible_model`. Nothing is relaxed to invent a candidate.
+- **Local downtime / definitive pre-enqueue overload**: before `spillAt`, a cloud key's item with a configured spill port enters remote batch planning; any other item returns to `queued`. Planning uses the batch-only catalogue, not synchronous cloud dispatch, checks capability, context and credentials plus the key's current `cloud`, and never makes a provider call when it fails. A local-to-remote handoff keeps one request/admission and finalizes accounting once.
 - **Provider pinning**: the selected deployment’s `providerRestriction` is preserved as upstream `provider.only` — never silently dropped to gain availability. A pin no `:batch` endpoint satisfies fails clearly instead.
-- `maxEstimatedUsd` ceilings behave exactly as on interactive traffic: **fail closed on unknown pricing** — unknown price is not a low price.
 
 ### Spill deployment
 
@@ -283,11 +279,11 @@ The spill path targets a **dedicated batch-only deployment, separate from the sy
 | `providerRestriction` | `deepinfra/fp4`                                                                                                                                                                                                               |
 | Catalogue             | Its own batch catalogue file — `BATCH_CATALOG` names the in-gateway path, bound read-only from the host via `BATCH_CATALOG_FILE` (default `./catalog.batch.example.json`); never inserted into the synchronous chat catalogue |
 
-Endpoint metadata confirmed against the public batch catalogue on **2026-09-22**: input **$0.06/Mtok**, cached input **$0.012/Mtok**, output **$0.20/Mtok**, context **1,048,576**, max output **131,072**. This is **dated catalogue metadata for ranking and `maxEstimatedUsd` math — not performance evidence**; no paid batch benchmark has been run, and the model page remains the pricing source of truth.
+Endpoint metadata confirmed against the public batch catalogue on **2026-09-22**: input **$0.06/Mtok**, cached input **$0.012/Mtok**, output **$0.20/Mtok**, context **1,048,576**, max output **131,072**. This is **dated catalogue metadata for accounting — not performance evidence**; no paid batch benchmark has been run, and the model page remains the pricing source of truth.
 
 **Confirmed-group recovery constraint:** while an upstream group is pending, keep its batch deployment id mapped to the same endpoint and provider pin, and keep the submitting OpenRouter account available. The ledger stores the proven batch id and deployment id, but not the original endpoint/account identity. Reusing that deployment id after a catalogue or credential rotation can poll the wrong context and lose final accounting; drain and reconcile confirmed groups before rotating. Never re-POST an ambiguous or confirmed group to work around a missing poll.
 
-`spillAt` is computed in `src/batch/spill.ts` (pure function, table-tested). The scheduler tick and clamp constants live beside it; there is no environment knob.
+`spillAt` is computed in `src/batch/spill.ts` (pure function, tested). The delay constant lives beside it; there is no environment knob.
 
 ## Result holding
 

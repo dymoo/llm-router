@@ -1,6 +1,6 @@
 # Deployment catalogues
 
-`MODEL_CATALOG` selects the chat catalogue. `AUXILIARY_CATALOG` optionally selects System One deployments. Catalogues contain endpoint/model facts and ranking/accounting configuration, never provider secrets. Restart the gateway after changing them; catalogue content hashes invalidate assessment reuse.
+`MODEL_CATALOG` selects the chat catalogue. `AUXILIARY_CATALOG` optionally selects System One deployments. Catalogues contain endpoint/model facts and accounting configuration, never provider secrets. Restart the gateway after changing them. Older catalogues with `quality`, `latency` or `reasoningTokenEstimates` still load; those keys are ignored.
 
 ## Gufo chat
 
@@ -8,13 +8,13 @@
 
 The deployment ID is `gufo-qwen3.8-flash-next`; the **exact provider model alias** is `qwen3.8-flash-next-gufo` with transport `gufo`. Gufo's authenticated `GET /v1/models` must advertise that exact ID; the health probe checks it, and the adapter rejects any response whose `model` differs from the catalogued alias. Context 131,072 and maximum output 8,192 tokens are catalogue limits, not measurements. The adapter caps output with `max_tokens`.
 
-`capacity.maxParallel: 24` matches Gufo's 24 sessions and is the **router admission permit cap**. `reservedInteractiveSlots: 4` keeps four permits for **high** keys; medium and low keys share the other twenty. Permit occupancy is not verified runtime saturation. Router permits cannot see load from clients that call Gufo directly. Gufo advertises tools, but not JSON mode or vision: `capabilities: { tools: true, json: false, vision: false }`. Tool fields are only sent for tool requests. No cache or disk-cache capability is claimed.
+`capacity.maxParallel: 24` matches Gufo's 24 sessions and is the **router admission permit cap**. `reservedInteractiveSlots: 4` keeps four permits for **high** keys; medium and low keys share the other twenty. Router permits cannot see load from clients that call Gufo directly. Gufo advertises tools, but not JSON mode or vision: `capabilities: { tools: true, json: false, vision: false }`. Tool fields are only sent for tool requests. No cache or disk-cache capability is claimed.
 
-Gufo exposes graded `reasoning_effort` `off`, `low`, `medium`, `xhigh`: catalogue `reasoning.levels` are `none`, `low`, `medium`, `xhigh`; `none` maps to `off`. There is no native `high` level (a requested `high` maps upward to `xhigh` under existing effort routing), and no `enable_thinking` switch. Reasoning-token estimates are provisional ranking allowances, not observed usage. Quality and latency values are **unmeasured operator bootstrap priors**, not benchmarks or calibrated task-success probabilities. All three numeric price fields are zero only as schema-compatible placeholders with `prices.provenance.source: "unknown"`: these are **not** a claim of zero operating cost. A key's non-null `maxEstimatedUsd` rejects this candidate until meaningful rates with provenance are configured.
+Gufo exposes graded `reasoning_effort` `off`, `low`, `medium`, `xhigh`: catalogue `reasoning.levels` are `none`, `low`, `medium`, `xhigh`; `none` maps to `off`. There is no native `high` level (a client's `reasoning_effort: "high"` maps upward to `xhigh`), and no `enable_thinking` switch. Without `reasoning_effort`, Gufo runs with thinking off. All three numeric price fields are zero only as schema-compatible placeholders with `prices.provenance.source: "unknown"`: these are **not** a claim of zero operating cost.
 
 Direct checks on 2026-09-24 observed: unauthenticated `GET /v1/models` 401; authenticated 200 with only `qwen3.8-flash-next-gufo`; an unknown model 404 `model_not_found`; exact-alias non-streaming and SSE responses reporting that model with final usage; and tool calls with `tool_choice` `auto` or `required`. Gufo rejects OpenAI's named `{type:"function",function:{name}}` form with 400 `invalid_tools`, so the adapter sends exactly the named tool with `tool_choice: "required"`, which is equivalent. During an earlier restart window, the same address briefly returned responses labelled with another model; this is why the adapter checks the served model name. These are protocol checks, not quality, latency, or router-routed evidence.
 
-Gufo chat completions, including streams, send `X-Gufo-No-Queue: 1` and carry the Router request id as `X-Request-ID`, under Gufo's router contract (Gufo `docs/ROUTER.md`, contract version 1). Gufo refuses before enqueueing with HTTP 429 `queue_full` or `client_queue_full` when it is full, 429 `resource_unavailable` when it has no idle compute for a flex request, and 503 `draining` during maintenance; an empty-body 429 from the key proxy in front of Gufo means the same as a full queue. The Router treats these as local overload and passes Gufo's `Retry-After` through. Low keys and `service_tier: "flex"` requests are sent as flex; see [routing policy](routing-policy.md#priority-and-queues). `GET /v1/runtime` reports whether a default request could start now and is the Verified saturation evidence. Unknown non-empty HTTP 429/503 responses remain provider failures.
+Gufo chat completions, including streams, send `X-Gufo-No-Queue: 1` and carry the Router request id as `X-Request-ID`, under Gufo's router contract (Gufo `docs/ROUTER.md`, contract version 1). Gufo refuses before enqueueing with HTTP 429 `queue_full` or `client_queue_full` when it is full, 429 `resource_unavailable` when it has no idle compute for a flex request, and 503 `draining` during maintenance; an empty-body 429 from the key proxy in front of Gufo means the same as a full queue. The Router retries these after `Retry-After` within the key's wait budget, then falls back or reports local overload. Low keys and `service_tier: "flex"` requests are sent as flex, at most `GET /v1/runtime` `sessions.flex_limit` at once; see [routing policy](routing-policy.md#flex-tier-low-or-service_tier-flex). Unknown non-empty HTTP 429/503 responses remain provider failures.
 
 ## OpenRouter GLM-5.3-Flash
 
@@ -73,9 +73,9 @@ not `/models`. A ready cloud deployment confirms the credential and network
 path, not that InferenceNet is presently serving this model. The provider
 metadata above comes from a separate public endpoints-catalogue request.
 
-Reasoning is configured as binary thinking-on/off, because exact graded backend semantics were not independently established. The gateway reports applied `on`, not an invented high/xhigh execution level. Reasoning-token counts in the catalogue are estimates for ranking, not measured usage.
+Reasoning is configured as binary thinking-on/off, because exact graded backend semantics were not independently established. The gateway reports applied `on`, not an invented high/xhigh execution level.
 
-Cloud quality and latency numbers are explicitly labelled **operator bootstrap priors**, not benchmarks or calibrated success probabilities. For a cloud-only installation, delete the Gufo entry from the generated catalogue.
+Only keys with `cloud: true` reach this deployment. For a cloud-only installation, delete the Gufo entry from the generated catalogue.
 
 The router identifies itself on every OpenRouter call, including health checks and batch requests, with `HTTP-Referer: https://github.com/dymoo/llm-router`, `X-OpenRouter-Title: llm-router` and `X-OpenRouter-App-Visibility: hidden`.
 
@@ -84,8 +84,6 @@ The router identifies itself on every OpenRouter call, including health checks a
 The local example's price provenance is `unknown`. Its numeric zeros are not configured COGS. Set input, cached-input and output rates with a meaningful source/date before treating local accounting as known. Explicit configured zero is supported; absent accounting remains null.
 
 Accounting uses observed token counts. Reasoning tokens are already part of completion tokens and are not added twice. Missing cached counts prevent a discount calculation unless cached/uncached rates are equal, in which case the known total does not imply a cache hit. Session affinity and provider pinning are never cache evidence.
-
-A `maxEstimatedUsd` ceiling fails closed when candidate pricing is unknown. Ranking estimates are not invoices and exclude classifier/tool spend.
 
 ## System One (Kev and Jev)
 
@@ -109,9 +107,7 @@ probabilities differ.
 `catalog.auxiliary.example.json` holds this Kev entry with
 `REPLACE_GUFO_ENDPOINT` in place of the endpoint shown below. Copy it to a private file, set the endpoint, and
 point `AUXILIARY_CATALOG` at it (on Compose, set `AUXILIARY_CATALOG_FILE`
-and `AUXILIARY_CATALOG=/etc/llm-router/auxiliary.json`). `CLASSIFIER_MODE=kev`
-uses this Kev deployment as the Classifier; see
-[operations](operations.md#routing-mode-configuration).
+and `AUXILIARY_CATALOG=/etc/llm-router/auxiliary.json`).
 
 ```json
 {

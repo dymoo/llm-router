@@ -29,7 +29,7 @@ node scripts/restore.mjs --compose --replace ./data/backups/control-….sqlite
 docker compose up -d --no-deps gateway
 ```
 
-Native backup uses `SQLITE_PATH=... node scripts/backup.mjs`. Preserve the matching pepper separately. Test restores on an isolated copy before replacing a live database. Both scripts validate against the same `migrations/` directory that `src/db/migrate.ts` consumes (currently v5, the batch ledger): the control-plane identity must match, `settings.schema_version` must equal `PRAGMA user_version`, and the version must sit inside the supported range. Identified older schemas (v1–v4) are accepted and upgraded in a locked transaction on the next gateway start, preserving existing keys; foreign, corrupt, inconsistent or newer-than-supported databases are refused, not guessed.
+Native backup uses `SQLITE_PATH=... node scripts/backup.mjs`. Preserve the matching pepper separately. Test restores on an isolated copy before replacing a live database. Both scripts validate against the same `migrations/` directory that `src/db/migrate.ts` consumes (currently v6, the simple key policy): the control-plane identity must match, `settings.schema_version` must equal `PRAGMA user_version`, and the version must sit inside the supported range. Identified older schemas (v1–v5) are accepted and upgraded in a locked transaction on the next gateway start, preserving existing keys; foreign, corrupt, inconsistent or newer-than-supported databases are refused, not guessed.
 
 Native restore requires stopping the gateway and passing `--replace --offline`. Restore validates the source, stages a private complete snapshot, retains the previous database, and replaces the destination only after verification. Compose restore uses an actual helper container mounted on the gateway volume; a failed copy is an error, never a success message. Backup refuses to overwrite an existing destination.
 
@@ -39,7 +39,7 @@ Restore quarantines batch state; an ordinary restart does not. On a normal resta
 
 Batch content is backed up separately, or not at all. `backup.mjs` copies only `control.sqlite`: the sensitive content store (request bodies and result rows under `dirname(SQLITE_PATH)/batch-content`, or `BATCH_RESULTS_DIR`) lives outside the database, is bounded by the 24-hour post-terminal TTL and the per-job/per-key budgets, and is never silently added to metadata backups. To keep it deliberately, copy the directory separately with its own retention — ad-hoc copies must not outlive the TTL bounds that keep this store short-lived.
 
-Pins do not survive a restart or restore. Clients must start a new task or declare a checkpoint. Abandoned leases recover through the normal repository maintenance/admission path.
+Sessions do not survive a restart or restore; the next turn just routes normally. Migration 6 rewrites every stored key policy to `{ priority, cloud, requestsPerMinute, maxConcurrent }` with `cloud` true exactly where `overloadAction` was `failover`. Abandoned leases recover through the normal repository maintenance/admission path.
 
 ## Automatic redeploys
 
@@ -47,7 +47,7 @@ After `ci` succeeds for a push to `main`, `deploy-k3s` checks out that exact com
 
 The deployer reads `# source-commit: <full 40-character SHA>` from `dymoo/dylans-infra/k8s/apps/llm-router/kustomization.yaml`. If that commit is missing or unknown, or `git diff --name-only PREV..SHA -- migrations/ src/db/` has changes, it treats the release as a **possible forward-only migration**. The automatic run stops and tells the operator to dispatch `deploy-k3s` manually with the exact `sha` and `allow_migration=true`. On startup the new gateway takes its own verified pre-migration copy (see Backup and restore) and refuses to migrate if that copy fails; an extra operator backup beforehand is still recommended. Preserve the matching `API_KEY_PEPPER` outside the image. An older binary refuses a newer schema, so never roll it back onto a migrated database. On rollout failure without a migration, the workflow runs `kubectl rollout undo`, reverts its infra write-back commit and pushes that revert, then fails. Aft…
 
-Deployment restarts the single gateway process. `Recreate` drains the old pod (up to the 780-second termination grace period); active or locally running work may be interrupted and clients should retry or resume from a checkpoint. Never treat a restart as a restored snapshot: queued/recoverable batch work follows the normal restart behavior above. Secrets are **not synced** from the router repository or the image; provision and rotate runtime Kubernetes Secrets out of band.
+Deployment restarts the single gateway process. `Recreate` drains the old pod (up to the 780-second termination grace period); active or locally running work may be interrupted and clients should retry. Never treat a restart as a restored snapshot: queued/recoverable batch work follows the normal restart behavior above. Secrets are **not synced** from the router repository or the image; provision and rotate runtime Kubernetes Secrets out of band.
 
 Infra contract for `dymoo/dylans-infra`:
 
@@ -58,21 +58,21 @@ Infra contract for `dymoo/dylans-infra`:
 
 ## Health
 
-- `/health/live`: 200 while the HTTP process is alive. No inference, classifier or provider call.
-- `/health/ready`: cached readiness; 200 only when persistence, the selected routing mode, and at least one non-optional chat deployment are ready. Otherwise 503. Rules itself is always ready; Kev/Jev require classifier readiness and qualification.
+- `/health/live`: 200 while the HTTP process is alive. No inference or provider call.
+- `/health/ready`: cached readiness; 200 only when persistence and at least one non-optional chat deployment are ready. Otherwise 503. The snapshot keeps a fixed `classifier` section (`{backend:"rules", ready:true, local:true, evidence:"configuration-only"}`) for the current console; there is no classifier.
 - `/api/health`: the same detailed snapshot with HTTP 200 for the console, including degraded optional deployments.
 
-Probe rounds are coalesced and cached for five seconds. Runtime HTTP probes have bounded deadlines. The Classifier module owns backend readiness. Readiness probes do not populate the Assessment exact cache.
+Probe rounds are coalesced and cached for five seconds. Runtime HTTP probes have bounded deadlines.
 
-Gufo readiness is an authenticated `GET /v1/models` that must list the catalogued model ID, within 1.5 seconds. Its `GET /v1/runtime` report (contract version 1) is the evidence for saturation, read at most once per second per deployment; gateway permit counts and an unreachable runtime are not saturation.
+Gufo readiness is an authenticated `GET /v1/models` that must list the catalogued model ID, within 1.5 seconds. Its `GET /v1/runtime` `sessions.flex_limit` (contract version 1) sets how many flex requests the Router dispatches at once, read at most every 30 seconds per deployment; 2 when unknown.
 
-Cloud health uses non-generating metadata/account endpoints. Jev has no documented free authenticated readiness probe, so its status explicitly says `configuration-only`; it does not claim that a classification call succeeded. System One deployments are optional: a model-list probe marks each one ready or degraded without affecting chat readiness, and establishes reachability only, not answer quality.
+Cloud health uses non-generating metadata/account endpoints. System One deployments are optional: an authenticated model-list probe (bearer from `credentialEnvVar`) marks each one ready or degraded without affecting chat readiness, and establishes reachability only, not answer quality.
 
 ## Metrics
 
 Set `METRICS_PORT` to an integer from 1–65535, different from the application `PORT` (default 3000), to enable the dedicated Prometheus listener. Unset disables it. Only `GET /metrics` is served there; the application port never serves metrics. Expose the metrics port solely to Prometheus via Kubernetes NetworkPolicy; do not route it through Caddy/Authentik or publish it publicly. The listener stops during graceful shutdown. `SOURCE_COMMIT` in the image supplies the build label, or `unknown` when absent.
 
-The `llm_router_` families export build/process and scrape timing; cached readiness and qualification; terminal admissions, request duration and concurrency; queue/capacity and routing decisions; stream outcomes; classifier latency/usage; known token and separate cost categories; cache observations; and read-only SQLite counts for key and batch state. Histograms use fixed buckets and seconds; counters end in `_total`. Missing usage from a dispatched request increments `usage_unknown_total` rather than fabricating a zero token count. The current Gufo adapter does not decode draft acceptance counts, so no draft-token metric is emitted.
+The `llm_router_` families export build/process and scrape timing; cached readiness; terminal admissions, request duration and concurrency; queue/capacity and routing decisions; stream outcomes; known token and separate cost categories; cache observations; and read-only SQLite counts for key and batch state. Histograms use fixed buckets and seconds; counters end in `_total`. Missing usage from a dispatched request increments `usage_unknown_total` rather than fabricating a zero token count. The current Gufo adapter does not decode draft acceptance counts, so no draft-token metric is emitted.
 
 For OpenRouter, `llm_router_provider_pin_total{deployment,result="match|mismatch|unknown"}`
 counts post-completion generation-metadata checks only for cloud deployments
@@ -95,27 +95,13 @@ OpenRouter's `cache_discount` does not explicitly document a USD unit, and
 rate-card estimates are not provider-reported savings. The dashboard savings
 panel stays empty until an explicit provider-reported USD amount is available.
 
-Only a validated UUID `key_id` labels per-key request, token and cost series; `key_info` exposes the active key name (truncated to 64 characters) alongside its policy limits. Never use API key prefixes, digests, secrets, prompts, completions, session/request/correlation/job/item IDs or free-text details as labels or metric values. Unknown enum/catalogue labels collapse to `other`, and unrouted requests use deployment and location `none`. Restrict access to this port because active key names and UUIDs are operational metadata.
+Only a validated UUID `key_id` labels per-key request, token and cost series; `key_info` exposes the active key name (truncated to 64 characters), priority and `cloud` alongside its policy limits. Never use API key prefixes, digests, secrets, prompts, completions, session/request/correlation/job/item IDs or free-text details as labels or metric values. Unknown enum/catalogue labels collapse to `other`, and unrouted requests use deployment and location `none`. Restrict access to this port because active key names and UUIDs are operational metadata.
 
 The Grafana dashboard JSON lives at `deploy/grafana/llm-router.json` and uses the `prometheus` datasource UID.
 
-## Routing mode configuration
+## Routing
 
-Set `CLASSIFIER_MODE=rules` to route without a classifier (the example configuration selects it, and production runs it). Neither `TYPESAFE_API_KEY`, a Kev deployment nor `CLASSIFIER_QUALIFICATION` is required or consulted for routing in Rules mode. A mounted qualification file may remain in Compose, but the gateway does not read it.
-
-`CLASSIFIER_MODE=kev` uses the same TypeSafe System One client as `jev`, pointed at the Kev deployment in the auxiliary catalogue: its endpoint and `GUFO_API_KEY`, model `kev-latest`. `jev` sends task briefs to TypeSafe's cloud Jev with `TYPESAFE_API_KEY`. Both fail closed without a matching qualification record, and neither falls back to Rules or to the other.
-
-Both health endpoints preserve the classifier-shaped section as `{backend:"rules", ready:true, local:true, evidence:"deterministic-rules"}`. Here `local` describes in-process routing, not the selected generator. The console displays **Routing mode Rules**. Readiness still requires persistence and a ready non-optional chat deployment; optional auxiliaries cannot make chat ready. Metrics use bounded backend `rules` and decision `deterministic-rules`, emit no classifier-call metrics, and do not claim classifier qualification for Rules.
-
-Rules applies the lowest supported deployment effort, no semantic difficulty estimate. Review Key locality/overload policies before enabling: down locals immediately report `local_overloaded` for report Keys, while failover Keys may use eligible paid cloud before dispatch. Oversize/missing-capability requests can use cloud even for report Keys. See [routing-policy.md](routing-policy.md#rules-mode) for the full distinction and [clients.md](clients.md) for wire behavior. Planned Gufo downtime needs no automatic classifier or model replay.
-
-## Classifier qualification
-
-Assessment is gated on the selected Classifier's qualification record (`CLASSIFIER_QUALIFICATION`): measured Calibration per question, a `pass` verdict, and sourced token rates for exactly the selected backend, model revision and question schema. For each question, record `cases` (labelled cases), `errors` (wrong answers), and, whenever `maxFalsePositiveRate` is non-null, `negativeCases` (labelled negative opportunities, greater than zero) and `falsePositives` (incorrect positive answers among those negatives). Total error rate is `errors / cases`; FPR is `falsePositives / negativeCases`, not the fraction of all cases or all errors. `negativeCases` must not exceed `cases`, and `falsePositives` must not exceed `negativeCases` or `errors`. `localSufficiency` and `trivialChat` require non-null FPR bounds. `maxErrorRate` and `maxFalsePositiveRate` are policy thresholds chosen and justified separately from the measured counts, not measured rates or defaults supplied by this repo. The gate re-checks measured metrics against those bounds — a `pass` verdict alone is not evidence — before the exact cache and before any backend call. Without a matching record the Router fails closed: readiness reports `unqualified`, chat returns `503 classifier_unqualified`, and no backend is contacted. `REPLACE_` placeholder records are rejected. See `classifier-qualification.example.json` for the shape; it is deliberately unusable as evidence.
-
-On Compose the record is a host file mounted read-only at `/etc/llm-router/classifier-qualification.json`, selected by `CLASSIFIER_QUALIFICATION_FILE` (a host path consumed by Docker); native deployments set `CLASSIFIER_QUALIFICATION` to a local file path read by the gateway process itself. The JSON shape is identical, the path semantics are not: Compose always reads the pinned container path and ignores any `CLASSIFIER_QUALIFICATION` value in `.env`, so never copy one form into the other environment. The shipped example's single-case counts and zero bounds are synthetic schema-only sentinels, **not** measurements or endorsed policy; its `REPLACE_` source/date fields and `fail` verdict intentionally leave it unqualified. Leaving the default mount in place keeps routing fail-closed while `/health/live` can still report process liveness. Before attempting real qualification, replace all illustrative counts and bounds with a labelled evaluation set, its label source and as-of date, measurement date and method, per-question negative opportunities for every bounded FPR, justified operator-selected limits, and rate provenance. Never treat a test fixture or the shipped example as calibration evidence.
-
-Classifier spend accounting follows the same evidence rules: exact-cache and session reuse are real zero (no call was made), while missing token counts, an unmatched backend or revision, or rates that cannot cover the persisted usage stay unknown and are counted as such. Only input token counts are persisted, so a backend with a non-zero output rate cannot be priced. The previously hardcoded Jev rate in Analytics is gone; rates come from the qualification record with their provenance.
+Keys route by `priority` and `cloud` only; see [routing-policy.md](routing-policy.md) and [clients.md](clients.md) for wire behavior. Before giving a key `cloud`, remember it lets high and medium work reach paid OpenRouter whenever Gufo is down, busy past the 5 s / 30 s budget, or cannot serve the request. Planned Gufo downtime needs no configuration: keys without `cloud` get `503 local_overloaded`, flex work waits up to 10 minutes.
 
 ## Drain and upgrades
 
@@ -128,14 +114,14 @@ node scripts/upgrade-gateway.mjs
 
 Gateway-only upgrades do not restart Gufo or Open WebUI. Full Compose stop is a deliberate separate operation. Native `next start` deployments that want this drain handler must also set `NEXT_MANUAL_SIG_HANDLE=true`.
 
-| Bound                        | Default          |
-| ---------------------------- | ---------------- |
-| JSON body read               | 15 seconds       |
-| Classifier total             | 2.5 seconds      |
-| Key-controlled capacity wait | up to 30 seconds |
-| Generation                   | 10 minutes       |
-| Overall inference deadline   | 11 minutes       |
-| Durable request lease        | 12 minutes       |
+| Bound                      | Default        |
+| -------------------------- | -------------- |
+| JSON body read             | 15 seconds     |
+| High / medium local wait   | 5 / 30 seconds |
+| Flex wait                  | 10 minutes     |
+| Generation                 | 10 minutes     |
+| Overall inference deadline | 11 minutes     |
+| Durable request lease      | 12 minutes     |
 
 The overall chat deadline applies through the end of a streamed response, not merely until its headers are sent. Its timer is cancelled once chat work settles, including completed, failed, and cancelled requests; a completed request does not retain an eleven-minute timer. There is no lease heartbeat or crash-resume of generation. A dispatched System One request keeps its resource permit until the upstream answers or its ten-minute deadline passes, even if the client disconnects, because the upstream keeps working on it.
 
@@ -146,15 +132,11 @@ Analytics queries use Drizzle SQL over a bounded date window (up to 31 days), bo
 The console separates:
 
 - Provider-reported cloud `usage.cost` from catalogue-based token estimates and configured local accounting costs.
-- Observed cached generation tokens from exact classifier-cache hits and session reuse.
-- P50/P95 queue, TTFT and generation latency; observed decode throughput; HTTP errors, abandonment and saturation.
-- Task/modality, requested effort, difficulty, route-selection reasons, excluded candidates and metadata drilldown.
+- Observed cached generation tokens.
+- P50/P95 queue, TTFT and generation latency; observed decode throughput; HTTP errors and abandonment.
+- Requested effort, route decision reasons and metadata drilldown. Task, difficulty, classifier and exclusion breakdowns remain in the response for historical rows only.
 
 Local chat returns OpenRouter-shaped nested usage details and `usage.cost` on JSON and the final SSE usage event. Reasoning tokens already included in completion tokens are not charged twice. Unknown cached-token counts prevent a cache-discount calculation; equal configured cached/uncached rates can still produce a known total without claiming a cache hit. Price provenance `unknown` yields unknown accounting, not a zero bill.
-
-Classifier costs are priced from the selected Classifier's qualification record for fresh classified rows, with unknown rates left unknown rather than estimated. Exact-cache and session reuse incur no new classifier call and are recorded as real zero. Completed-result classifier caching is tenant/model/schema/state/catalogue scoped and bounded; there is no in-flight request coalescing or fuzzy cache.
-
-`maxEstimatedUsd` is a cold-cache generation estimate ceiling, not a monthly budget or provider invoice guarantee. It excludes classifier/tool charges. Auxiliary unknown pricing also fails closed when a ceiling is configured.
 
 HTTP success is not task success. Full capture and a task-outcome evaluator remain a future, explicit, per-key opt-in design with access control, retention, redaction and a separate spend budget. Neither is enabled here.
 

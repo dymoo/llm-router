@@ -1,15 +1,15 @@
 # LLM Router
 
-A self-hosted coding-agent inference gateway: it applies routing policy, optionally informed by semantic assessment, then reserves a model deployment and reasoning configuration through execution. It is not a model runtime.
+A self-hosted coding-agent inference gateway: it authenticates keys, runs work on the local GPU runtime first, and lets opted-in keys use the cloud tier when local cannot take it. It is not a model runtime.
 
 ## Product
 
 **Router**:
-The control plane that authenticates keys, selects routes, and holds a deployment reservation through generation.
+The control plane that authenticates keys, picks a deployment by key policy, and holds a deployment permit through generation.
 _Avoid_: proxy, load balancer, classifier, Gufo, runtime, analytics warehouse
 
 **Key**:
-A tenant credential whose stored policy is the sole authority for priority, locality, limits, and ranking biases.
+A tenant credential whose stored policy (`priority`, `cloud`, `requestsPerMinute`, `maxConcurrent`) is the sole authority for how its requests route and are admitted.
 _Avoid_: user, account, admin login, session cookie
 
 **Catalogue**:
@@ -20,93 +20,39 @@ _Avoid_: model card, provider slug, sample scores as measurements
 One served model at one endpoint, with a location, transport, verified limits, and capabilities.
 _Avoid_: model (when meaning the live endpoint), Qwen, GLM, frontier as if they were deployments
 
-## Assessment
-
-**Assessment**:
-A semantic reading of a task (kind, difficulty, effort, local sufficiency, and related signals). It never does arithmetic, admission, or spend. Raw answers remain reusable when ranking sliders change, so long as the evidence and question meanings are unchanged.
-_Avoid_: route, live wait/load/price text, Jev as fallback router, classification as authorization
-
-**Classifier**:
-The assessment backend, either Kev on Gufo or TypeSafe's cloud Jev, each explicitly selected.
-_Avoid_: generator, Router, automatic fallback
-
-**Classifier readiness**:
-Operational status used to decide whether to attempt an Assessment, based on configuration evidence for a remote backend or a live local probe. It does not establish calibrated quality or Task success.
-_Avoid_: quality score, Task success, benchmark
-
-**Calibration**:
-Measured agreement between one Classifier backend revision and labelled judgments on a declared evaluation set, reported per Assessment question with the errors it permits.
-_Avoid_: confidence, readiness, self-claimed accuracy, benchmark as Task success
-
-**Classifier qualification**:
-The dated record pairing one Classifier backend revision and question schema with its measured Calibration and sourced token rates. Assessment-based routing fails closed without it; absent rates stay unknown.
-_Avoid_: licence, certification, model card, readiness
-
-**Kev**:
-TypeSafe's System One model served locally by Gufo. As the Classifier (`CLASSIFIER_MODE=kev`) it uses the same System One client as Jev, pointed at the Kev deployment in the auxiliary catalogue.
-_Avoid_: Jev, Gufo chat deployment, generator, automatic fallback
-
-**Jev**:
-TypeSafe's cloud System One model, used as the Classifier only when the operator selects it (`CLASSIFIER_MODE=jev`).
-_Avoid_: the Router, paid fallback, Kev
-
-**Task**:
-A unit of user work, assessed at a safe boundary and not on every tool turn.
-_Avoid_: request, turn, tool call, session
-
-**Task brief**:
-An advisory compact description of a long task for the Classifier. It is not the generation prompt, not authorization, and not a silently truncated history.
-_Avoid_: last user message, truncated prompt, silent summary
-
-**Question overhead**:
-The Classifier question text that consumes Kev or Jev context alongside the task state.
-_Avoid_: generation tokens, prompt cache, unused 1k family window, mutable occupancy or price snapshots
-
 ## Routing
 
-**Rules mode**:
-An explicitly selected routing mode that uses deployment facts and Key policy without a semantic Assessment.
-_Avoid_: classifier, guessed difficulty, fallback assessment
-
-**Route**:
-A deployment and reasoning configuration reserved through execution, not a disconnected ranking result.
-_Avoid_: suggestion, score, assessment
-
-**Hard constraint**:
-A permission, capability, context, quality, or spend limit that ranking and locality cannot override.
-_Avoid_: bias, locality preference, score
-
-**Locality bias**:
-A continuous per-key preference in `[0, 1]` for keeping work on local deployments. It is not a privacy lock and not a binary cloud-overflow switch.
-_Avoid_: local-only, privacy, routingPreference, allowCloudOverflow, cloud-overflow
-
 **Priority**:
-A non-preemptive admission rank of high, medium, or low. Low also means Flex: idle local compute only.
-_Avoid_: interactive, background, preemption, SLA, reservedInteractiveSlots (deployment reserve for high keys, not a priority)
+A non-preemptive admission rank of high, medium, or low. High and medium use the default tier; low always uses Flex. A deployment's `reservedInteractiveSlots` keep permits for high keys only.
+_Avoid_: interactive, background, preemption, SLA
+
+**Cloud switch**:
+A key's `cloud` flag: whether its high and medium work may go to the first eligible cloud deployment when local is unavailable or the wait budget runs out. It never applies to Flex.
+_Avoid_: locality bias, overload action, automatic paid fallback, retry after dispatch
+
+**Wait budget**:
+How long default-tier work waits for a local permit or Gufo admission before cloud or `local_overloaded`: 5 s for high, 30 s for medium (`LOCAL_WAIT_MS`).
+_Avoid_: maxWaitMs, per-key wait
 
 **Flex**:
-Gufo's idle-compute service tier (OpenAI `service_tier: "flex"`). Low-priority keys always use it and any key may ask for it. The Router waits for it within the Key's `maxWaitMs`; it never goes to cloud.
+Gufo's idle-compute service tier (OpenAI `service_tier: "flex"`). Low keys always use it and any key may ask for it. Requests wait in the Router's FIFO flex queue; at most Gufo's `flex_limit` are dispatched at once, the slot holder retries Gufo's refusals, and nothing waits past 10 minutes. It never goes to cloud.
 _Avoid_: batch, low-cost cloud, preemptible, overload failover
 
-**Verified saturation**:
-Evidence from the local runtime that it cannot accept more work. Gateway slot counts and missing telemetry are not saturation.
-_Avoid_: semaphore full, unknown health, complexity, busy guess
-
 **Local overload**:
-No immediately available Router-owned permit on any eligible local deployment, or a definitive local runtime rejection before execution (such as queue-full). It is not a claim of Verified saturation.
+No Router permit on any eligible local deployment within the wait budget, a definitive Gufo refusal before execution (queue full, draining) that outlasts it, or a local deployment that is down.
 _Avoid_: verified saturation, unknown health, an uncertain failure after provider contact
 
-**Overload action**:
-A Key's choice to report Local overload or permit a pre-dispatch switch to an already eligible cloud Deployment. It does not override Hard constraints or Session boundaries.
-_Avoid_: locality bias, automatic paid fallback, retry after dispatch
-
-**Cost bias** / **Quality bias** / **Latency bias**:
-Independent per-key ranking weights in `[0, 1]`. They never relax a hard constraint.
-_Avoid_: locality bias, monthly budget, invoice cap
+**Eligible**:
+A deployment that could ever serve the request: required capabilities (tools, JSON, vision) and the request's context and output fit. A request with no eligible deployment the key may use fails `no_eligible_model`.
+_Avoid_: ranking, score, quality floor
 
 **Effort**:
-The thinking control chosen for a task and mapped onto what the selected Deployment supports. Assessment-based routing uses semantic effort; Rules mode has no difficulty signal.
+The thinking control a request runs with: the client's `reasoning_effort` mapped onto what the selected deployment supports, else its cheapest level.
 _Avoid_: applied `on` as a graded `high`, inferred task complexity
+
+**Session**:
+A client-named trajectory (`routing.sessionId`, or an Open WebUI chat id), namespaced by key. Its next turn tries the deployment its last turn ran on. Best effort: a session never fails a request.
+_Avoid_: admin session, login, pin as a cache hit, boundary protocol
 
 ## Batch
 
@@ -119,30 +65,16 @@ One chat request inside a Batch job, admitted and accounted through the ordinary
 _Avoid_: sub-request, queued message, row
 
 **Deferred lane**:
-The scheduling lane in which Batch items wait for idle capacity — dispatch only when interactive queues are empty, and never compete with high, medium, or low admission.
+The scheduling lane in which Batch items wait for idle capacity: dispatch as Flex only when no interactive work runs.
 _Avoid_: low priority, background priority, overflow queue, preemption
 
+**Spill**:
+Sending a cloud key's undispatched Batch items to the pinned OpenRouter Batch path. A key without `cloud` never spills; its items wait for local capacity until the job expires.
+_Avoid_: failover, overflow, automatic paid fallback
+
 **Result holding**:
-The bounded per-key opt-in store of a Batch job's terminal results — read retry-safely, held briefly, then deleted — kept apart from the metadata store and Analytics.
+The bounded per-key opt-in store of a Batch job's terminal results (read retry-safely, held briefly, then deleted), kept apart from the metadata store and Analytics.
 _Avoid_: transcript archive, prompt store, results database, full capture
-
-## Continuity
-
-**Session**:
-A key-namespaced client trajectory that reuses a deployment, effort, and any Assessment until a safe boundary.
-_Avoid_: admin session, login, one session for every request on a Key
-
-**Session pin**:
-The stored Route for a Session. Affinity is not a cache hit.
-_Avoid_: KV residency, prefix-cache evidence, provider restriction as a hit
-
-**Boundary**:
-The client declaration of `new-task` (select and pin), `continue` (reuse the pin), or `checkpoint` (reconsider when a switch is safe).
-_Avoid_: silent migrate, mid-tool switch, inferred shared session
-
-**Checkpoint**:
-A client-declared safe point where route reconsideration and a controlled deployment change are allowed.
-_Avoid_: continue, crash recovery, automatic retry after dispatch
 
 ## Runtimes
 
@@ -152,10 +84,18 @@ _Avoid_: bundled runtime, Compose service, runtime choice, Router
 
 **System One**:
 TypeSafe's API for typed questions about a state (`POST /v1/systemone`). The Router passes each request to one named Kev or Jev deployment and never substitutes one for the other.
-_Avoid_: chat completion, Assessment (one use of System One), automatic fallback
+_Avoid_: chat completion, task classifier, automatic fallback
+
+**Kev**:
+TypeSafe's System One model served locally by Gufo, an Auxiliary deployment with `transport: "gufo"`.
+_Avoid_: Jev, Gufo chat deployment, generator, automatic fallback
+
+**Jev**:
+TypeSafe's cloud System One model, an Auxiliary deployment with `transport: "typesafe"`.
+_Avoid_: the Router, paid fallback, Kev
 
 **Auxiliary deployment**:
-An explicitly configured System One endpoint: Kev on Gufo or cloud Jev. It uses key policy, admission, resource ownership and accounting without chat-task classification or fallback to another deployment.
+An explicitly configured System One endpoint: Kev on Gufo or cloud Jev. Any key may use it; it keeps admission, resource ownership and accounting, and never falls back to another deployment.
 _Avoid_: automatic chat fallback, unmetered side channel, free because local
 
 **Auxiliary resource**:
@@ -169,32 +109,24 @@ _Avoid_: runtime bypass, provider credential store for this topology, gateway tr
 ## Accounting
 
 **COGS**:
-Recorded generation cost that distinguishes cloud provider actuals, internal local accounting, estimates, and unknown. Missing counts or rates are unknown, never invented zero.
-_Avoid_: local API bill, invoice, monthly budget, pin as a cache discount, double-counted reasoning tokens
+Recorded generation cost that distinguishes cloud provider actuals, internal local accounting, and unknown. Missing counts or rates are unknown, never invented zero.
+_Avoid_: local API bill, invoice, monthly budget, session as a cache discount, double-counted reasoning tokens
 
 **Accounting cost**:
 An internal figure on a response, including local generation priced from configured per-deployment input, cached-input, and output rates. It is not a provider invoice. Cloud `usage.cost` is the provider’s actual, passed through.
-_Avoid_: electricity guess, invented zero, ranking estimate as billed cost
+_Avoid_: electricity guess, invented zero
 
 **Cache hit**:
 Deployment-specific evidence that cached tokens were actually used on generation.
-_Avoid_: Session pin, affinity, provider restriction, repeated prompt, classifier exact cache
-
-**Classifier exact cache**:
-Reuse of an Assessment for the same key, backend, question schema, state, and catalogue version.
-_Avoid_: Cache hit, Session reuse, fuzzy semantic cache
-
-**Session reuse**:
-Continuing a Session from a pin without a new Assessment.
-_Avoid_: Cache hit, Classifier exact cache
+_Avoid_: Session, stickiness, provider restriction, repeated prompt
 
 **Analytics**:
 First-class time-trended views of routing, COGS, cache, and performance, broken down by key, priority, and deployment, with metadata request drilldown.
 _Avoid_: request counters only, HTTP 200 as task success, prompt store
 
-**Policy decision**:
-The recorded reason a Route was chosen and why other candidates were excluded.
-_Avoid_: Assessment as authorization, guessed route, undocumented ranking
+**Route decision**:
+The recorded reason a request went where it did (local, sticky, queued, cloud after local overload, or why it failed).
+_Avoid_: guessed route, undocumented ranking
 
 **Task success**:
 Whether the coding Task actually completed useful work. It is not HTTP success and is not inferred from a generation finish reason.

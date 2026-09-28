@@ -4,11 +4,11 @@ A self-hosted, key-controlled inference gateway for coding agents and internal c
 
 ## What it does
 
-- Routes with explicit classifier-free **Rules** mode, or qualified **Kev** / **Jev** assessment, using the same deterministic capability, context, budget and locality policy.
+- Routes by one small key policy: `priority` (high, medium, low) and a `cloud` switch, plus rate and concurrency limits. High and medium run on Gufo first and wait a short budget (5 s / 30 s); keys with `cloud` then fall back to OpenRouter, others get `503 local_overloaded`.
 - Routes chat to **Gufo** (the owner's private GPU inference server, Qwen3.8 Flash-Next) and **OpenRouter `z-ai/glm-5.3-flash`**. Gufo is reached over HTTP with a bearer key; it is not part of this repository. A generic `openai-compatible` transport covers another local OpenAI server.
-- Keeps task sessions pinned through tool turns and holds capacity/session ownership until streaming finishes or is cancelled.
-- Provides per-key priority and locality/cost/quality/latency controls, bounded non-preemptive queues, API-key rotation/revocation. Low-priority keys run as Gufo **flex**: idle local compute only, never cloud.
-- Records metadata analytics: provider-reported cost, token estimates, configured local COGS, observed cache use, classifier reuse, route decisions, queue/TTFT/decode metrics, errors and cancellation. The gateway does **not** store prompts or completions.
+- Keeps a session on the deployment its last turn used (best effort) and holds capacity until streaming finishes or is cancelled.
+- Low-priority keys (and `service_tier: "flex"`) run as Gufo **flex**: idle local compute only, never cloud, queued FIFO by the router for up to 10 minutes. Queues are bounded and non-preemptive; keys rotate and revoke.
+- Records metadata analytics: provider-reported cost, token estimates, configured local COGS, observed cache use, route decisions, queue/TTFT/decode metrics, errors and cancellation. The gateway does **not** store prompts or completions.
 - Proxies TypeSafe **System One** (`POST /v1/systemone`) to Kev on Gufo or TypeSafe's cloud Jev, and serves an optional **Open WebUI** frontend. Every client request still goes through gateway policy and accounting.
 
 ## Start the console
@@ -30,15 +30,15 @@ node scripts/setup.mjs --gufo-endpoint https://gufo.example/v1
 docker compose up -d --build gateway
 ```
 
-Compose runs the gateway, plus Open WebUI behind the `webui` profile. Gufo is not a Compose service. The gateway defaults to Rules routing without a classifier. See [setup](docs/setup.md) and [Open WebUI and System One](docs/ai-hub.md).
+Compose runs the gateway, plus Open WebUI behind the `webui` profile. Gufo is not a Compose service. See [setup](docs/setup.md) and [Open WebUI and System One](docs/ai-hub.md).
 
-For a cloud-only installation, delete the Gufo entry from the generated catalogue and configure `OPENROUTER_API_KEY`. Ranking priors are not measured success probabilities. No paid fallback or paid readiness probe is performed.
+For a cloud-only installation, delete the Gufo entry from the generated catalogue, configure `OPENROUTER_API_KEY`, and give keys `cloud: true`. Only keys with `cloud` ever reach a paid provider; no paid readiness probe is performed.
 
 ## API
 
 | Endpoint                                 | Purpose                                                                            |
 | ---------------------------------------- | ---------------------------------------------------------------------------------- |
-| `GET /v1/models`                         | Authenticated discovery filtered by key permissions                                |
+| `GET /v1/models`                         | Authenticated discovery: `auto` and the System One deployments                     |
 | `POST /v1/chat/completions`              | Routed chat, `model: "auto"`, streaming or JSON                                    |
 | `POST /v1/systemone`                     | TypeSafe System One, answered by a named Kev or Jev deployment                     |
 | `GET /v1/requests/:id`                   | Key-scoped admission/queue/terminal status                                         |
@@ -60,9 +60,7 @@ npm run build
 npm run test:production
 ```
 
-Tests cover public HTTP contracts, real SQLite migrations/admission/analytics, classifier budgets/caching/cancellation, real Jev SDK HTTP integration, routing/priority/affinity, fragmented streams, accounting, System One and dependency health transitions. Local protocol fixtures are not evidence of Gufo model quality or speed. Public OpenRouter model metadata was inspected; no paid inference benchmark was run.
-
-**Classifier qualification gate:** Kev/Jev assessment use requires a qualification record with measured per-question Calibration and sourced token rates for the exact backend revision and question schema ([operations](docs/operations.md#classifier-qualification)). Missing or unqualified evidence keeps those modes unready and chat returns `503 classifier_unqualified`. Rules mode constructs no classifier and ignores qualification records; readiness requires persistence and a ready chat deployment. Production runs Rules. The [assumptions audit](docs/research/classifier-economics-and-gates.md) remains background for assessed modes.
+Tests cover public HTTP contracts, real SQLite migrations/admission/analytics, routing tiers/wait budgets/flex queue/stickiness, fragmented streams, accounting, batch spill, System One and dependency health transitions. Local protocol fixtures are not evidence of Gufo model quality or speed. Public OpenRouter model metadata was inspected; no paid inference benchmark was run.
 
 ## Read next
 
@@ -70,6 +68,5 @@ Tests cover public HTTP contracts, real SQLite migrations/admission/analytics, c
 - [Routing policy](docs/routing-policy.md) and [domain vocabulary](CONTEXT.md)
 - [Batch surface](docs/batch.md) — deferred lane, spill rule, result holding
 - [Open WebUI and System One](docs/ai-hub.md)
-- [Jev assessment design](docs/research/jev-routing.md)
 
-Run one gateway process per SQLite database. Capacity, queue and session ownership are process-local; replicas are not supported.
+Run one gateway process per SQLite database. Capacity, queues and sessions are process-local; replicas are not supported.
