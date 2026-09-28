@@ -194,7 +194,7 @@ it("refuses migration and keeps the old schema when the backup directory cannot 
   chmodSync(directory, 0o700);
 });
 
-it("migration 6 rewrites legacy key policies: failover keeps cloud, report does not", () => {
+it("migration 7 rewrites legacy key policies: failover keeps cloud, report does not", () => {
   const path = tempDb();
   createV4(path);
   const legacy = (overloadAction: string | undefined) =>
