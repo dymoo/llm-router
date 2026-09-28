@@ -448,6 +448,16 @@ function executeLocked(
       responseFormat: work.responseFormat,
     });
     const pin = sessions.get(work.keyId, work.routing.sessionId, now);
+    // Open WebUI chat ids are advisory continuity (http/inference.ts): pins
+    // live in memory, so after a restart, expiry or eviction the chat routes
+    // afresh at a checkpoint instead of failing every later turn.
+    if (
+      work.routing.boundary === "continue" &&
+      work.routing.sessionId.startsWith("webui:") &&
+      (pin === undefined || pin.continuityKey !== key)
+    ) {
+      work = { ...work, routing: { ...work.routing, boundary: "checkpoint" } };
+    }
 
     if (work.routing.boundary === "continue") {
       if (work.routing.qualityOverride === "highest") {

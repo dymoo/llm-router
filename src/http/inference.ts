@@ -326,17 +326,17 @@ function streamCompletion(
       clearDeadline();
     }
   };
-  void pump();
-  return new Response(readable, {
-    status: 200,
-    headers: sseHeaders({
-      requestId: correlationId,
-      deploymentId: "",
-      sessionId: work.routing.sessionId,
-      appliedEffort: "",
-      priority: admission.policy.priority,
-    }),
+  // Build the headers first: if they throw, no pump is left running with a
+  // held session and capacity.
+  const headers = sseHeaders({
+    requestId: correlationId,
+    deploymentId: "",
+    sessionId: work.routing.sessionId,
+    appliedEffort: "",
+    priority: admission.policy.priority,
   });
+  void pump();
+  return new Response(readable, { status: 200, headers });
 }
 
 export async function handleRequestStatus(
