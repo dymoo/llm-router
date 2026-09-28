@@ -21,16 +21,9 @@ export const ORIGIN = "http://127.0.0.1:3100";
 export function samplePolicy(overrides?: Partial<KeyPolicy>): KeyPolicy {
   return {
     priority: "medium",
-    localityBias: 0.65,
-    contextLimitTokens: 65_536,
-    maxCompletionTokens: 8_192,
-    allowedModels: null,
+    cloud: false,
     requestsPerMinute: 60,
     maxConcurrent: 2,
-    maxWaitMs: 0,
-    overloadAction: "report",
-    maxEstimatedUsd: null,
-    bias: { cost: 0.7, quality: 0.5, latency: 0.3 },
     ...overrides,
   };
 }
@@ -89,10 +82,7 @@ export function memoryKeys(options?: { secret?: string }): MemoryKeys {
       const next = {
         ...current,
         name: input.name,
-        policy: {
-          ...input.policy,
-          overloadAction: input.policy.overloadAction ?? current.policy.overloadAction,
-        },
+        policy: input.policy,
         expiresAt: input.expiresAt,
         version: current.version + 1,
       };

@@ -20,6 +20,7 @@ import {
   CONTROL_PLANE_V2_SQL,
   CONTROL_PLANE_V3_SQL,
   CONTROL_PLANE_V4_SQL,
+  CONTROL_PLANE_V5_SQL,
 } from "../../src/db/migrations-sql.ts";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "../../src/db/migrate.ts";
 import { openControlPlaneSqlite } from "../../src/db/sqlite.ts";
@@ -191,4 +192,73 @@ it("refuses migration and keeps the old schema when the backup directory cannot 
   }
   assert.equal(readdirSync(directory).length, 0);
   chmodSync(directory, 0o700);
+});
+
+it("migration 6 rewrites legacy key policies: failover keeps cloud, report does not", () => {
+  const path = tempDb();
+  createV4(path);
+  const legacy = (overloadAction: string | undefined) =>
+    JSON.stringify({
+      priority: "high",
+      localityBias: 0.15,
+      contextLimitTokens: 131_072,
+      maxCompletionTokens: 16_384,
+      allowedModels: null,
+      requestsPerMinute: 120,
+      maxConcurrent: 4,
+      maxWaitMs: 0,
+      ...(overloadAction === undefined ? {} : { overloadAction }),
+      maxEstimatedUsd: null,
+      bias: { cost: 0.2, quality: 0.9, latency: 0.3 },
+    });
+  const seed = new DatabaseSync(path);
+  try {
+    seed.exec(CONTROL_PLANE_V5_SQL);
+    seed.exec("PRAGMA user_version = 5");
+    seed.prepare("UPDATE settings SET value = '5' WHERE key = 'schema_version'").run();
+    const insert = seed.prepare(
+      "INSERT INTO api_keys (id, prefix, digest, name, policy_json, created_at, version) VALUES (?, ?, ?, ?, ?, 1, 1)",
+    );
+    insert.run(
+      "failover",
+      "jrv_bbbbbbbbbbbbbbbbbbbbbbbb",
+      "cd".repeat(32),
+      "f",
+      legacy("failover"),
+    );
+    insert.run("report", "jrv_cccccccccccccccccccccccc", "ef".repeat(32), "r", legacy("report"));
+    insert.run(
+      "historical",
+      "jrv_dddddddddddddddddddddddd",
+      "01".repeat(32),
+      "h",
+      legacy(undefined),
+    );
+    seed
+      .prepare(
+        "INSERT INTO batch_jobs (id, key_id, model, status, completion_window_ms, created_at, spill_at, request_counts_total, request_counts_completed, request_counts_failed) VALUES ('batch_old', 'failover', 'auto', 'queued', 1, 1, 1, 0, 0, 0)",
+      )
+      .run();
+  } finally {
+    seed.close();
+  }
+  const opened = openControlPlaneSqlite(path);
+  try {
+    const policy = (id: string) =>
+      JSON.parse(
+        (
+          opened.sqlite.prepare("SELECT policy_json FROM api_keys WHERE id = ?").get(id) as {
+            policy_json: string;
+          }
+        ).policy_json,
+      ) as unknown;
+    const expected = { priority: "high", requestsPerMinute: 120, maxConcurrent: 4 };
+    assert.deepEqual(policy("failover"), { ...expected, cloud: true });
+    assert.deepEqual(policy("report"), { ...expected, cloud: false });
+    assert.deepEqual(policy("historical"), { ...expected, cloud: false });
+    const job = opened.sqlite.prepare("SELECT cloud FROM batch_jobs WHERE id = 'batch_old'").get();
+    assert.equal((job as { cloud: number }).cloud, 1);
+  } finally {
+    opened.sqlite.close();
+  }
 });

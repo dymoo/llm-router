@@ -3,6 +3,7 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Effect, Metric } from "effect";
 import { PrometheusMetrics } from "effect/unstable/observability";
 import packageJson from "../package.json" with { type: "json" };
+import { decodeStoredKeyPolicy } from "../src/domain.ts";
 import type { HealthSnapshot } from "../src/http/contracts.ts";
 import type { FinalizeOutcome } from "../src/keys/types.ts";
 import { ROUTE_DECISION_REASONS } from "../src/router/decision.ts";
@@ -85,7 +86,6 @@ const errorTags = [
   "RateLimited",
   "ConcurrentLimit",
   "InvalidInput",
-  "ImpossibleLimits",
   "ClassifierUnavailable",
   "ClassifierUnqualified",
   "LocalOverloaded",
@@ -93,14 +93,8 @@ const errorTags = [
   "CapacityBusy",
   "ProviderFailure",
   "NoEligibleModel",
-  "EmptyAllowlist",
   "Cancelled",
   "DatabaseError",
-  "RetrievalRequired",
-  "UnsupportedCapabilities",
-  "MissingSession",
-  "BoundaryRequired",
-  "LockTimeout",
   "batch_interrupted",
 ];
 const errorTag = (value: unknown) =>
@@ -404,20 +398,15 @@ export function observeSqlMetrics(rows: SqlMetrics): void {
     const key_id = uuid(item.id);
     if (key_id === "other") continue;
     try {
-      const policy = JSON.parse(item.policyJson) as {
-        priority?: string;
-        overloadAction?: string;
-        requestsPerMinute?: number;
-        maxConcurrent?: number;
-      };
+      const policy = decodeStoredKeyPolicy(JSON.parse(item.policyJson));
       gauge("key_info", 1, {
         key_id,
         name: item.name.slice(0, 64),
         priority: priority(policy.priority),
-        overload_action: bounded(policy.overloadAction, ["report", "failover"]),
+        cloud: String(policy.cloud),
       });
-      gauge("key_requests_per_minute_limit", policy.requestsPerMinute ?? 0, { key_id });
-      gauge("key_max_concurrent", policy.maxConcurrent ?? 0, { key_id });
+      gauge("key_requests_per_minute_limit", policy.requestsPerMinute, { key_id });
+      gauge("key_max_concurrent", policy.maxConcurrent, { key_id });
     } catch {
       /* Invalid stored policy cannot create a dynamic series. */
     }

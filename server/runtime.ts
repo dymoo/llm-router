@@ -2,9 +2,8 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Effect, ManagedRuntime, Schema } from "effect";
 import { getEnv, getProviderCredentials } from "../env.ts";
-import { RouterClassifier } from "../src/classifier.ts";
 import { Catalogue, type Deployment } from "../src/domain.ts";
 import type {
   FinalizeOutcome,
@@ -17,7 +16,6 @@ import { ModelRouter, modelRouterLayer, type RouterWork } from "../src/router/in
 import type { RoutedCompletion, RoutedStream, RouterOptions } from "../src/router/model-router.ts";
 import { createOpenRouterPinVerifier } from "../src/router/adapters/openrouter.ts";
 import { disposeControlPlane, keys, recheckLease } from "./control.ts";
-import { loadClassifierQualifications } from "./qualification.ts";
 import { GatewayFailure } from "../src/http/gateway-failure.ts";
 import { processState, type InferenceRuntime } from "./state.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
@@ -62,7 +60,7 @@ function makeInferenceRuntime(): InferenceRuntime {
     stopping: () => processState.stopping,
     onVerified: observeOpenRouterCompleted,
   });
-  const routerOptions: Omit<RouterOptions, "mode" | "classify"> = {
+  const routerOptions: RouterOptions = {
     catalogue: loaded.catalogue,
     catalogueVersion: loaded.catalogueVersion,
     onOpenRouterCompleted: verifyOpenRouterPin,
@@ -87,30 +85,16 @@ function makeInferenceRuntime(): InferenceRuntime {
         ),
       );
     },
-    onClassified: (work, classified) => {
-      observed.set(work.requestId, {
-        classifierBackend: classified.backend,
-        modelRevision: classified.modelRevision,
-        source: classified.source,
-        classifierInputTokens:
-          classified.reuse === "classified" ? classified.usage.input_tokens : 0,
-        classifierElapsedMs: classified.elapsedMs,
-        reuse: classified.reuse,
-      });
-    },
     onDecision: (decision, work) => {
       observed.set(work.requestId, {
         ...observed.get(work.requestId),
-        boundary: work.routing.boundary,
         decisionReason: decision.reason,
         selectionReasonCode: decision.selectionReason.code,
         selectionReasonDetail: decision.selectionReason.detail,
         exclusionJson: JSON.stringify(decision.exclusions),
-        taskKind: decision.assessment.task,
-        difficulty: decision.assessment.difficulty,
-        requestedEffort: decision.assessment.requestedEffort,
+        requestedEffort: decision.requestedEffort,
         queueWaitMs: decision.queue.waitedMs,
-        saturation: decision.saturation.verified && decision.saturation.saturated,
+        saturation: false,
         decisionTraceJson: JSON.stringify(decision),
       });
     },
@@ -127,26 +111,7 @@ function makeInferenceRuntime(): InferenceRuntime {
       }
     },
   };
-  const routerLayer =
-    env.CLASSIFIER_MODE === "rules"
-      ? modelRouterLayer({ ...routerOptions, mode: "rules" })
-      : Layer.unwrap(
-          Effect.map(RouterClassifier, (classifier) =>
-            modelRouterLayer({ ...routerOptions, classify: (input) => classifier.classify(input) }),
-          ),
-        ).pipe(
-          Layer.provide(
-            RouterClassifier.layer({
-              mode: env.CLASSIFIER_MODE,
-              layaUrl: env.LAYA_URL,
-              layaModelRevision: env.LAYA_MODEL_REVISION,
-              jevModel: env.TYPESAFE_MODEL,
-              jevApiKey: env.TYPESAFE_API_KEY,
-              jevBaseUrl: env.TYPESAFE_BASE_URL,
-              qualifications: loadClassifierQualifications(),
-            }),
-          ),
-        );
+  const routerLayer = modelRouterLayer(routerOptions);
   return {
     runtime: ManagedRuntime.make(routerLayer),
     catalogue: loaded.catalogue,
@@ -163,9 +128,9 @@ export function configuredChatDeployments(): readonly Deployment[] {
   return getInference().catalogue;
 }
 /** Narrow batch-scheduler access to the authoritative router seam. Local batch
- * work uses the same assessment, session store, and capacity pool as
- * interactive requests; spill preparation only classifies and encodes a body.
- * Remote submission and polling never come through this bridge. */
+ * work uses the same capacity pool as interactive requests; spill preparation
+ * only plans and encodes a body. Remote submission and polling never come
+ * through this bridge. */
 export function batchInferencePort(): BatchInferencePort {
   const inference = getInference();
   const cleanup = (requestId: string): void => {
@@ -224,18 +189,14 @@ function toRouterWork(work: RoutedWork): RouterWork {
     responseFormat: work.responseFormat,
     sampling: work.sampling,
     maxCompletionTokens: work.maxCompletionTokens,
+    ...(work.reasoningEffort === undefined ? {} : { reasoningEffort: work.reasoningEffort }),
     inputTokens: work.inputTokens,
-    routing: {
-      sessionId: work.routing.sessionId,
-      boundary: work.routing.boundary,
-      taskBrief: work.routing.taskBrief,
-    },
+    ...(work.sessionId === undefined ? {} : { sessionId: work.sessionId }),
     capabilities: {
       tools: work.capabilities.tools,
       json: work.capabilities.json,
       vision: work.capabilities.vision,
     },
-    freshFactsAvailable: false,
     stream: work.stream,
     ...(work.serviceTier === undefined ? {} : { serviceTier: work.serviceTier }),
     ...(work.appAttribution === undefined ? {} : { appAttribution: work.appAttribution }),
@@ -262,20 +223,20 @@ function resultMetadata(
     deploymentId: deployment.id,
     location: deployment.location,
     transport: deployment.transport,
-    boundary: work.routing.boundary,
-    trajectoryHash: createHash("sha256")
-      .update(JSON.stringify([work.keyId, work.routing.sessionId]))
-      .digest("hex"),
+    trajectoryHash:
+      work.sessionId === undefined
+        ? null
+        : createHash("sha256")
+            .update(JSON.stringify([work.keyId, work.sessionId]))
+            .digest("hex"),
     decodeTps: decodeTokensPerSecond,
     queueWaitMs: result.headers.waitedMs,
     decisionReason: result.decision.reason,
     selectionReasonCode: result.decision.selectionReason.code,
     selectionReasonDetail: result.decision.selectionReason.detail,
     exclusionJson: JSON.stringify(result.decision.exclusions),
-    taskKind: result.decision.assessment.task,
-    difficulty: result.decision.assessment.difficulty,
-    requestedEffort: result.decision.assessment.requestedEffort,
-    saturation: result.decision.saturation.verified && result.decision.saturation.saturated,
+    requestedEffort: result.decision.requestedEffort,
+    saturation: false,
     cacheObservation:
       accounting.cachedInputTokens === null
         ? "unknown"

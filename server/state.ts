@@ -4,7 +4,7 @@ import type { Metric } from "effect";
 import type { Server } from "node:http";
 import type { Deployment } from "../src/domain.ts";
 import type { AuxiliaryDeployment } from "../src/auxiliary.ts";
-import type { ClassifierUnavailable, SchemaVersionMismatch } from "../src/errors.ts";
+import type { SchemaVersionMismatch } from "../src/errors.ts";
 import type { HealthMonitor } from "../src/health.ts";
 import type { BatchDeps, FinalizeOutcome, QueueHooks } from "../src/http/contracts.ts";
 import { createStatusStore, type RequestStatusStore } from "../src/http/status.ts";
@@ -16,7 +16,7 @@ import { createCapacityPool, type CapacityPool } from "../src/router/capacity.ts
 import type { ModelRouter } from "../src/router/model-router.ts";
 
 export interface InferenceRuntime {
-  runtime: ManagedRuntime.ManagedRuntime<ModelRouter, ClassifierUnavailable>;
+  runtime: ManagedRuntime.ManagedRuntime<ModelRouter, never>;
   catalogue: readonly Deployment[];
 }
 

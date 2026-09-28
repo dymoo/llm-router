@@ -43,98 +43,77 @@ test("mutations require origin and X-Jev-Admin", async () => {
   assert.match(payload.secret, /^jrv_/);
 });
 
-test("legacy create defaults to report while legacy PATCH leaves the stored action intact", async () => {
-  const { overloadAction: _omitted, ...legacyPolicy } = samplePolicy();
-  assert.equal(
-    decodeKeyDraft({ name: "legacy", policy: legacyPolicy }).policy.overloadAction,
-    "report",
-  );
-  assert.equal(
-    decodeKeyDraft({ name: "opted in", policy: { ...legacyPolicy, overloadAction: "failover" } })
-      .policy.overloadAction,
-    "failover",
-  );
-  const patch = decodeKeyPatch({
-    expectedVersion: 1,
-    name: "legacy edited",
-    expiresAt: null,
-    policy: legacyPolicy,
-  });
-  assert.equal("overloadAction" in patch.policy, false);
+test("create and PATCH take exactly { priority, cloud, requestsPerMinute, maxConcurrent }", async () => {
+  const policy = { priority: "high", cloud: true, requestsPerMinute: 120, maxConcurrent: 4 };
+  assert.deepEqual(decodeKeyDraft({ name: "agent", expiresAt: null, policy }).policy, policy);
+  const patch = decodeKeyPatch({ expectedVersion: 1, name: "agent", expiresAt: null, policy });
+  assert.deepEqual(patch, { name: "agent", expiresAt: null, policy, expectedVersion: 1 });
 
   const keys = memoryKeys();
   const created = await handleCreateKey(
     jsonRequest(ORIGIN + "/api/admin/keys", {
       method: "POST",
       headers: { origin: ORIGIN, "x-jev-admin": "1" },
-      json: { name: "legacy", policy: legacyPolicy },
+      json: { name: "agent", expiresAt: null, policy },
     }),
     adminDeps(keys),
   );
   assert.equal(created.status, 201);
-  const body = (await created.json()) as { key: { policy: { overloadAction: string } } };
-  assert.equal(body.key.policy.overloadAction, "report");
-
-  const optedIn = memoryKeys();
-  await optedIn.createKey({
-    name: "opted in",
-    expiresAt: null,
-    policy: samplePolicy({ overloadAction: "failover" }),
-  });
+  assert.deepEqual(((await created.json()) as { key: { policy: unknown } }).key.policy, policy);
   const edited = await handleUpdateKey(
     jsonRequest(ORIGIN + "/api/admin/keys/key-1", {
       method: "PATCH",
       headers: { origin: ORIGIN, "x-jev-admin": "1" },
-      json: { expectedVersion: 1, name: "legacy edited", expiresAt: null, policy: legacyPolicy },
+      json: {
+        expectedVersion: 1,
+        name: "agent",
+        expiresAt: null,
+        policy: { ...policy, cloud: false },
+      },
     }),
-    adminDeps(optedIn),
+    adminDeps(keys),
     "key-1",
   );
   assert.equal(edited.status, 200);
-  const editedBody = (await edited.json()) as { key: { policy: { overloadAction: string } } };
-  assert.equal(editedBody.key.policy.overloadAction, "failover");
+  assert.deepEqual(((await edited.json()) as { key: { policy: unknown } }).key.policy, {
+    ...policy,
+    cloud: false,
+  });
 });
 
-test("unknown overload actions are rejected on create and PATCH", async () => {
-  const policy = { ...samplePolicy(), overloadAction: "always-cloud" };
-  assert.throws(() => decodeKeyDraft({ name: "invalid", policy }), /overloadAction/);
-  assert.throws(
-    () => decodeKeyPatch({ expectedVersion: 1, name: "invalid", policy }),
-    /overloadAction/,
-  );
-  const response = await handleCreateKey(
-    jsonRequest(ORIGIN + "/api/admin/keys", {
-      method: "POST",
-      headers: { origin: ORIGIN, "x-jev-admin": "1" },
-      json: { name: "invalid", policy },
-    }),
-    adminDeps(memoryKeys()),
-  );
-  assert.equal(response.status, 400);
-  const patchResponse = await handleUpdateKey(
-    jsonRequest(ORIGIN + "/api/admin/keys/key-1", {
-      method: "PATCH",
-      headers: { origin: ORIGIN, "x-jev-admin": "1" },
-      json: { expectedVersion: 1, name: "invalid", expiresAt: null, policy },
-    }),
-    adminDeps(memoryKeys()),
-    "key-1",
-  );
-  assert.equal(patchResponse.status, 400);
+test("removed policy fields are rejected on create and PATCH", async () => {
+  for (const removed of [
+    { overloadAction: "failover" },
+    { localityBias: 0.5 },
+    { maxWaitMs: 0 },
+    { allowedModels: null },
+    { contextLimitTokens: 65_536 },
+    { maxCompletionTokens: 8_192 },
+    { maxEstimatedUsd: null },
+    { bias: { cost: 1, quality: 1, latency: 1 } },
+  ]) {
+    const policy = { ...samplePolicy(), ...removed };
+    assert.throws(() => decodeKeyDraft({ name: "invalid", policy }), /unsupported field/);
+    const response = await handleUpdateKey(
+      jsonRequest(ORIGIN + "/api/admin/keys/key-1", {
+        method: "PATCH",
+        headers: { origin: ORIGIN, "x-jev-admin": "1" },
+        json: { expectedVersion: 1, name: "invalid", expiresAt: null, policy },
+      }),
+      adminDeps(memoryKeys()),
+      "key-1",
+    );
+    assert.equal(response.status, 400, JSON.stringify(removed));
+  }
 });
 
 test("admin rejects policy values outside the domain limits before storing a key", async () => {
   for (const override of [
-    { contextLimitTokens: 0 },
-    { maxCompletionTokens: 0 },
     { requestsPerMinute: -1 },
     { maxConcurrent: -1 },
     { maxConcurrent: 1.5 },
-    { maxWaitMs: -1 },
-    { maxWaitMs: 30_001 },
-    { maxEstimatedUsd: -0.01 },
-    { localityBias: 2 },
-    { bias: { cost: 0, quality: 0, latency: 0 } },
+    { priority: "urgent" as "high" },
+    { cloud: "yes" as unknown as boolean },
   ]) {
     const keys = memoryKeys();
     const response = await handleCreateKey(

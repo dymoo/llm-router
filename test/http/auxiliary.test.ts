@@ -38,19 +38,16 @@ function deps(fetchImpl?: typeof fetch): AuxiliaryDeps & { keys: MemoryKeys } {
     fetch: fetchImpl,
   };
 }
-test("model discovery authenticates without consuming inference admission and filters allowlists", async () => {
+test("model discovery authenticates without consuming inference admission and lists every deployment", async () => {
   const d = deps();
-  d.keys.authenticate = async () => ({
-    keyId: "k",
-    policy: samplePolicy({ allowedModels: [kev.id] }),
-  });
+  d.keys.authenticate = async () => ({ keyId: "k", policy: samplePolicy({ priority: "low" }) });
   const response = await handleModels(
     new Request("http://gateway/v1/models", { headers: { authorization: "Bearer test" } }),
     d,
   );
   assert.deepEqual(
     (await response.json()).data.map((item: { id: string }) => item.id),
-    [kev.id],
+    ["auto", kev.id],
   );
   assert.equal(d.keys.admits, 0);
   assert.equal((await handleModels(new Request("http://gateway/v1/models"), d)).status, 401);

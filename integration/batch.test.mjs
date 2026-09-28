@@ -1,14 +1,11 @@
 // Production-process HTTP regression for the batch surface.
 //
 // Runs the REAL built Next gateway, real SQLite control plane, real private content store,
-// real Classifier/Router, and the real scheduler/adapter wiring. Local fake HTTP peers (chat,
-// classifier systemone, OpenRouter batch API) are protocol peers only. A NODE_OPTIONS import
-// in the child gateway rejects any fetch that leaves loopback, so no external endpoint and no
-// paid/provider call can happen even if wiring regresses; OPENROUTER_API_KEY is a fake value.
-//
-// The classifier qualification file written here is an explicit test fixture: non-empty so the
-// fail-closed gate admits routing. It is software fixture data only, never evidence of model
-// quality. No generation-quality claim is made anywhere in this file.
+// real Router, and the real scheduler/adapter wiring. Local fake HTTP peers (chat, OpenRouter
+// batch API) are protocol peers only. A NODE_OPTIONS import in the child gateway rejects any
+// fetch that leaves loopback, so no external endpoint and no paid/provider call can happen
+// even if wiring regresses; OPENROUTER_API_KEY is a fake value. No generation-quality claim
+// is made anywhere in this file.
 //
 // Determinism rules: explicit fixture entry/release promises gate interactive generations;
 // bounded polling waits on job status and fixture observations; the only time-travel is a
@@ -47,7 +44,7 @@ const state = {
   // Fixture observations.
   batchChat: [], // chat completions whose marker starts with "batch-"
   openRouter: { posts: [], gets: [], listGets: 0, mode: "accept", holdGet: null },
-  peer: { classifierPosts: 0, chatPosts: 0, unexpectedPosts: [] },
+  peer: { chatPosts: 0, unexpectedPosts: [] },
   nextRemoteId: 0,
   keys: null,
   // Cross-test handoff: the completed local job owned by the first key.
@@ -245,18 +242,8 @@ const adminHeaders = () => ({
   "x-jev-admin": "1",
 });
 
-const keyPolicy = {
-  priority: "medium",
-  localityBias: 0.65,
-  contextLimitTokens: 4096,
-  maxCompletionTokens: 128,
-  allowedModels: null,
-  requestsPerMinute: 60,
-  maxConcurrent: 1,
-  maxWaitMs: 1000,
-  maxEstimatedUsd: null,
-  bias: { cost: 0.7, quality: 0.8, latency: 0.3 },
-};
+// Cloud keys: undispatched batch items may spill to the OpenRouter batch path.
+const keyPolicy = { priority: "medium", cloud: true, requestsPerMinute: 60, maxConcurrent: 1 };
 
 async function createKey(name, signal) {
   const response = await fetch(`${state.origin}/api/admin/keys`, {
@@ -455,43 +442,6 @@ before(
         const chunks = [];
         for await (const chunk of request) chunks.push(chunk);
         const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
-        if (url === "/v1/systemone") {
-          state.peer.classifierPosts += 1;
-          const choices = {
-            task: "coding",
-            difficulty: "easy",
-            effort: "low",
-            expectedLength: "short",
-          };
-          const answers = Object.fromEntries(
-            Object.entries(body.questions).map(([id, question]) => {
-              if (question.type === "noul")
-                return [id, { type: "noul", noul: id === "localSufficiency" ? 1 : 0 }];
-              return [
-                id,
-                {
-                  type: "choice",
-                  choice: choices[id],
-                  confidence: 1,
-                  probabilities: Object.fromEntries(
-                    Object.keys(question.criteria).map((label) => [
-                      label,
-                      label === choices[id] ? 1 : 0,
-                    ]),
-                  ),
-                },
-              ];
-            }),
-          );
-          response.end(
-            JSON.stringify({
-              model: body.model,
-              answers,
-              usage: { input_tokens: 100, output_tokens: 0 },
-            }),
-          );
-          return;
-        }
         if (url === "/api/v1/batches") {
           const id = `fake_batch_${++state.nextRemoteId}`;
           state.openRouter.posts.push({ id, body, auth: request.headers.authorization ?? "" });
@@ -562,8 +512,6 @@ before(
       maxOutputTokens: 8192,
       reasoning: { kind: "binary" },
     });
-    for (const qualityKey of ["chat", "coding", "math", "analysis", "writing", "extraction"])
-      catalogue[0].quality[qualityKey] = 0.9;
     Object.assign(catalogue[0].prices, {
       inputUsdPerMillion: 1,
       cachedInputUsdPerMillion: 1,
@@ -585,58 +533,8 @@ before(
     const batchCataloguePath = join(state.directory, "batch-catalog.json");
     state.databasePath = join(state.directory, "control.sqlite");
     state.resultsDir = join(state.directory, "batch-content");
-    const qualificationPath = join(state.directory, "classifier-qualification.json");
     await writeFile(cataloguePath, JSON.stringify(catalogue), { mode: 0o600 });
     await writeFile(batchCataloguePath, JSON.stringify(batchCatalogue), { mode: 0o600 });
-
-    // Test-fixture qualification record: explicit, non-placeholder, software fixture only.
-    const questionIds = [
-      "task",
-      "difficulty",
-      "effort",
-      "trivialChat",
-      "localSufficiency",
-      "freshFacts",
-      "expectedLength",
-    ];
-    const metric = { cases: 20, negativeCases: 10, errors: 1, falsePositives: 0 };
-    const threshold = (id) => ({
-      maxErrorRate: 0.2,
-      maxFalsePositiveRate: ["localSufficiency", "trivialChat"].includes(id) ? 0 : null,
-    });
-    await writeFile(
-      qualificationPath,
-      JSON.stringify([
-        {
-          backend: "jev",
-          modelRevision: "jev-1.13.0",
-          questionSchemaVersion: "dymoo-assessment-questions/v1",
-          calibration: {
-            evaluationSet: {
-              id: "production-batch-fixture",
-              cases: 20,
-              labelsSource: "test fixture",
-              asOf: "2026-09-22",
-            },
-            measuredAt: "2026-09-22",
-            method: "test fixture",
-            metrics: Object.fromEntries(questionIds.map((id) => [id, { ...metric }])),
-            thresholds: Object.fromEntries(questionIds.map((id) => [id, threshold(id)])),
-            verdict: "pass",
-          },
-          rates: {
-            inputUsdPerMillion: 0.042,
-            outputUsdPerMillion: 0,
-            provenance: {
-              unit: "USD-per-million-tokens",
-              source: "test fixture",
-              asOf: "2026-09-22",
-            },
-          },
-        },
-      ]),
-      { mode: 0o600 },
-    );
 
     // Loopback-only guard for the child gateway: any external fetch rejects loudly.
     const guardPath = join(state.directory, "loopback-only.mjs");
@@ -674,11 +572,7 @@ globalThis.fetch = (input, init) => {
       BATCH_RESULTS_DIR: state.resultsDir,
       AUXILIARY_CATALOG: "",
       API_KEY_PEPPER: pepper,
-      CLASSIFIER_MODE: "jev",
-      CLASSIFIER_QUALIFICATION: qualificationPath,
-      TYPESAFE_API_KEY: "fixture-only",
-      TYPESAFE_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
-      TYPESAFE_MODEL: "jev-1.13.0",
+      CLASSIFIER_MODE: "rules",
       OPENROUTER_API_KEY: FAKE_OPENROUTER_KEY,
     };
 
@@ -802,7 +696,7 @@ test(
 );
 
 test(
-  "held interactive blocks batch dispatch; release completes through classifier, router, and durable store; results retry-safe; DELETE purges",
+  "held interactive blocks batch dispatch; release completes through the router and durable store; results retry-safe; DELETE purges",
   { timeout: 90_000 },
   async (t) => {
     const { local } = state.keys;
@@ -921,7 +815,7 @@ test(
     // The private content store holds this job's bytes on disk, outside the metadata database.
     assert.ok((await storeEntries(job.id)).length > 0, "store holds the job's artifacts on disk");
 
-    // Local items finalized through the real classifier/router with COGS recorded.
+    // Local items finalized through the real router with COGS recorded.
     const itemRows = query(
       `SELECT i.custom_id, i.deployment_id, i.request_id, r.prompt_tokens, r.completion_tokens,
             r.estimated_cost_usd, r.cost_source, r.classifier_backend, r.status
@@ -937,7 +831,7 @@ test(
       assert.equal(row.completion_tokens, 2);
       assert.ok(row.estimated_cost_usd > 0, "local COGS retained");
       assert.equal(row.cost_source, "local-rate-card");
-      assert.equal(row.classifier_backend, "jev");
+      assert.equal(row.classifier_backend, null);
     }
     const streamItem = query(
       "SELECT status, request_id, deployment_id FROM batch_items WHERE job_id = ? AND custom_id = ?",

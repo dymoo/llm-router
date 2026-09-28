@@ -211,6 +211,7 @@ function toJob(row: JobRow): BatchJob {
     createdAt: row.createdAt,
     finalizedAt: row.finalizedAt,
     spillAt: row.spillAt,
+    cloud: row.cloud === 1,
     requestCounts: {
       total: row.requestCountsTotal,
       completed: row.requestCountsCompleted,
@@ -443,7 +444,9 @@ export function createBatchLedger(db: ControlPlaneDb, options?: BatchLedgerOptio
           and(
             eq(batchItems.status, "queued"),
             inArray(batchJobs.status, [...JOB_DISPATCHABLE_STATUSES]),
-            spillDueAt === undefined ? undefined : lte(batchJobs.spillAt, spillDueAt),
+            spillDueAt === undefined
+              ? undefined
+              : and(eq(batchJobs.cloud, 1), lte(batchJobs.spillAt, spillDueAt)),
           ),
         )
         .orderBy(asc(batchItems.createdAt), asc(batchItems.id))
@@ -591,6 +594,7 @@ export function createBatchLedger(db: ControlPlaneDb, options?: BatchLedgerOptio
             createdAt,
             finalizedAt: null,
             spillAt: job.spillAt,
+            cloud: job.cloud === false ? 0 : 1,
             usageJson: null,
             requestCountsTotal: items.length,
             requestCountsCompleted: 0,

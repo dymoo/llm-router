@@ -39,7 +39,7 @@ function live(path: string, pepper = "pepper-a") {
 }
 
 const oneAtATime: KeyPolicy = {
-  ...POLICY_SUGGESTIONS.Balanced,
+  ...POLICY_SUGGESTIONS.Standard,
   maxConcurrent: 1,
   requestsPerMinute: 30,
 };
@@ -106,7 +106,7 @@ describe("admission", () => {
           expectedVersion: created.key.version,
           name: "recheck",
           expiresAt: null,
-          policy: { ...POLICY_SUGGESTIONS.Dylan, maxConcurrent: 1, requestsPerMinute: 30 },
+          policy: { ...POLICY_SUGGESTIONS.Interactive, maxConcurrent: 1, requestsPerMinute: 30 },
         });
         const stale = yield* keys.recheck(admission).pipe(Effect.result);
         assert.equal(stale._tag, "Failure");
@@ -137,7 +137,7 @@ describe("admission", () => {
         const created = yield* keys.createKey({
           name: "rpm",
           expiresAt: null,
-          policy: { ...POLICY_SUGGESTIONS.Balanced, maxConcurrent: 8, requestsPerMinute: 1 },
+          policy: { ...POLICY_SUGGESTIONS.Standard, maxConcurrent: 8, requestsPerMinute: 1 },
         });
         const first = yield* keys.admit(created.secret);
         const limited = yield* keys.admit(created.secret).pipe(Effect.result);
@@ -220,7 +220,7 @@ describe("admission", () => {
         const created = yield* keys.createKey({
           name: "cogs",
           expiresAt: null,
-          policy: { ...POLICY_SUGGESTIONS.Balanced, maxConcurrent: 4, requestsPerMinute: 30 },
+          policy: { ...POLICY_SUGGESTIONS.Standard, maxConcurrent: 4, requestsPerMinute: 30 },
         });
         const a = yield* keys.admit(created.secret);
         yield* keys.finalize(a, {

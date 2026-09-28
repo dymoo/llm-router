@@ -4,6 +4,7 @@ import { Clock, Context, Effect, Layer, Schema } from "effect";
 import {
   CandidateExclusion,
   KeyPolicy,
+  decodeStoredKeyPolicy,
   type AnalyticsSnapshot,
   type ApiKeyPublic,
   type ClassificationReuse,
@@ -82,9 +83,6 @@ type TerminalObservation = {
   outcome: FinalizeOutcome;
 };
 
-type KeyPolicyUpdate = Omit<KeyPolicyType, "overloadAction"> &
-  Partial<Pick<KeyPolicyType, "overloadAction">>;
-
 export class KeyRepository extends Context.Service<
   KeyRepository,
   {
@@ -100,7 +98,7 @@ export class KeyRepository extends Context.Service<
       expectedVersion: number;
       name: string;
       expiresAt: number | null;
-      policy: KeyPolicyUpdate;
+      policy: KeyPolicyType;
     }): Effect.Effect<ApiKeyPublic, RepoError>;
     revokeKey(id: string): Effect.Effect<ApiKeyPublic, RepoError>;
     rotateKey(input: { id: string; expectedVersion: number }): Effect.Effect<CreatedKey, RepoError>;
@@ -168,7 +166,7 @@ function mapRepoError(cause: unknown): RepoError {
 
 function decodePolicyJson(json: string): KeyPolicyType {
   try {
-    return Schema.decodeUnknownSync(KeyPolicy)(JSON.parse(json) as unknown);
+    return decodeStoredKeyPolicy(JSON.parse(json) as unknown);
   } catch {
     throw new InvalidInput({ message: "stored policy is invalid" });
   }
@@ -615,7 +613,7 @@ export const keyRepositoryLayer = (options: {
         expectedVersion: number;
         name: string;
         expiresAt: number | null;
-        policy: KeyPolicyUpdate;
+        policy: KeyPolicyType;
       }) {
         const now = yield* Clock.currentTimeMillis;
         return yield* Effect.try({
@@ -636,13 +634,11 @@ export const keyRepositoryLayer = (options: {
                 if (input.expiresAt !== null && input.expiresAt < now) {
                   throw new InvalidInput({ message: "expiry must be in the future" });
                 }
-                const overloadAction =
-                  input.policy.overloadAction ?? decodePolicyJson(row.policyJson).overloadAction;
                 tx.update(apiKeys)
                   .set({
                     name,
                     expiresAt: input.expiresAt,
-                    policyJson: encodePolicy({ ...input.policy, overloadAction }),
+                    policyJson: encodePolicy(input.policy),
                     version: row.version + 1,
                   })
                   .where(and(eq(apiKeys.id, input.id), eq(apiKeys.version, input.expectedVersion)))
@@ -817,7 +813,6 @@ export const keyRepositoryLayer = (options: {
               status: "running",
               deferred: 0,
               priority: policy.priority,
-              localityBias: policy.localityBias,
             })
             .run();
           tx.update(apiKeys).set({ lastUsedAt: now }).where(eq(apiKeys.id, row.id)).run();

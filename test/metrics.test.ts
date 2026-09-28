@@ -61,7 +61,7 @@ it("counts only a committed terminal transition, and never treats unknown usage 
       const created = yield* keys.createKey({
         name: "secret-label",
         expiresAt: null,
-        policy: POLICY_SUGGESTIONS.Balanced,
+        policy: POLICY_SUGGESTIONS.Standard,
       });
       const admission = yield* keys.admit(created.secret);
       yield* keys.finalize(admission, {
@@ -122,7 +122,7 @@ it("keeps committed classifier source and reuse on classification series", async
       const created = yield* keys.createKey({
         name: "classified",
         expiresAt: null,
-        policy: POLICY_SUGGESTIONS.Balanced,
+        policy: POLICY_SUGGESTIONS.Standard,
       });
       const admission = yield* keys.admit(created.secret);
       yield* keys.finalize(admission, {
@@ -240,7 +240,7 @@ it("counts a recovered stale lease once after its maintenance transaction commit
       const created = yield* keys.createKey({
         name: "stale",
         expiresAt: null,
-        policy: POLICY_SUGGESTIONS.Balanced,
+        policy: POLICY_SUGGESTIONS.Standard,
       });
       yield* keys.admit(created.secret);
       return created.key.id;

@@ -10,13 +10,8 @@ import type {
   RoutedWork,
   StreamSuccess,
 } from "./contracts.ts";
-import {
-  classifierInputFor,
-  decodeAppAttribution,
-  decodeChatCompletion,
-  requestCapabilities,
-} from "./decode.ts";
-import { errorBody, failureResponse, flexFailure, jsonResponse, toHttpFailure } from "./errors.ts";
+import { decodeAppAttribution, decodeChatCompletion, requestCapabilities } from "./decode.ts";
+import { errorBody, failureResponse, jsonResponse, toHttpFailure } from "./errors.ts";
 import { sessionResponseHeaders, sseHeaders } from "./headers.ts";
 import { BODY_READ_TIMEOUT_MS, GATEWAY_EFFECT_TIMEOUT_MS, INFERENCE_MAX_BYTES } from "./limits.ts";
 import { bearerToken } from "./security.ts";
@@ -53,7 +48,6 @@ export async function handleChatCompletions(
   const deadline = createDeadline(GATEWAY_EFFECT_TIMEOUT_MS, [request.signal, cancellation.signal]);
   const signal = deadline.signal;
   let streaming = false;
-  let flex = false;
   const app = decodeAppAttribution(request.headers);
   const finalize: Finalize = (outcome, state) => {
     if (admission === undefined) return Promise.resolve();
@@ -83,20 +77,17 @@ export async function handleChatCompletions(
       maxBytes: INFERENCE_MAX_BYTES,
       timeoutMs: BODY_READ_TIMEOUT_MS,
     });
-    const decoded = decodeChatCompletion(body, { newId });
-    // Open WebUI's chat id is advisory continuity, never user identity or authorization.
-    // Explicit routing always wins; namespacing by the authenticated key happens in the router.
+    const decoded = decodeChatCompletion(body);
+    // Open WebUI's chat id is a stickiness hint, never identity or authorization: an
+    // explicit routing object wins, a malformed id is ignored, and the router
+    // namespaces sessions by the authenticated key.
     const webuiChat = request.headers.get("x-openwebui-chat-id");
-    if (body.routing === undefined && webuiChat !== null) {
-      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(webuiChat))
-        throw Object.assign(new Error("invalid chat id"), { _tag: "InvalidInput" });
-      decoded.routing = {
-        sessionId: `webui:${webuiChat}`,
-        boundary: decoded.messages.some((message) => message.role === "assistant")
-          ? "continue"
-          : "new-task",
-      };
-    }
+    if (
+      body.routing === undefined &&
+      webuiChat !== null &&
+      /^[a-zA-Z0-9_-]{1,128}$/.test(webuiChat)
+    )
+      decoded.sessionId = `webui:${webuiChat}`;
     const capabilities = requestCapabilities(decoded);
     const inputTokens = estimateInputTokens(decoded);
     signal.throwIfAborted();
@@ -109,21 +100,8 @@ export async function handleChatCompletions(
       priority: admission.policy.priority,
     });
     claimed = true;
-    if (admission.policy.allowedModels !== null && admission.policy.allowedModels.length === 0) {
-      throw Object.assign(new Error("no deployments are allowed"), { _tag: "EmptyAllowlist" });
-    }
-    if (
-      inputTokens > admission.policy.contextLimitTokens ||
-      (decoded.maxCompletionTokens !== undefined &&
-        decoded.maxCompletionTokens > admission.policy.maxCompletionTokens)
-    ) {
-      throw Object.assign(new Error("request exceeds configured limits"), {
-        _tag: "ImpossibleLimits",
-      });
-    }
     admission = await deps.keys.recheck(admission);
     const serviceTier = serviceTierFor(admission.policy.priority, decoded.serviceTier);
-    flex = serviceTier === "flex";
     const work: RoutedWork = {
       requestId: admission.requestId,
       keyId: admission.keyId,
@@ -136,26 +114,17 @@ export async function handleChatCompletions(
       responseFormat: decoded.response_format,
       sampling: decoded.sampling,
       maxCompletionTokens: decoded.maxCompletionTokens,
+      ...(decoded.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: decoded.reasoningEffort }),
       inputTokens,
-      routing: decoded.routing,
+      ...(decoded.sessionId === undefined ? {} : { sessionId: decoded.sessionId }),
       capabilities,
-      classifierInput: classifierInputFor(decoded, capabilities, inputTokens),
-      freshFactsAvailable: false,
       stream: decoded.stream,
       ...(serviceTier === undefined ? {} : { serviceTier }),
       ...(app === undefined ? {} : { appAttribution: app }),
     };
     if (decoded.stream) {
-      // Flex never queues, so dispatch before committing the 200: a refusal is
-      // then a real HTTP 429 resource_unavailable, as OpenAI clients expect.
-      const preflighted =
-        work.serviceTier === "flex"
-          ? await deps.gateway.stream(
-              work,
-              { onQueued: () => undefined, onDispatched: () => undefined },
-              signal,
-            )
-          : undefined;
       const response = streamCompletion(
         deps,
         work,
@@ -165,7 +134,6 @@ export async function handleChatCompletions(
         cancellation,
         signal,
         deadline.clear,
-        preflighted,
       );
       streaming = true;
       return response;
@@ -210,7 +178,7 @@ export async function handleChatCompletions(
         Object.assign(new Error("persistence unavailable"), { _tag: "DatabaseError" }),
       );
     }
-    return failureResponse(flex ? flexFailure(error) : error);
+    return failureResponse(error);
   } finally {
     if (!streaming) deadline.clear();
   }
@@ -225,7 +193,6 @@ function streamCompletion(
   cancellation: AbortController,
   signal: AbortSignal,
   clearDeadline: () => void,
-  preflighted?: StreamSuccess,
 ): Response {
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
@@ -254,8 +221,9 @@ function streamCompletion(
   const keepalive = setInterval(() => {
     if (!dispatched && pendingWrites === 0) void write(encodeKeepalive());
   }, 15_000);
+  // Keepalives run until the provider stream is established: a flex request can
+  // go back to waiting after a dispatch Gufo refused.
   const event = (state: "queued" | "dispatched", waitedMs: number): void => {
-    if (state === "dispatched") dispatched = true;
     deps.status.update(admission.keyId, correlationId, { state, waitedMs });
     void write(
       encodeQueueEvent({
@@ -269,14 +237,12 @@ function streamCompletion(
   const pump = async (): Promise<void> => {
     try {
       signal.throwIfAborted();
-      if (preflighted === undefined) await deps.keys.recheck(admission);
-      result =
-        preflighted ??
-        (await deps.gateway.stream(
-          work,
-          { onQueued: (ms) => event("queued", ms), onDispatched: (ms) => event("dispatched", ms) },
-          signal,
-        ));
+      await deps.keys.recheck(admission);
+      result = await deps.gateway.stream(
+        work,
+        { onQueued: (ms) => event("queued", ms), onDispatched: (ms) => event("dispatched", ms) },
+        signal,
+      );
       dispatched = true;
       clearInterval(keepalive);
       reader = result.body.getReader();
@@ -317,7 +283,8 @@ function streamCompletion(
         const body = {
           error: {
             ...errorBody(publicFailure).error,
-            ...(publicFailure.code === "local_overloaded"
+            ...(publicFailure.code === "local_overloaded" ||
+            publicFailure.code === "resource_unavailable"
               ? { retry_after_seconds: publicFailure.retryAfterSeconds ?? 1 }
               : {}),
           },
@@ -345,7 +312,7 @@ function streamCompletion(
   const headers = sseHeaders({
     requestId: correlationId,
     deploymentId: "",
-    sessionId: work.routing.sessionId,
+    ...(work.sessionId === undefined ? {} : { sessionId: work.sessionId }),
     appliedEffort: "",
     priority: admission.policy.priority,
   });

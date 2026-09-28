@@ -2,13 +2,21 @@ import { Clock, Deferred, Effect, Exit } from "effect";
 import {
   MAX_CAPACITY_WAIT_MS,
   type Deployment as ModelDeployment,
-  type KeyPolicy,
   type Priority,
 } from "../domain.ts";
 import { CapacityBusy } from "../errors.ts";
 import { QueueFull } from "./failures.ts";
 
 export const DEFAULT_QUEUE_SLOTS = 128;
+
+/** How long a default-tier request waits for Gufo (a permit, or admission after a
+ * pre-enqueue refusal) before it goes to cloud or fails `local_overloaded`. */
+export const LOCAL_WAIT_MS = { high: 5_000, medium: 30_000 } as const;
+/** How long a flex request waits for idle local compute; under the 11-minute
+ * gateway deadline (`GATEWAY_EFFECT_TIMEOUT_MS`). */
+export const FLEX_MAX_WAIT_MS = 10 * 60 * 1000;
+/** Flex slots per deployment when Gufo does not report `sessions.flex_limit`. */
+export const DEFAULT_FLEX_LIMIT = 2;
 export const DEFAULT_POLL_MS = 50;
 
 type Deployment = Pick<ModelDeployment, "id" | "capacity">;
@@ -60,7 +68,6 @@ export interface CapacityPool {
     options: {
       readonly requestId: string;
       readonly waitMs: number;
-      readonly spill: boolean;
       readonly onQueue?: (event: QueueEvent) => void;
       readonly onOutcome?: (event: "timeout" | "full", priority: WorkPriority) => void;
     },
@@ -357,10 +364,3 @@ function busyError(ranked: readonly Deployment[]): CapacityBusy {
     message: id === undefined ? "all-busy" : `all-busy:${id}`,
   });
 }
-
-export function waitBudgetMs(policy: KeyPolicy): number {
-  return Math.min(Math.max(0, policy.maxWaitMs), MAX_CAPACITY_WAIT_MS);
-}
-
-export { preferredLocationFromBias as preferredLocation } from "./locality.ts";
-export { cloudSpillPermitted as spillAllowed } from "./locality.ts";

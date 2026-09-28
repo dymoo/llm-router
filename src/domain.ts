@@ -1,11 +1,5 @@
-import { Effect, Schema } from "effect";
-import {
-  CatalogueInvalid,
-  EmptyAllowlist,
-  ImpossibleLimits,
-  UnsupportedCapabilities,
-  type FeasibilityError,
-} from "./errors.ts";
+import { Effect, Predicate, Schema } from "effect";
+import { CatalogueInvalid } from "./errors.ts";
 
 export const Probability = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }));
 export type Probability = typeof Probability.Type;
@@ -60,15 +54,9 @@ export type AppAttribution = {
   readonly visibility?: "hidden";
 };
 
-export const OverloadAction = Schema.Literals(["report", "failover"]);
-export type OverloadAction = typeof OverloadAction.Type;
-
 /** Gufo is the local runtime; openai-compatible is the generic escape hatch. */
 export const Transport = Schema.Literals(["gufo", "openai-compatible", "openrouter"]);
 export type Transport = typeof Transport.Type;
-
-export const SessionBoundary = Schema.Literals(["new-task", "continue", "checkpoint"]);
-export type SessionBoundary = typeof SessionBoundary.Type;
 
 export const ClassifierMode = Schema.Literals(["laya", "jev"]);
 export type ClassifierMode = typeof ClassifierMode.Type;
@@ -87,12 +75,6 @@ export type RequestOutcome = typeof RequestOutcome.Type;
 
 export const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh"] as const;
 
-export const VISIBLE_OUTPUT_TOKENS = {
-  short: 256,
-  medium: 1024,
-  long: 3072,
-} as const;
-
 export const TOKEN_ESTIMATE_PER_MESSAGE_OVERHEAD = 32;
 export const TOKEN_ESTIMATE_RESERVE = 1024;
 export const CLASSIFIER_BRIEF_MAX_CHARS = 24_000;
@@ -104,8 +86,6 @@ export const JEV_TOTAL_TOKEN_LIMIT = 64_000;
 /** Documented Jev budget for state + the longest single question. Not a tokenizer measurement. */
 export const JEV_STATE_PLUS_LONGEST_QUESTION_LIMIT = 32_000;
 export const JEV_MODEL_ID = "jev-1.13.0";
-export const FRESH_FACTS_RETRIEVAL_THRESHOLD = 0.8;
-export const LOCAL_SUFFICIENCY_THRESHOLD = 0.8;
 export const MAX_CAPACITY_WAIT_MS = 30_000;
 export const ASSESSMENT_QUESTION_SCHEMA_VERSION = "dymoo-assessment-questions/v1";
 export const CLASSIFICATION_CACHE_TTL_MS = 120_000;
@@ -122,113 +102,32 @@ const nonEmptyRecord = Schema.makeFilter<Readonly<Record<string, unknown>>>(
   (value) => Object.keys(value).length > 0 || "Expected at least one entry",
 );
 
-const positiveBias = Schema.makeFilter<{
-  readonly cost: number;
-  readonly quality: number;
-  readonly latency: number;
-}>(
-  (bias) =>
-    bias.cost > 0 || bias.quality > 0 || bias.latency > 0 || "At least one bias must be positive",
-);
-
-const Bias = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }));
-
-/** 0 = cloud-first. 1 = local until verified runtime saturation. */
-export const LOCALITY_CLOUD_FIRST_MAX = 0.05;
-export const LOCALITY_COMPLEXITY_CLOUD_MAX = 0.5;
-export const LOCALITY_SATURATION_MIN = 0.95;
-
-export const explainLocalityBias = (value: number): string => {
-  if (value <= LOCALITY_CLOUD_FIRST_MAX) {
-    return "Cloud-first. Local stays eligible when it satisfies hard limits; this is a preference, not a percentage guarantee.";
-  }
-  if (value >= LOCALITY_SATURATION_MIN) {
-    return "Stay local until verified runtime saturation. Gateway slot counts and unknown telemetry are not saturation.";
-  }
-  if (value < LOCALITY_COMPLEXITY_CLOUD_MAX) {
-    return "Lean cloud while keeping local eligible. Highly complex work may use cloud. Preference, not a chance guarantee.";
-  }
-  return "Prefer local. Highly complex tasks or verified saturation may use cloud. Preference, not a chance guarantee.";
-};
-
+/** The whole per-key routing policy. `cloud` lets high and medium work leave Gufo. */
 export const KeyPolicy = Schema.Struct({
   priority: Priority,
-  localityBias: Bias,
-  contextLimitTokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
-  maxCompletionTokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
-  allowedModels: Schema.NullOr(Schema.Array(Schema.String)),
+  cloud: Schema.Boolean,
   requestsPerMinute: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   maxConcurrent: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  maxWaitMs: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_CAPACITY_WAIT_MS })),
-  overloadAction: OverloadAction.pipe(
-    Schema.withDecodingDefaultKey(Effect.succeed<OverloadAction>("report")),
-  ),
-  maxEstimatedUsd: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
-  bias: Schema.Struct({
-    cost: Bias,
-    quality: Bias,
-    latency: Bias,
-  }).check(positiveBias),
 });
 export type KeyPolicy = typeof KeyPolicy.Type;
 
-export const POLICY_SUGGESTIONS = {
-  Balanced: {
-    priority: "medium",
-    localityBias: 0.65,
-    contextLimitTokens: 65_536,
-    maxCompletionTokens: 8_192,
-    allowedModels: null,
-    requestsPerMinute: 60,
-    maxConcurrent: 2,
-    maxWaitMs: 0,
-    overloadAction: "report",
-    maxEstimatedUsd: null,
-    bias: { cost: 0.7, quality: 0.5, latency: 0.3 },
-  },
-  Dylan: {
-    priority: "high",
-    localityBias: 0.15,
-    contextLimitTokens: 131_072,
-    maxCompletionTokens: 16_384,
-    allowedModels: null,
-    requestsPerMinute: 120,
-    maxConcurrent: 4,
-    maxWaitMs: 0,
-    overloadAction: "report",
-    maxEstimatedUsd: null,
-    bias: { cost: 0.2, quality: 0.9, latency: 0.3 },
-  },
-  "Free Vibecode": {
-    priority: "low",
-    localityBias: 0.95,
-    contextLimitTokens: 32_768,
-    maxCompletionTokens: 4_096,
-    allowedModels: null,
-    requestsPerMinute: 30,
-    maxConcurrent: 1,
-    maxWaitMs: 30_000,
-    overloadAction: "report",
-    maxEstimatedUsd: null,
-    bias: { cost: 1, quality: 0.3, latency: 0.05 },
-  },
-} as const satisfies Record<string, KeyPolicy>;
-export type PolicySuggestionName = keyof typeof POLICY_SUGGESTIONS;
+/**
+ * A stored policy. Rows written before migration 0007 carry the old shape;
+ * they derive `cloud` from `overloadAction` exactly as the migration does, so
+ * an unmigrated row never bricks its key.
+ */
+export const decodeStoredKeyPolicy = (value: unknown): KeyPolicy =>
+  Schema.decodeUnknownSync(KeyPolicy)(
+    Predicate.isObject(value) && !("cloud" in value)
+      ? { ...value, cloud: value.overloadAction === "failover" }
+      : value,
+  );
 
-export const KEY_POLICY_EDITABLE_FIELDS = [
-  "priority",
-  "localityBias",
-  "contextLimitTokens",
-  "maxCompletionTokens",
-  "allowedModels",
-  "requestsPerMinute",
-  "maxConcurrent",
-  "maxWaitMs",
-  "overloadAction",
-  "maxEstimatedUsd",
-  "bias",
-] as const;
-export type KeyPolicyEditableField = (typeof KEY_POLICY_EDITABLE_FIELDS)[number];
+export const POLICY_SUGGESTIONS = {
+  Interactive: { priority: "high", cloud: true, requestsPerMinute: 120, maxConcurrent: 4 },
+  Standard: { priority: "medium", cloud: false, requestsPerMinute: 60, maxConcurrent: 2 },
+  Background: { priority: "low", cloud: false, requestsPerMinute: 30, maxConcurrent: 2 },
+} as const satisfies Record<string, KeyPolicy>;
 
 export const EstimateProvenance = Schema.Struct({
   unit: Schema.NonEmptyString,
@@ -250,17 +149,6 @@ export const Capacity = Schema.Struct({
 });
 export type Capacity = typeof Capacity.Type;
 
-export const Quality = Schema.Struct({
-  chat: Probability,
-  coding: Probability,
-  math: Probability,
-  analysis: Probability,
-  writing: Probability,
-  extraction: Probability,
-  provenance: EstimateProvenance,
-});
-export type Quality = typeof Quality.Type;
-
 export const Prices = Schema.Struct({
   inputUsdPerMillion: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
   cachedInputUsdPerMillion: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -268,13 +156,6 @@ export const Prices = Schema.Struct({
   provenance: EstimateProvenance,
 });
 export type Prices = typeof Prices.Type;
-
-export const Latency = Schema.Struct({
-  initialMs: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
-  tokensPerSecond: Schema.Finite.check(Schema.isGreaterThan(0)),
-  provenance: EstimateProvenance,
-});
-export type Latency = typeof Latency.Type;
 
 const reasoningShape = Schema.makeFilter<{
   readonly kind: ReasoningKind;
@@ -300,15 +181,6 @@ export const Reasoning = Schema.Struct({
 }).check(reasoningShape);
 export type Reasoning = typeof Reasoning.Type;
 
-export const ReasoningTokenEstimates = Schema.Struct({
-  none: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  low: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  medium: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  high: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  xhigh: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-});
-export type ReasoningTokenEstimates = typeof ReasoningTokenEstimates.Type;
-
 export const Deployment = Schema.Struct({
   id: Schema.NonEmptyString,
   modelId: Schema.NonEmptyString,
@@ -321,11 +193,8 @@ export const Deployment = Schema.Struct({
   maxOutputTokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
   capabilities: Capabilities,
   capacity: Capacity,
-  quality: Quality,
   prices: Prices,
-  latency: Latency,
   reasoning: Reasoning,
-  reasoningTokenEstimates: ReasoningTokenEstimates,
 });
 export type Deployment = typeof Deployment.Type;
 
@@ -354,20 +223,9 @@ export const Assessment = Schema.Struct({
 });
 export type Assessment = typeof Assessment.Type;
 
-export const SessionPin = Schema.Struct({
-  deploymentId: Schema.NonEmptyString,
-  requestedEffort: RequestedEffort,
-  appliedEffort: AppliedEffort,
-  continuityKey: Schema.NonEmptyString,
-  assessment: Schema.NullOr(Assessment),
-  createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-});
-export type SessionPin = typeof SessionPin.Type;
-
 export const Reservation = Schema.Struct({
   requestId: Schema.NonEmptyString,
   deploymentId: Schema.NonEmptyString,
-  sessionId: Schema.NonEmptyString,
   requestedEffort: RequestedEffort,
   appliedEffort: AppliedEffort,
 });
@@ -819,36 +677,6 @@ export const CandidateExclusion = Schema.Struct({
 });
 export type CandidateExclusion = typeof CandidateExclusion.Type;
 
-/** Metadata-only request drilldown. Never includes prompts, completions, reasoning text, or raw keys. */
-export const AnalyticsRequestRow = Schema.Struct({
-  requestId: Schema.NonEmptyString,
-  keyId: Schema.NonEmptyString,
-  createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  priority: Priority,
-  localityBias: Probability,
-  keyPolicyVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
-  deploymentId: Schema.NullOr(Schema.String),
-  location: Schema.NullOr(Location),
-  transport: Schema.NullOr(Transport),
-  boundary: Schema.NullOr(SessionBoundary),
-  assessmentTask: Schema.NullOr(TaskKind),
-  assessmentDifficulty: Schema.NullOr(Difficulty),
-  assessmentEffort: Schema.NullOr(AssessedEffort),
-  selectionReason: Schema.NullOr(SelectionReason),
-  exclusions: Schema.Array(CandidateExclusion),
-  queueWaitMs: UnknownCount,
-  decodeTokensPerSecond: Schema.NullOr(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
-  saturation: Schema.Boolean,
-  /** Client-declared app attribution (advisory, unverified). */
-  appUrl: Schema.NullOr(Schema.String),
-  appTitle: Schema.NullOr(Schema.String),
-  httpOutcome: RequestOutcome,
-  /** Always null until an explicit future opt-in evaluator. HTTP success is not task success. */
-  taskSuccess: Schema.Null,
-  accounting: RequestAccounting,
-});
-export type AnalyticsRequestRow = typeof AnalyticsRequestRow.Type;
-
 export const AnalyticsBucket = Schema.Struct({
   startMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   endMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -996,6 +824,8 @@ export const BatchJob = Schema.Struct({
   createdAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   finalizedAt: UnknownCount,
   spillAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** The submitting key allowed cloud: only then may undispatched items spill. */
+  cloud: Schema.Boolean,
   requestCounts: BatchRequestCounts,
   usage: Schema.NullOr(BatchUsage),
   errorCode: Schema.NullOr(Schema.String),
@@ -1050,6 +880,8 @@ export interface BatchJobDraft {
   readonly completionWindowMs: number;
   /** Computed by the scheduler's spill rule before create; stored verbatim. */
   readonly spillAt: number;
+  /** Whether undispatched items may spill to cloud. Default true. */
+  readonly cloud?: boolean;
   readonly createdAt?: number;
   readonly status?: BatchStatus;
   readonly errorCode?: string | null;
@@ -1061,8 +893,6 @@ export interface BatchItemDraft {
   readonly errorCode?: string | null;
 }
 
-export const decodeKeyPolicy = Schema.decodeUnknownEffect(KeyPolicy);
-export const decodeDeployment = Schema.decodeUnknownEffect(Deployment);
 export const decodeCatalogue = Schema.decodeUnknownEffect(Catalogue);
 export const decodeAssessment = Schema.decodeUnknownEffect(Assessment);
 export const decodeClassifierRequest = Schema.decodeUnknownEffect(ClassifierRequest);
@@ -1071,8 +901,6 @@ export const decodeLayaHealth = Schema.decodeUnknownEffect(LayaHealth);
 export const decodeLayaBudget = Schema.decodeUnknownEffect(LayaBudget);
 export const decodeRequestAccounting = Schema.decodeUnknownEffect(RequestAccounting);
 export const decodeGenerationUsage = Schema.decodeUnknownEffect(GenerationUsage);
-export const decodeAnalyticsRequestRow = Schema.decodeUnknownEffect(AnalyticsRequestRow);
-export const decodeAnalyticsSnapshot = Schema.decodeUnknownEffect(AnalyticsSnapshot);
 
 export const isPlaceholderValue = (value: string): boolean => value.includes("REPLACE_");
 
@@ -1123,29 +951,6 @@ export const applyConfiguredRateCardUsd = (
 export const estimateInputTokens = (serializedUtf8Bytes: number, messageCount: number): number =>
   serializedUtf8Bytes + TOKEN_ESTIMATE_PER_MESSAGE_OVERHEAD * messageCount + TOKEN_ESTIMATE_RESERVE;
 
-export interface CapabilityNeeds {
-  readonly tools: boolean;
-  readonly json: boolean;
-  readonly vision: boolean;
-}
-
-export interface FeasibilityInput {
-  readonly policy: KeyPolicy;
-  readonly catalogue: readonly Deployment[];
-  readonly estimatedInputTokens: number;
-  readonly requestedCompletionTokens: number;
-  readonly capabilities: CapabilityNeeds;
-}
-
-export const permittedByAllowlist = (
-  policy: KeyPolicy,
-  catalogue: readonly Deployment[],
-): readonly Deployment[] => {
-  if (policy.allowedModels === null) return catalogue;
-  const allowed = new Set(policy.allowedModels);
-  return catalogue.filter((deployment) => allowed.has(deployment.id));
-};
-
 export const checkCatalogueForInference = (
   catalogue: readonly Deployment[],
 ): Effect.Effect<Catalogue, CatalogueInvalid> => {
@@ -1165,67 +970,4 @@ export const checkCatalogueForInference = (
   return Schema.decodeUnknownEffect(Catalogue)(catalogue).pipe(
     Effect.mapError(() => new CatalogueInvalid({ message: "Catalogue failed runtime validation" })),
   );
-};
-
-export const checkFeasibility = (
-  input: FeasibilityInput,
-): Effect.Effect<readonly Deployment[], FeasibilityError> => {
-  if (input.policy.allowedModels !== null && input.policy.allowedModels.length === 0) {
-    return Effect.fail(new EmptyAllowlist({ message: "Explicit allowlist is empty" }));
-  }
-
-  const keyContext = input.policy.contextLimitTokens;
-  const keyCompletion = input.policy.maxCompletionTokens;
-  if (
-    input.estimatedInputTokens > keyContext ||
-    input.requestedCompletionTokens > keyCompletion ||
-    input.estimatedInputTokens + input.requestedCompletionTokens > keyContext
-  ) {
-    return Effect.fail(
-      new ImpossibleLimits({
-        message: "Requested context or completion tokens exceed the key policy",
-      }),
-    );
-  }
-
-  const allowed = permittedByAllowlist(input.policy, input.catalogue);
-  const capable = allowed.filter(
-    (deployment) =>
-      (!input.capabilities.tools || deployment.capabilities.tools) &&
-      (!input.capabilities.json || deployment.capabilities.json) &&
-      (!input.capabilities.vision || deployment.capabilities.vision),
-  );
-  if (capable.length === 0) {
-    return Effect.fail(
-      new UnsupportedCapabilities({
-        message:
-          "No permitted deployment supports the requested tools, JSON, or vision capabilities",
-      }),
-    );
-  }
-
-  const fitting = capable.filter(
-    (deployment) =>
-      input.estimatedInputTokens <= deployment.contextLimitTokens &&
-      input.requestedCompletionTokens <= deployment.maxOutputTokens &&
-      input.estimatedInputTokens + input.requestedCompletionTokens <= deployment.contextLimitTokens,
-  );
-  if (fitting.length === 0) {
-    return Effect.fail(
-      new ImpossibleLimits({
-        message: "Requested context or completion tokens exceed every permitted deployment",
-      }),
-    );
-  }
-
-  if (fitting.some(deploymentIsPlaceholder)) {
-    return Effect.fail(
-      new CatalogueInvalid({
-        message:
-          "Catalogue contains unverified REPLACE_ placeholders and cannot be used for inference",
-      }),
-    );
-  }
-
-  return Effect.succeed(fitting);
 };

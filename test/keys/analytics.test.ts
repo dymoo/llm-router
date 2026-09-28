@@ -33,12 +33,12 @@ test("SQLite analytics separates actual costs, local COGS, unknown usage, reuse 
         const local = yield* keys.createKey({
           name: "local",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS["Free Vibecode"],
+          policy: POLICY_SUGGESTIONS.Background,
         });
         const cloud = yield* keys.createKey({
           name: "cloud",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS.Dylan,
+          policy: POLICY_SUGGESTIONS.Interactive,
         });
         const first = yield* keys.admit(local.secret);
         yield* keys.finalize(first, {
@@ -213,7 +213,7 @@ async function snapshotFor(
         const created = yield* keys.createKey({
           name: "accounting",
           expiresAt: null,
-          policy: POLICY_SUGGESTIONS.Dylan,
+          policy: POLICY_SUGGESTIONS.Interactive,
         });
         for (const outcome of rows) {
           const lease = yield* keys.admit(created.secret);

@@ -178,6 +178,8 @@ export const batchJobs = sqliteTable(
     createdAt: integer("created_at").notNull(),
     finalizedAt: integer("finalized_at"),
     spillAt: integer("spill_at").notNull(),
+    /** 1 when the submitting key allowed cloud: only then may undispatched items spill. */
+    cloud: integer("cloud").notNull().default(1),
     usageJson: text("usage_json"),
     requestCountsTotal: integer("request_counts_total").notNull(),
     requestCountsCompleted: integer("request_counts_completed").notNull(),

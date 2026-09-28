@@ -223,34 +223,6 @@ test("keeps client identity and storage metadata private while retaining paralle
   assert.equal(dispatched, true);
 });
 
-test("client completion budget cannot exceed the key policy", async () => {
-  const keys = memoryKeys();
-  const response = await handleChatCompletions(
-    jsonRequest(ORIGIN + "/v1/chat/completions", {
-      method: "POST",
-      headers: { authorization: "Bearer k" },
-      json: {
-        model: "auto",
-        messages: [{ role: "user", content: "hi" }],
-        max_completion_tokens: 8193,
-        store: false,
-      },
-    }),
-    inferenceDeps(keys, {
-      complete: async () => {
-        throw new Error("must not dispatch");
-      },
-      stream: async () => {
-        throw new Error("must not dispatch");
-      },
-    }),
-  );
-  assert.equal(response.status, 422);
-  assert.equal(((await response.json()) as { error: { code: string } }).error.code, "invalid");
-  assert.equal(keys.admits, 1);
-  assert.equal(keys.finalizes[0]?.errorCode, "ImpossibleLimits");
-});
-
 test("rejects unknown, unsupported, and multi-choice controls before admission", async () => {
   for (const control of [
     { enable_thinking: false },
@@ -259,7 +231,8 @@ test("rejects unknown, unsupported, and multi-choice controls before admission",
     { logprobs: true },
     { top_logprobs: 2 },
     { logit_bias: { "42": 1 } },
-    { reasoning_effort: "none" },
+    { reasoning_effort: "maximal" },
+    { routing: { sessionId: "s", pin: true } },
     { parallel_tool_calls: "no" },
     { metadata: { user: 42 } },
   ]) {
@@ -664,20 +637,17 @@ test("streaming failures before provider output send a terminal structured SSE e
         throw new Error("unexpected completion");
       },
       stream: async () => {
-        throw Object.assign(new Error("private classifier detail"), {
-          _tag: "ClassifierUnqualified",
-          reason: "missing",
-        });
+        throw Object.assign(new Error("private routing detail"), { _tag: "NoEligibleModel" });
       },
     }),
   );
   assert.equal(response.status, 200);
   const events = await response.text();
   assert.match(events, /event: router\.error/);
-  assert.match(events, /"code":"classifier_unqualified"/);
+  assert.match(events, /"code":"no_eligible_model"/);
   assert.doesNotMatch(events, /retry_after_seconds/);
-  assert.doesNotMatch(events, /private classifier detail/);
-  assert.equal(keys.finalizes[0]?.errorCode, "ClassifierUnqualified");
+  assert.doesNotMatch(events, /private routing detail/);
+  assert.equal(keys.finalizes[0]?.errorCode, "NoEligibleModel");
 });
 test("provider failure after streamed output aborts instead of closing cleanly", async () => {
   const keys = memoryKeys();
@@ -709,46 +679,109 @@ test("provider failure after streamed output aborts instead of closing cleanly",
   assert.equal(response.status, 200);
   await assert.rejects(response.text());
 });
-test("tool schemas consume key context budget before any model dispatch", async () => {
-  const keys = memoryKeys();
-  const admit = keys.admit;
-  keys.admit = async (secret) => {
-    const lease = await admit(secret);
-    return {
-      ...lease,
-      policy: { ...lease.policy, contextLimitTokens: 2048, maxCompletionTokens: 128 },
-    };
-  };
-  let dispatched = false;
-  const response = await handleChatCompletions(
-    jsonRequest(`${ORIGIN}/v1/chat/completions`, {
-      method: "POST",
-      headers: { authorization: "Bearer test" },
-      json: {
-        model: "auto",
-        messages: [{ role: "user", content: "hi" }],
-        tools: [
-          { type: "function", function: { name: "large_schema", description: "x".repeat(4096) } },
-        ],
-      },
-    }),
-    inferenceDeps(keys, {
-      complete: async () => {
-        dispatched = true;
-        throw new Error("must not dispatch");
-      },
-      stream: async () => {
-        dispatched = true;
-        throw new Error("must not dispatch");
-      },
-    }),
-  );
-  assert.equal(response.status, 422);
-  assert.equal(dispatched, false);
-  assert.equal(keys.finalizes[0]?.status, "error");
+test("reasoning_effort passes through, with minimal folded into low", async () => {
+  for (const [requested, expected] of [
+    ["minimal", "low"],
+    ["none", "none"],
+    ["xhigh", "xhigh"],
+    [undefined, undefined],
+  ] as const) {
+    let seen: unknown = "not called";
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer k" },
+        json: {
+          model: "auto",
+          messages: [{ role: "user", content: "hi" }],
+          ...(requested === undefined ? {} : { reasoning_effort: requested }),
+        },
+      }),
+      inferenceDeps(memoryKeys(), {
+        complete: async (work) => {
+          seen = work.reasoningEffort;
+          return {
+            headers: { requestId: "r", deploymentId: "d", appliedEffort: "low" },
+            body: completion,
+            metadata: () => ({ deploymentId: "d" }),
+          };
+        },
+        stream: async () => {
+          throw new Error("unexpected stream");
+        },
+      }),
+    );
+    assert.equal(response.status, 200);
+    assert.equal(seen, expected, String(requested));
+  }
 });
 
-test("flex requests carry the tier and a local refusal is OpenAI's 429 resource_unavailable", async () => {
+test("a session comes from routing.sessionId or the Open WebUI chat id and never fails a request", async () => {
+  const cases: Array<{ json?: Record<string, unknown>; header?: string; session?: string }> = [
+    // Older clients' boundary protocol is accepted and ignored.
+    {
+      json: {
+        routing: {
+          sessionId: "agent-1",
+          boundary: "continue",
+          taskBrief: "fix the bug",
+          qualityOverride: "highest",
+        },
+      },
+      session: "agent-1",
+    },
+    { json: { routing: { boundary: "checkpoint" } }, session: undefined },
+    { header: "chat-42", session: "webui:chat-42" },
+    { json: { routing: { sessionId: "explicit" } }, header: "chat-42", session: "explicit" },
+    { header: "not a valid id!", session: undefined },
+    { session: undefined },
+  ];
+  for (const { json, header, session } of cases) {
+    let seen: unknown = "not called";
+    const response = await handleChatCompletions(
+      jsonRequest(ORIGIN + "/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer k",
+          ...(header === undefined ? {} : { "x-openwebui-chat-id": header }),
+        },
+        json: {
+          model: "auto",
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "assistant", content: "hello" },
+            { role: "user", content: "again" },
+          ],
+          ...json,
+        },
+      }),
+      inferenceDeps(memoryKeys(), {
+        complete: async (work) => {
+          seen = work.sessionId;
+          return {
+            headers: {
+              requestId: "r",
+              deploymentId: "d",
+              ...(work.sessionId === undefined ? {} : { sessionId: work.sessionId }),
+              appliedEffort: "low",
+            },
+            body: completion,
+            metadata: () => ({ deploymentId: "d" }),
+          };
+        },
+        stream: async () => {
+          throw new Error("unexpected stream");
+        },
+      }),
+    );
+    assert.equal(response.status, 200, JSON.stringify({ json, header }));
+    assert.equal(seen, session, JSON.stringify({ json, header }));
+    const header_ = response.headers.get("x-session-id");
+    assert.equal(header_ === null ? undefined : decodeURIComponent(header_), session);
+  }
+});
+
+test("flex requests carry the tier; running out of idle compute is 429 resource_unavailable", async () => {
   for (const stream of [false, true]) {
     const keys = memoryKeys();
     const tiers: unknown[] = [];
@@ -784,15 +817,24 @@ test("flex requests carry the tier and a local refusal is OpenAI's 429 resource_
         },
       }),
     );
-    // Streams are dispatched before the 200 is committed, so they get a real 429 too.
-    assert.equal(response.status, 429, `stream=${stream}`);
-    assert.equal(response.headers.get("retry-after"), "2");
-    assert.deepEqual(await response.json(), {
-      error: {
-        code: "resource_unavailable",
-        message: "no spare local capacity for a flex request",
-      },
-    });
+    if (stream) {
+      // Flex streams take the normal path: 200 committed, then a terminal router.error.
+      assert.equal(response.status, 200);
+      const events = await response.text();
+      assert.match(events, /event: router\.error/);
+      assert.match(events, /"code":"resource_unavailable"/);
+      assert.match(events, /"retry_after_seconds":2/);
+      assert.doesNotMatch(events, /private overload detail/);
+    } else {
+      assert.equal(response.status, 429);
+      assert.equal(response.headers.get("retry-after"), "2");
+      assert.deepEqual(await response.json(), {
+        error: {
+          code: "resource_unavailable",
+          message: "no spare local capacity for a flex request",
+        },
+      });
+    }
     assert.deepEqual(tiers, ["flex"]);
     assert.equal(keys.finalizes[0]?.errorCode, "LocalOverloaded");
     assert.equal(keys.finalizes[0]?.deploymentId, "local-qwen");

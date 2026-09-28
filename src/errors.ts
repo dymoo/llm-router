@@ -35,21 +35,6 @@ export class SchemaVersionMismatch extends Schema.TaggedError<SchemaVersionMisma
   Message,
 ) {}
 
-export class EmptyAllowlist extends Schema.TaggedError<EmptyAllowlist>()(
-  "EmptyAllowlist",
-  Message,
-) {}
-
-export class ImpossibleLimits extends Schema.TaggedError<ImpossibleLimits>()(
-  "ImpossibleLimits",
-  Message,
-) {}
-
-export class UnsupportedCapabilities extends Schema.TaggedError<UnsupportedCapabilities>()(
-  "UnsupportedCapabilities",
-  Message,
-) {}
-
 export class NoEligibleModel extends Schema.TaggedError<NoEligibleModel>()(
   "NoEligibleModel",
   Message,
@@ -116,23 +101,8 @@ export class BriefRequired extends Schema.TaggedError<BriefRequired>()("BriefReq
   maxLen: Schema.NullOr(Schema.Int),
 }) {}
 
-export class RetrievalRequired extends Schema.TaggedError<RetrievalRequired>()(
-  "RetrievalRequired",
-  Message,
-) {}
-
 export class CatalogueInvalid extends Schema.TaggedError<CatalogueInvalid>()(
   "CatalogueInvalid",
-  Message,
-) {}
-
-export class BoundaryRequired extends Schema.TaggedError<BoundaryRequired>()(
-  "BoundaryRequired",
-  Message,
-) {}
-
-export class MissingSession extends Schema.TaggedError<MissingSession>()(
-  "MissingSession",
   Message,
 ) {}
 
@@ -146,7 +116,8 @@ export class ProviderFailure extends Schema.TaggedError<ProviderFailure>()(
 export class LocalOverloaded extends Schema.TaggedError<LocalOverloaded>()("LocalOverloaded", {
   message: Schema.String,
   retryAfterSeconds: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-  /** Gufo refused a `service_tier: "flex"` request for lack of spare capacity. */
+  /** No spare capacity for a `service_tier: "flex"` request: Gufo refused it, or
+   * the router's flex wait ran out. HTTP maps it to 429 `resource_unavailable`. */
   flexRefused: Schema.optional(Schema.Boolean),
 }) {}
 
@@ -156,13 +127,6 @@ export class RequestTimeout extends Schema.TaggedError<RequestTimeout>()(
 ) {}
 
 export class Cancelled extends Schema.TaggedError<Cancelled>()("Cancelled", Message) {}
-
-export type FeasibilityError =
-  | EmptyAllowlist
-  | ImpossibleLimits
-  | UnsupportedCapabilities
-  | NoEligibleModel
-  | CatalogueInvalid;
 
 export type ClassifierError =
   | ClassifierUnavailable
@@ -188,12 +152,10 @@ export type KeyLifecycleError =
 
 export type DomainError =
   | InvalidInput
-  | FeasibilityError
+  | NoEligibleModel
+  | CatalogueInvalid
   | ClassifierError
   | KeyLifecycleError
-  | RetrievalRequired
-  | BoundaryRequired
-  | MissingSession
   | CapacityBusy
   | ProviderFailure
   | LocalOverloaded

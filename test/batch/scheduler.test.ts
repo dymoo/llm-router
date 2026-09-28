@@ -46,16 +46,9 @@ after(() => {
 
 const policy: KeyPolicy = {
   priority: "low",
-  localityBias: 0.5,
-  contextLimitTokens: 200_000,
-  maxCompletionTokens: 4_096,
-  maxWaitMs: 250,
-  overloadAction: "report",
+  cloud: true,
   maxConcurrent: 8,
   requestsPerMinute: 600,
-  allowedModels: null,
-  maxEstimatedUsd: null,
-  bias: { cost: 0.5, quality: 0.5, latency: 0.5 },
 };
 
 const requestBody = (id: string): Readonly<Record<string, unknown>> => ({
@@ -368,6 +361,7 @@ function harness(
   t: TestContext,
   options: {
     spillAt?: number;
+    jobCloud?: boolean;
     withSpill?: boolean;
     itemCount?: number;
     batchCatalogue?: readonly Deployment[];
@@ -389,6 +383,7 @@ function harness(
       model: "auto",
       completionWindowMs: WINDOW,
       spillAt: options.spillAt ?? NOW + WINDOW,
+      ...(options.jobCloud === undefined ? {} : { cloud: options.jobCloud }),
       createdAt: NOW,
     },
     items: Array.from({ length: options.itemCount ?? 1 }, (_unused, index) => ({
@@ -508,7 +503,7 @@ test("claims local work only while interactive runtime is idle", { timeout: 5_00
 });
 
 test(
-  "rules Gufo downtime spills authorized batch items only, with one accounting finalization",
+  "Gufo downtime spills only a cloud key's batch items, with one accounting finalization",
   { timeout: 5_000 },
   async (t) => {
     const local: Deployment = { ...localQwen, transport: "gufo", credentialEnvVar: "GUFO_KEY" };
@@ -517,13 +512,11 @@ test(
       policy?: Partial<KeyPolicy>;
       cloud?: Partial<Deployment>;
       withSpill?: boolean;
-      expected: string;
+      expected: "completed" | "queued" | "no_eligible_model";
     }> = [
-      { name: "authorized", expected: "completed" },
-      { name: "report", policy: { overloadAction: "report" }, expected: "LocalOverloaded" },
-      { name: "no batch spill port", withSpill: false, expected: "LocalOverloaded" },
-      { name: "allowlist", policy: { allowedModels: [local.id] }, expected: "no_eligible_model" },
-      { name: "budget", policy: { maxEstimatedUsd: 0 }, expected: "no_eligible_model" },
+      { name: "cloud key", expected: "completed" },
+      { name: "local-only key waits", policy: { cloud: false }, expected: "queued" },
+      { name: "no batch spill port waits", withSpill: false, expected: "queued" },
       {
         name: "capability",
         cloud: { capabilities: { tools: false, json: true, vision: false } },
@@ -538,7 +531,6 @@ test(
     for (const scenario of scenarios) {
       const runtime = ManagedRuntime.make(
         modelRouterLayer({
-          mode: "rules",
           catalogue: [local],
           catalogueVersion: "batch-down",
           credentials: (name) => (name === "GUFO_KEY" ? "fixture-key" : undefined),
@@ -550,7 +542,7 @@ test(
       );
       t.after(() => runtime.dispose());
       const h = harness(t, {
-        keyPolicy: { ...policy, overloadAction: "failover", ...scenario.policy },
+        keyPolicy: { ...policy, ...scenario.policy },
         withSpill: scenario.withSpill,
         batchCatalogue: [{ ...batchDeployment, ...scenario.cloud }],
         body: (id) => ({
@@ -575,30 +567,44 @@ test(
           ),
       });
       await settle(h);
-      await waitFor(
-        () => ["completed", "failed"].includes(h.ledger.items(h.jobId)[0]?.status ?? ""),
-        scenario.name + " did not settle",
-      );
+      await waitFor(() => h.keys.finalized.length === 1, scenario.name + " did not settle");
+      if (scenario.expected === "queued") {
+        // The attempt is abandoned and the item waits for a later tick.
+        assert.equal(h.ledger.items(h.jobId)[0]?.status, "queued", scenario.name);
+        assert.equal(h.spill.posts.length, 0, scenario.name);
+        assert.equal(h.keys.finalized[0]?.outcome.status, "abandoned", scenario.name);
+        continue;
+      }
+      await settle(h);
+      const item = h.ledger.items(h.jobId)[0];
       if (scenario.expected === "completed") {
-        assert.equal(h.ledger.items(h.jobId)[0]?.status, "completed", scenario.name);
+        assert.equal(item?.status, "completed", scenario.name);
         assert.equal(h.results.rows(h.jobId)[0]?.response?.status_code, 200);
         assert.equal(h.spill.posts.length, 1);
         assert.equal(h.keys.deferred.length, 1);
+        assert.equal(h.keys.finalized[0]?.outcome.status, "success", scenario.name);
       } else {
         assert.equal(resultErrorCode(h.results.rows(h.jobId)[0]), scenario.expected, scenario.name);
         assert.equal(h.spill.posts.length, 0, scenario.name);
+        assert.equal(h.keys.finalized[0]?.outcome.status, "error", scenario.name);
       }
-      await settle(h);
       assert.equal(h.keys.admitted.length, 1, scenario.name);
-      assert.equal(h.keys.finalized.length, 1, scenario.name);
-      assert.equal(
-        h.keys.finalized[0]?.outcome.status,
-        scenario.expected === "completed" ? "success" : "error",
-        scenario.name,
-      );
     }
   },
 );
+
+test("a local-only job never spills and expires at the end of its window", async (t) => {
+  const h = harness(t, { spillAt: NOW, jobCloud: false });
+  h.inference.idle = false;
+  await settle(h);
+  assert.equal(h.inference.spillPlans.length, 0);
+  assert.equal(h.spill.posts.length, 0);
+  assert.equal(h.ledger.items(h.jobId)[0]?.status, "queued");
+  h.now.value = NOW + WINDOW + 1;
+  await settle(h);
+  assert.equal(h.ledger.job(h.jobId)?.status, "expired");
+  assert.equal(h.ledger.items(h.jobId)[0]?.status, "expired");
+});
 
 test(
   "a Gufo flex refusal leaves the batch item queued until capacity returns",
@@ -610,7 +616,6 @@ test(
     const tiers: unknown[] = [];
     const runtime = ManagedRuntime.make(
       modelRouterLayer({
-        mode: "rules",
         catalogue: [local],
         catalogueVersion: "batch-flex",
         credentials: (name) => (name === "GUFO_KEY" ? "fixture-key" : undefined),
@@ -661,7 +666,7 @@ test(
 );
 
 test(
-  "a full Gufo queue keeps the report key's batch overload policy",
+  "a full Gufo queue leaves a local-only key's batch item queued until Gufo admits it",
   {
     timeout: 5_000,
   },
@@ -670,7 +675,6 @@ test(
     const tiers: unknown[] = [];
     const runtime = ManagedRuntime.make(
       modelRouterLayer({
-        mode: "rules",
         catalogue: [local],
         catalogueVersion: "batch-flex",
         credentials: (name) => (name === "GUFO_KEY" ? "fixture-key" : undefined),
@@ -694,6 +698,7 @@ test(
     );
     t.after(() => runtime.dispose());
     const h = harness(t, {
+      keyPolicy: { ...policy, cloud: false },
       completion: async (work) => {
         const result = await runtime.runPromise(
           ModelRouter.use((router) => router.completeBatch(work, work.requestedModel)),
@@ -706,12 +711,18 @@ test(
       },
     });
     await settle(h);
+    await waitFor(() => tiers.length === 1, "batch item was not dispatched");
     await waitFor(
-      () => h.ledger.items(h.jobId)[0]?.status === "failed",
-      () => `queue_full item is ${h.ledger.items(h.jobId)[0]?.status}, not failed`,
+      () => h.ledger.items(h.jobId)[0]?.status === "queued",
+      () => `queue_full item is ${h.ledger.items(h.jobId)[0]?.status}, not queued`,
     );
-    assert.equal(resultErrorCode(h.results.rows(h.jobId)[0]), "LocalOverloaded");
-    assert.deepEqual(tiers, ["flex"]);
+    assert.equal(h.spill.posts.length, 0);
+    await settle(h);
+    await waitFor(
+      () => h.ledger.items(h.jobId)[0]?.status === "completed",
+      "item did not complete once Gufo accepted it",
+    );
+    assert.deepEqual(tiers, ["flex", "flex"]);
   },
 );
 

@@ -4,18 +4,14 @@ import { decodeSampling, SAMPLING_FIELDS } from "../sampling.ts";
 import type {
   ChatCompletionRequest,
   ChatMessage,
-  ClassifierInput,
   KeyDraft,
   KeyPatch,
   KeyPolicy,
+  ReasoningEffort,
   RequestCapabilities,
-  RoutingHint,
-  SessionBoundary,
 } from "./contracts.ts";
 import { InvalidInput } from "./errors.ts";
-import { CLASSIFIER_BRIEF_MAX_CHARS } from "./limits.ts";
 import { decodeMessage, decodeTools, validateToolSequence } from "./protocol.ts";
-import { estimateInputTokens } from "./tokens.ts";
 
 const REQUEST_KEYS: Record<string, true> = {
   model: true,
@@ -34,35 +30,35 @@ const REQUEST_KEYS: Record<string, true> = {
   user: true,
   metadata: true,
   service_tier: true,
+  reasoning_effort: true,
   prompt_cache_key: true,
   safety_identifier: true,
   ...Object.fromEntries(SAMPLING_FIELDS.map((key) => [key, true as const])),
 };
 
+/** `boundary`, `taskBrief` and `qualityOverride` are older clients' session protocol:
+ * accepted and ignored. */
 const ROUTING_KEYS: Record<string, true> = {
   sessionId: true,
   boundary: true,
   taskBrief: true,
+  qualityOverride: true,
 };
 
-const BOUNDARIES: Record<SessionBoundary, true> = {
-  "new-task": true,
-  continue: true,
-  checkpoint: true,
+const REASONING_EFFORTS: Record<string, ReasoningEffort> = {
+  none: "none",
+  minimal: "low",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
 };
 
 const POLICY_KEYS: Record<string, true> = {
   priority: true,
-  localityBias: true,
-  contextLimitTokens: true,
-  maxCompletionTokens: true,
-  allowedModels: true,
+  cloud: true,
   requestsPerMinute: true,
   maxConcurrent: true,
-  maxWaitMs: true,
-  overloadAction: true,
-  maxEstimatedUsd: true,
-  bias: true,
 };
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
@@ -94,20 +90,8 @@ function finiteNumber(value: unknown, label: string): number {
 export function decodeKeyPolicy(value: unknown): KeyPolicy {
   const record = asRecord(value, "policy");
   rejectUnknown(record, POLICY_KEYS, "policy");
-  const bias = asRecord(record.bias, "policy.bias");
-  rejectUnknown(bias, { cost: true, quality: true, latency: true }, "policy.bias");
-  if (
-    record.overloadAction !== undefined &&
-    record.overloadAction !== "report" &&
-    record.overloadAction !== "failover"
-  ) {
-    throw new InvalidInput("policy.overloadAction is invalid");
-  }
   try {
-    return Schema.decodeUnknownSync(DomainKeyPolicy)({
-      ...record,
-      allowedModels: record.allowedModels ?? null,
-    });
+    return Schema.decodeUnknownSync(DomainKeyPolicy)(record);
   } catch {
     throw new InvalidInput("policy violates configured limits");
   }
@@ -148,11 +132,7 @@ export function decodeKeyPatch(value: Record<string, unknown>): KeyPatch {
     expiresAt: value.expiresAt,
     policy: value.policy,
   });
-  const { overloadAction: _default, ...legacyPolicy } = draft.policy;
-  const policy = Object.hasOwn(asRecord(value.policy, "policy"), "overloadAction")
-    ? draft.policy
-    : legacyPolicy;
-  return { ...draft, policy, expectedVersion };
+  return { ...draft, expectedVersion };
 }
 
 export function decodeRotateBody(value: Record<string, unknown>): { expectedVersion: number } {
@@ -164,43 +144,27 @@ export function decodeRotateBody(value: Record<string, unknown>): { expectedVers
   return { expectedVersion };
 }
 
-function decodeRouting(value: unknown, newId: () => string): RoutingHint {
-  if (value === undefined) {
-    return { sessionId: newId(), boundary: "new-task" };
-  }
+/** The client's session id, if any. Other `routing` fields are accepted and ignored. */
+function decodeSessionId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
   const record = asRecord(value, "routing");
   rejectUnknown(record, ROUTING_KEYS, "routing");
-  const sessionId =
-    record.sessionId === undefined
-      ? newId()
-      : requireNonempty(record.sessionId, "routing.sessionId");
-  // Session ids go into response headers and the in-memory session store: a
+  if (record.sessionId === undefined) return undefined;
+  const sessionId = requireNonempty(record.sessionId, "routing.sessionId");
+  // Session ids go into a response header and the in-memory session store: a
   // lone surrogate cannot be encoded, and size is bounded.
   if (sessionId.length > 256 || !sessionId.isWellFormed())
     throw new InvalidInput("routing.sessionId must be well-formed and at most 256 characters");
-  let boundary: SessionBoundary = "new-task";
-  if (record.boundary !== undefined) {
-    if (
-      typeof record.boundary !== "string" ||
-      BOUNDARIES[record.boundary as SessionBoundary] !== true
-    ) {
-      throw new InvalidInput("routing.boundary is invalid");
-    }
-    boundary = record.boundary as SessionBoundary;
+  return sessionId;
+}
+
+function decodeReasoningEffort(value: unknown): ReasoningEffort | undefined {
+  if (value === undefined || value === null) return undefined;
+  const effort = typeof value === "string" ? REASONING_EFFORTS[value] : undefined;
+  if (effort === undefined) {
+    throw new InvalidInput("reasoning_effort must be none, minimal, low, medium, high or xhigh");
   }
-  let taskBrief: string | undefined;
-  if (record.taskBrief !== undefined) {
-    if (typeof record.taskBrief !== "string" || record.taskBrief.length === 0) {
-      throw new InvalidInput("routing.taskBrief must be a nonempty string");
-    }
-    if (record.taskBrief.length > CLASSIFIER_BRIEF_MAX_CHARS) {
-      throw new InvalidInput("routing.taskBrief exceeds 24000 characters");
-    }
-    taskBrief = record.taskBrief;
-  }
-  return taskBrief === undefined
-    ? { sessionId, boundary }
-    : { sessionId, boundary, taskBrief, taskBriefSource: "caller-brief" };
+  return effort;
 }
 
 /** Header values are byte strings (≤ U+00FF); this matches C0, DEL and C1 controls. */
@@ -300,10 +264,7 @@ function decodeResponseFormat(value: unknown): unknown {
   return value;
 }
 
-export function decodeChatCompletion(
-  value: Record<string, unknown>,
-  options: { newId: () => string },
-): ChatCompletionRequest {
+export function decodeChatCompletion(value: Record<string, unknown>): ChatCompletionRequest {
   rejectUnknown(value, REQUEST_KEYS, "request");
   if (value.model !== "auto") {
     throw new InvalidInput("model must be auto");
@@ -359,9 +320,12 @@ export function decodeChatCompletion(
     stream: value.stream === true,
     sampling: decodeSampling(value),
     messages,
-    routing: decodeRouting(value.routing, options.newId),
     parallelToolCalls: value.parallel_tool_calls as boolean | undefined,
   };
+  const sessionId = decodeSessionId(value.routing);
+  if (sessionId !== undefined) request.sessionId = sessionId;
+  const reasoningEffort = decodeReasoningEffort(value.reasoning_effort);
+  if (reasoningEffort !== undefined) request.reasoningEffort = reasoningEffort;
   if (value.tools !== undefined) {
     request.tools = decodeTools(value.tools);
     capabilities.tools = true;
@@ -385,44 +349,6 @@ export function decodeChatCompletion(
   return request;
 }
 
-export function classifierInputFor(
-  request: ChatCompletionRequest,
-  capabilities: RequestCapabilities,
-  inputTokens: number,
-): ClassifierInput {
-  if (request.routing.taskBrief !== undefined) {
-    return {
-      source: "caller-brief",
-      state: request.routing.taskBrief,
-      advisory: true,
-      inputTokens,
-      tools: capabilities.tools || request.tools !== undefined,
-      turns: capabilities.turns,
-      pendingToolCalls: capabilities.pendingToolCalls,
-    };
-  }
-  return {
-    source: "full-input",
-    state: serializeMessages(request.messages),
-    advisory: false,
-    inputTokens,
-    tools: capabilities.tools || request.tools !== undefined,
-    turns: capabilities.turns,
-    pendingToolCalls: capabilities.pendingToolCalls,
-  };
-}
-
-export function serializeMessages(messages: readonly ChatMessage[]): string {
-  return JSON.stringify(
-    messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-      tool_call_id: message.tool_call_id,
-      tool_calls: message.tool_calls,
-    })),
-  );
-}
-
 export function requestCapabilities(request: ChatCompletionRequest): RequestCapabilities {
   const capabilities = validateToolSequence(request.messages);
   return {
@@ -432,8 +358,4 @@ export function requestCapabilities(request: ChatCompletionRequest): RequestCapa
       request.response_format !== undefined &&
       (request.response_format as { type: string }).type !== "text",
   };
-}
-
-export function decodedInputTokens(request: ChatCompletionRequest): number {
-  return estimateInputTokens(request);
 }

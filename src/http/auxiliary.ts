@@ -1,7 +1,7 @@
 import { Cause, Effect, Exit, Predicate } from "effect";
 import type { AuxiliaryDeployment } from "../auxiliary.ts";
 import { createDeadline } from "../deadline.ts";
-import { createCapacityPool, type CapacityPool } from "../router/capacity.ts";
+import { createCapacityPool, LOCAL_WAIT_MS, type CapacityPool } from "../router/capacity.ts";
 import { readBoundedBody, readJsonObject } from "./body.ts";
 import type { Admission, FinalizeOutcome, KeyService } from "./contracts.ts";
 import {
@@ -27,21 +27,14 @@ export function auxiliaryResources() {
   return { pool: createCapacityPool(), status: createStatusStore() };
 }
 
-function permitted(allowed: readonly string[] | null, id: string): boolean {
-  return allowed === null || allowed.includes(id);
-}
-
 export async function handleModels(request: Request, deps: AuxiliaryDeps): Promise<Response> {
   try {
-    const { policy } = await deps.keys.authenticate(bearerToken(request));
-    const ids = deps.deployments
-      .filter((item) => permitted(policy.allowedModels, item.id))
-      .map((item) => item.id);
-    if (deps.chatDeploymentIds.some((id) => permitted(policy.allowedModels, id)))
-      ids.unshift("auto");
+    await deps.keys.authenticate(bearerToken(request));
+    const ids = deps.deployments.map((item) => item.id);
+    if (deps.chatDeploymentIds.length > 0) ids.unshift("auto");
     // TypeSafe SDKs list models from `models`; OpenAI SDKs read `data`.
     const cards = deps.deployments
-      .filter((item) => item.modality === "systemone" && permitted(policy.allowedModels, item.id))
+      .filter((item) => item.modality === "systemone")
       .map((item) => ({
         name: item.id,
         description: `System One classification (${item.transport ?? "gufo"}: ${item.modelId})`,
@@ -111,8 +104,6 @@ export async function handleSystemOne(request: Request, deps: AuxiliaryDeps): Pr
       throw new HttpFailure(404, "not_found", "Model is not configured for this endpoint");
     admission = await deps.keys.admit(rawKey);
     const lease = admission;
-    if (!permitted(lease.policy.allowedModels, deployment.id))
-      throw new HttpFailure(403, "forbidden", "Model is not allowed for this key");
     if (input.bytes > deployment.maxBodyBytes || input.inputCount > deployment.maxBatchSize) {
       throw new HttpFailure(
         422,
@@ -120,17 +111,6 @@ export async function handleSystemOne(request: Request, deps: AuxiliaryDeps): Pr
         "Input exceeds deployment or key limits; split it into smaller chunks",
       );
     }
-    // Bytes bound tokens from above, so a per-token rate never under-estimates.
-    const estimate =
-      deployment.requestUsd ??
-      (deployment.inputUsdPerMillion === null
-        ? null
-        : (input.bytes * deployment.inputUsdPerMillion) / 1_000_000);
-    if (
-      lease.policy.maxEstimatedUsd !== null &&
-      (estimate === null || estimate > lease.policy.maxEstimatedUsd)
-    )
-      throw new HttpFailure(422, "invalid", "Configured cost ceiling cannot be satisfied");
     deps.status.claim({
       id: lease.requestId,
       keyId: lease.keyId,
@@ -166,8 +146,8 @@ export async function handleSystemOne(request: Request, deps: AuxiliaryDeps): Pr
         lease.policy.priority,
         {
           requestId: lease.requestId,
-          waitMs: lease.policy.maxWaitMs,
-          spill: false,
+          // Priority orders the queue; high waits the interactive budget, others the medium one.
+          waitMs: LOCAL_WAIT_MS[lease.policy.priority === "high" ? "high" : "medium"],
           onQueue: (event) =>
             deps.status.update(lease.keyId, correlationId, {
               state: event.state,

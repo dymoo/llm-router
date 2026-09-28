@@ -3,7 +3,6 @@ import type { SamplingOptions } from "../../sampling.ts";
 import type { AppAttribution, AppliedEffort, Deployment, RequestedEffort } from "../../domain.ts";
 import type { LocalOverloaded, ProviderFailure } from "../../errors.ts";
 import type { ProviderUsage } from "../accounting.ts";
-import type { SaturationEvidence } from "../locality.ts";
 import type { ChatMessage } from "../messages.ts";
 
 export interface AdapterRequest {
@@ -42,8 +41,9 @@ export interface ProviderAdapter {
     deployment: Deployment,
     credential: string | undefined,
   ) => Effect.Effect<boolean>;
-  readonly readSaturation?: (
+  /** Gufo's `sessions.flex_limit`, or undefined when the runtime cannot say. */
+  readonly readFlexLimit?: (
     deployment: Deployment,
     credential: string | undefined,
-  ) => Effect.Effect<SaturationEvidence>;
+  ) => Effect.Effect<number | undefined>;
 }

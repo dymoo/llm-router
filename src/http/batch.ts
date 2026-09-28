@@ -171,7 +171,10 @@ function wireBatch(job: BatchJob, results: readonly BatchResultRow[] | null): Ba
     status: job.status,
     created_at: Math.floor(job.createdAt / 1000),
     finalized_at: job.finalizedAt === null ? null : Math.floor(job.finalizedAt / 1000),
-    local_wait_until: Math.floor(job.spillAt / 1000),
+    // A local-only job waits locally for its whole window.
+    local_wait_until: Math.floor(
+      (job.cloud ? job.spillAt : job.spillAt + job.completionWindowMs) / 1000,
+    ),
     deadline_at: Math.floor((job.spillAt + job.completionWindowMs) / 1000),
     request_counts: job.requestCounts,
     usage: job.usage,
@@ -243,9 +246,7 @@ export async function handleCreateBatch(request: Request, deps: BatchDeps): Prom
     // this check and the synchronous create — a drain mid-body-read cannot slip through.
     deps.assertAccepting();
     const createdAt = Date.now();
-    // spillDelayMs can be fractional for common biases (24h × 0.65); the ledger demands
-    // integer ms, and flooring never spills earlier than the rule allows.
-    const spillAt = Math.floor(spillAtFor(createdAt, auth.policy.localityBias));
+    const spillAt = spillAtFor(createdAt, auth.policy.cloud);
     const drafts: BatchItemDraft[] = decoded.entries.map((entry) =>
       entry.body === undefined
         ? { customId: entry.customId, status: "failed", errorCode: entry.failure!.code }
@@ -257,6 +258,7 @@ export async function handleCreateBatch(request: Request, deps: BatchDeps): Prom
         model: decoded.model,
         completionWindowMs: SPILL_WINDOW_MS,
         spillAt,
+        cloud: auth.policy.cloud,
         createdAt,
       },
       items: drafts,
