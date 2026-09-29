@@ -175,7 +175,9 @@ function fits(work: RouterWork, deployment: Deployment): boolean {
     (!work.capabilities.json || deployment.capabilities.json) &&
     (!work.capabilities.vision || deployment.capabilities.vision) &&
     output <= deployment.maxOutputTokens &&
-    work.inputTokens + output <= deployment.contextLimitTokens
+    // max_tokens is a cap, not a reservation: a reply that reaches the end of
+    // the context stops with `length`, so only the prompt has to fit.
+    work.inputTokens < deployment.contextLimitTokens
   );
 }
 
