@@ -265,6 +265,18 @@ describe("default tier (high, medium)", () => {
     }
   });
 
+  it("treats max_tokens as a cap: a prompt that fits stays local whatever the output cap", async () => {
+    const local = gufo("gufo-a");
+    const net = network({});
+    const result = await run(
+      ModelRouter.use((router) =>
+        router.complete(work({ inputTokens: 30_000, maxCompletionTokens: 8192 })),
+      ),
+      layer({ catalogue: [local], fetch: net.fetchImpl }),
+    );
+    assert.equal(result.headers.deploymentId, local.id);
+  });
+
   it("goes straight to cloud when Gufo is down, or cannot ever serve the request", async () => {
     const local = gufo("gufo-a");
     const bigCloud = { ...cloudGlm, contextLimitTokens: 200_000 };

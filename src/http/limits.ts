@@ -8,6 +8,7 @@ export const GATEWAY_EFFECT_TIMEOUT_MS = 11 * 60 * 1000;
 export const ADMIN_SESSION_MS = 8 * 60 * 60 * 1000;
 export const MESSAGE_TOKEN_OVERHEAD = 32;
 export const TOKEN_ESTIMATE_RESERVE = 1024;
+export const BYTES_PER_TOKEN = 2;
 export const DEFAULT_KEY_PAGE_LIMIT = 50;
 export const MAX_KEY_PAGE_LIMIT = 50;
 export const ADMIN_COOKIE = "jev_admin";
