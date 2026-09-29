@@ -277,6 +277,21 @@ describe("default tier (high, medium)", () => {
     assert.equal(result.headers.deploymentId, local.id);
   });
 
+  it("sends low and flex work to cloud when Gufo is down", async () => {
+    const local = gufo("gufo-a");
+    for (const partial of [
+      { policy: { ...backgroundPolicy, cloud: false } },
+      { policy: { ...standardPolicy, cloud: false }, serviceTier: "flex" as const },
+    ]) {
+      const net = network({ down: new Set([local.id]) });
+      const result = await run(
+        ModelRouter.use((router) => router.complete(work(partial))),
+        layer({ catalogue: [local, cloudGlm], fetch: net.fetchImpl }),
+      );
+      assert.equal(result.headers.deploymentId, cloudGlm.id);
+    }
+  });
+
   it("goes straight to cloud when Gufo is down, or cannot ever serve the request", async () => {
     const local = gufo("gufo-a");
     const bigCloud = { ...cloudGlm, contextLimitTokens: 200_000 };
@@ -298,16 +313,13 @@ describe("default tier (high, medium)", () => {
           layer({ catalogue: [local, bigCloud], fetch: net.fetchImpl }),
         );
         assert.ok(Date.now() - started < 1_000, `${scenario.name} waited`);
-        if (cloud) {
+        // Gufo down reaches cloud whatever the key's cloud switch says.
+        if (cloud || scenario.name === "down") {
           assert.ok(Exit.isSuccess(exit), scenario.name);
           assert.equal(exit.value.headers.deploymentId, bigCloud.id);
         } else {
           assert.ok(Exit.isFailure(exit), scenario.name);
-          assert.match(
-            String(exit.cause),
-            scenario.name === "down" ? /LocalOverloaded/ : /NoEligibleModel/,
-            scenario.name,
-          );
+          assert.match(String(exit.cause), /NoEligibleModel/, scenario.name);
         }
       }
     }

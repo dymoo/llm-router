@@ -424,9 +424,8 @@ function createRouter(options: RouterOptions) {
     Effect.gen(function* () {
       const catalogue = yield* checkCatalogueForInference(options.catalogue);
       const local = catalogue.filter((item) => item.location === "local" && fits(work, item));
-      const cloud = work.policy.cloud
-        ? catalogue.filter((item) => item.location === "cloud" && fits(work, item))
-        : [];
+      const anyCloud = catalogue.filter((item) => item.location === "cloud" && fits(work, item));
+      const cloud = work.policy.cloud ? anyCloud : [];
       if (local.length === 0 && cloud.length === 0) {
         return yield* fail(
           work,
@@ -485,7 +484,10 @@ function createRouter(options: RouterOptions) {
         yield* Effect.sleep(Duration.millis(pause));
       }
 
-      const cloudUp = yield* up(cloud);
+      // Gufo down (not merely busy): every key may use cloud, so an outage or
+      // maintenance never strands a key; cloud-off keys still never pay to skip a queue.
+      const gufoDown = local.length > 0 && localUp.length === 0;
+      const cloudUp = yield* up(gufoDown ? anyCloud : cloud);
       if (cloudUp.length > 0) {
         const now = yield* Clock.currentTimeMillis;
         const permit = yield* acquire(
@@ -555,13 +557,8 @@ function createRouter(options: RouterOptions) {
           : sessions.get(work.keyId, work.sessionId, startedAt);
       // ponytail: one deployment per request (sticky, else the first up); no cross-queue balancing.
       const target = stickyFirst(yield* up(local), sticky)[0];
-      if (target === undefined) {
-        return yield* fail(
-          work,
-          "local-overloaded",
-          flexUnavailable("Local deployment unavailable", 1),
-        );
-      }
+      // Gufo down: the default route sends it to cloud (see routeDefault).
+      if (target === undefined) return yield* routeDefault(work, stream, onEnd);
       const deadline = startedAt + waits.flex;
       const limit =
         (yield* (
