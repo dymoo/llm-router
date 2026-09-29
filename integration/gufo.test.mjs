@@ -439,7 +439,7 @@ globalThis.fetch = (input, init) => {
         "/v1/chat/completions",
         chat(
           {
-            messages: [{ role: "user", content: "synthetic-context-word ".repeat(6_000) }],
+            messages: [{ role: "user", content: "synthetic-context-word ".repeat(12_000) }],
           },
           permitted,
         ),
