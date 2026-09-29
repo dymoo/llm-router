@@ -7,7 +7,7 @@ A self-hosted, key-controlled inference gateway for coding agents and internal c
 - Routes by one small key policy: `priority` (high, medium, low) and a `cloud` switch, plus rate and concurrency limits. High and medium run on Gufo first and wait a short budget (5 s / 30 s); keys with `cloud` then fall back to OpenRouter, others get `503 local_overloaded`.
 - Routes chat to **Gufo** (the owner's private GPU inference server, Qwen3.8 Flash-Next) and **OpenRouter `z-ai/glm-5.3-flash`**. Gufo is reached over HTTP with a bearer key; it is not part of this repository. A generic `openai-compatible` transport covers another local OpenAI server.
 - Keeps a session on the deployment its last turn used (best effort) and holds capacity until streaming finishes or is cancelled.
-- Low-priority keys (and `service_tier: "flex"`) run as Gufo **flex**: idle local compute only, never cloud, queued FIFO by the router for up to 10 minutes. Queues are bounded and non-preemptive; keys rotate and revoke.
+- Low-priority keys (and `service_tier: "flex"`) run as Gufo **flex**: idle local compute only (cloud only when Gufo is down), queued FIFO by the router for up to 10 minutes. Queues are bounded and non-preemptive; keys rotate and revoke.
 - Records metadata analytics: provider-reported cost, token estimates, configured local COGS, observed cache use, route decisions, queue/TTFT/decode metrics, errors and cancellation. The gateway does **not** store prompts or completions.
 - Proxies TypeSafe **System One** (`POST /v1/systemone`) to Kev on Gufo or TypeSafe's cloud Jev, and serves an optional **Open WebUI** frontend. Every client request still goes through gateway policy and accounting.
 

@@ -67,8 +67,10 @@ try {
       localBusy = failure === "busy";
       const before = generations.length;
       const unavailable = await send();
-      assert.equal(unavailable.status, cloud ? 200 : 503);
-      if (!cloud) {
+      // Down reaches cloud for every key; only a busy Gufo keeps cloud-off keys local.
+      const toCloud = cloud || localDown;
+      assert.equal(unavailable.status, toCloud ? 200 : 503);
+      if (!toCloud) {
         assert.equal((await unavailable.json()).error.code, "local_overloaded");
         if (localBusy) assert.equal(unavailable.headers.get("retry-after"), "301");
         const sse = await send(true);

@@ -32,7 +32,7 @@ Suggestions (every field editable): **Interactive** `{high, cloud, 120 rpm, 4 co
 
 ## Eligibility
 
-A deployment could ever serve a request when it has the required capabilities (tools, JSON, vision) and the request fits its context (input estimate plus any requested `max_completion_tokens`) and output limit. A deployment is available now when its credential is configured and its health probe passes. A request no deployment the key may use could ever serve fails **422 `no_eligible_model`**; nothing is widened to invent a candidate.
+A deployment could ever serve a request when it has the required capabilities (tools, JSON, vision) and the prompt fits its context (estimated at 2 bytes per token) and any requested `max_completion_tokens` is within its output limit. `max_completion_tokens` is a cap, not a reservation: Gufo stops a reply at the end of the context with `length`. A deployment is available now when its credential is configured and its health probe passes. A request no deployment the key may use could ever serve fails **422 `no_eligible_model`**; nothing is widened to invent a candidate.
 
 ## Default tier: high and medium
 
@@ -41,16 +41,17 @@ A deployment could ever serve a request when it has the required capabilities (t
 1. **Gufo first.** Take a Router permit on an eligible, available local deployment and dispatch with `X-Gufo-No-Queue`. A deployment's `reservedInteractiveSlots` keep permits for **high** keys only; queue order is high, then medium, non-preemptive.
 2. **Wait, within a budget.** Wait for a permit, and retry Gufo's pre-enqueue refusals (429 `queue_full` / `client_queue_full`, 503 `draining`) after their `Retry-After` (floor 250 ms), for at most **5 s (high) / 30 s (medium)** (`LOCAL_WAIT_MS`). A refusal whose `Retry-After` ends past the budget stops the wait at once.
 3. **Then cloud, or report.** If local is unavailable (down, or cannot serve this request) or the wait runs out: with `cloud: true`, dispatch to the first eligible cloud deployment (waiting for its permit only within what remains of the budget); otherwise fail **503 `local_overloaded`** with `Retry-After` (Gufo's, else 1 s).
+4. **Gufo down: cloud for every key.** When every eligible local deployment fails its health probe (stopped, restarting, maintenance), the request goes to cloud whatever the key's `cloud` switch says, flex and low included, so an outage never strands a key. A merely busy Gufo still keeps cloud-off keys local.
 
 Nothing is retried after a provider may have started work: an ambiguous provider failure is `502 provider_failure`.
 
 ## Flex tier: low, or `service_tier: "flex"`
 
-Low keys always run as flex; any key may ask for it per request. Flex is **local only, never cloud**, whatever `cloud` says.
+Low keys always run as flex; any key may ask for it per request. Flex never goes to cloud while Gufo is up, whatever `cloud` says; when Gufo is down it takes the default tier's outage path to cloud (step 4 above).
 
 - Requests wait in a Router-side **FIFO flex queue per deployment**. At most `flex_limit` of them hold a slot and may be dispatched to Gufo at once, where `flex_limit` is Gufo's `GET /v1/runtime` `sessions.flex_limit` (cached 30 s; `DEFAULT_FLEX_LIMIT` = 2 when unknown).
 - The slot holder sends `service_tier: "flex"`. On Gufo's 429 `resource_unavailable` it keeps its slot, waits `Retry-After` (floor 250 ms) and retries, so waiting requests never all poll Gufo.
-- **No starvation:** a flex request that has waited 60 s (`FLEX_PROMOTE_AFTER_MS`) is promoted. It dispatches on Gufo's default tier and takes a permit ranked with high traffic by arrival, so a steady stream of high-priority work still lets it through. Only flex-slot holders (Gufo's `flex_limit`) are promoted, which caps what low work takes from interactive traffic. It still never goes to cloud.
+- **No starvation:** a flex request that has waited 60 s (`FLEX_PROMOTE_AFTER_MS`) is promoted. It dispatches on Gufo's default tier and takes a permit ranked with high traffic by arrival, so a steady stream of high-priority work still lets it through. Only flex-slot holders (Gufo's `flex_limit`) are promoted, which caps what low work takes from interactive traffic. It still never goes to cloud while Gufo is up.
 - The wait is capped at **10 minutes** (`FLEX_MAX_WAIT_MS`, under the 11-minute gateway deadline); then **429 `resource_unavailable`** with `Retry-After`. A flex request no local deployment could ever serve fails 422 `no_eligible_model`.
 
 ## Streams
