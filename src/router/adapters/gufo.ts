@@ -1,4 +1,4 @@
-import { Clock, Effect, Schema } from "effect";
+import { Clock, Effect, Option, Schema } from "effect";
 import type { Deployment } from "../../domain.ts";
 import { InvalidInput, LocalOverloaded, ProviderFailure } from "../../errors.ts";
 import type { AdapterRequest, ProviderAdapter } from "./types.ts";
@@ -343,7 +343,10 @@ export function gufoAdapter(fetchImpl: FetchImpl = fetch): ProviderAdapter {
       );
       return models.data.some((model) => model.id === deployment.modelId);
     }).pipe(
-      Effect.timeout("1500 millis"),
+      // A slow answer while Gufo is busy (long prefills, cache writes) is not an
+      // outage: count it as up and let Gufo's own admission decide.
+      Effect.timeoutOption("1500 millis"),
+      Effect.map((answer) => Option.getOrElse(answer, () => true)),
       Effect.catch(() => Effect.succeed(false)),
     );
     return !available;

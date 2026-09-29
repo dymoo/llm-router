@@ -113,6 +113,22 @@ describe("Gufo ProviderAdapter", () => {
     assert.equal(typeof healthy.readFlexLimit, "function");
   });
 
+  it("counts a slow model listing as up, and a refused connection as down", async () => {
+    const slow = gufoAdapter(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          }),
+        ),
+    );
+    assert.equal(await Effect.runPromise(slow.probeUnavailable(gufo, "fixture-key")), false);
+    const refused = gufoAdapter(async () => {
+      throw new TypeError("fetch failed");
+    });
+    assert.equal(await Effect.runPromise(refused.probeUnavailable(gufo, "fixture-key")), true);
+  });
+
   it("reads flex_limit only from a known runtime contract", async () => {
     const reader = (body: unknown, status = 200) =>
       gufoAdapter(async (url, init) => {

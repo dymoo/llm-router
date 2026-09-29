@@ -29,7 +29,7 @@
       }
     },
     "reasoning": {
-      "kind": "binary"
+      "kind": "mandatory"
     }
   }
 ]
