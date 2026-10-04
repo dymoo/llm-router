@@ -266,9 +266,11 @@ function decodeResponseFormat(value: unknown): unknown {
 
 export function decodeChatCompletion(value: Record<string, unknown>): ChatCompletionRequest {
   rejectUnknown(value, REQUEST_KEYS, "request");
-  if (value.model !== "auto") {
-    throw new InvalidInput("model must be auto");
+  if (typeof value.model !== "string" || value.model.length === 0 || value.model.length > 256) {
+    throw new InvalidInput("model must be a nonempty string: auto, cheap or a model id");
   }
+  // `llm-router/<model>` is how provider-prefixed clients spell the same names.
+  const model = value.model.replace(/^llm-router\//, "");
   if (!Array.isArray(value.messages) || value.messages.length === 0) {
     throw new InvalidInput("messages must be a nonempty array");
   }
@@ -316,7 +318,7 @@ export function decodeChatCompletion(value: Record<string, unknown>): ChatComple
       throw new InvalidInput("include_usage must be boolean");
   }
   const request: ChatCompletionRequest = {
-    model: "auto",
+    model,
     stream: value.stream === true,
     sampling: decodeSampling(value),
     messages,

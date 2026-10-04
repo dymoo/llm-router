@@ -33,7 +33,7 @@ function deps(fetchImpl?: typeof fetch): AuxiliaryDeps & { keys: MemoryKeys } {
   return {
     keys: memoryKeys(),
     deployments: [kev],
-    chatDeploymentIds: ["cloud-glm"],
+    chatModels: ["z-ai/glm-5.3-flash"],
     ...auxiliaryResources(),
     fetch: fetchImpl,
   };
@@ -47,7 +47,7 @@ test("model discovery authenticates without consuming inference admission and li
   );
   assert.deepEqual(
     (await response.json()).data.map((item: { id: string }) => item.id),
-    ["auto", kev.id],
+    ["auto", "cheap", "z-ai/glm-5.3-flash", kev.id],
   );
   assert.equal(d.keys.admits, 0);
   assert.equal((await handleModels(new Request("http://gateway/v1/models"), d)).status, 401);

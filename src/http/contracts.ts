@@ -154,7 +154,8 @@ export type ToolDefinition = {
 };
 
 export type ChatCompletionRequest = {
-  model: "auto";
+  /** `auto`, `cheap` or a pinned model id (see the router's model resolution). */
+  model: string;
   stream: boolean;
   sampling?: SamplingOptions;
   parallelToolCalls?: boolean;
@@ -180,6 +181,8 @@ export type RequestCapabilities = {
 };
 
 export type RoutedWork = {
+  /** `auto`, `cheap` or a pinned model id. */
+  model: string;
   sampling?: SamplingOptions;
   requestId: string;
   keyId: string;

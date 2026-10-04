@@ -788,14 +788,14 @@ export function createBatchScheduler(deps: BatchSchedulerDeps): BatchScheduler {
       throw Object.assign(new Error("streaming is not supported for batch"), {
         _tag: "stream_not_supported",
       });
-    // The public batch body may carry the batch deployment id; the chat decoder intentionally
-    // accepts only auto, so normalize only this private boundary and carry the requested model
-    // explicitly on BatchRoutedWork.
+    // The public batch body may carry the batch deployment id, which the batch path resolves
+    // itself: decode as auto and carry the requested model explicitly on BatchRoutedWork.
     const record: Record<string, unknown> = { ...raw, model: "auto", stream: false };
     const decoded = decodeChatCompletion(record);
     const capabilities = requestCapabilities(decoded);
     const inputTokens = estimateInputTokens(decoded);
     return {
+      model: "auto",
       requestId: admission.requestId,
       keyId: admission.keyId,
       policy: admission.policy,

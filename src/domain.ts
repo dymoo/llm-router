@@ -154,13 +154,31 @@ export const Deployment = Schema.Struct({
   capacity: Capacity,
   prices: Prices,
   reasoning: Reasoning,
+  /** Extra upstream model ids served by the same runtime, sessions and capacity (e.g. an
+   * adapter over the same weights). A request may pin one; it never adds capacity. */
+  variants: Schema.optional(Schema.Array(Schema.NonEmptyString)),
 });
 export type Deployment = typeof Deployment.Type;
+
+/** Request `model` values that choose rather than name a deployment. */
+export const ROUTING_MODELS = ["auto", "cheap"] as const;
+
+/** Every model id a request may pin: each deployment's `modelId`, then its variants. */
+export const pinnableModels = (deployments: readonly Deployment[]): string[] =>
+  deployments.flatMap((item) => [item.modelId, ...(item.variants ?? [])]);
 
 export const Catalogue = Schema.Array(Deployment).check(
   Schema.makeFilter<ReadonlyArray<Deployment>>(
     (deployments) => deployments.length > 0 || "Catalogue must contain at least one deployment",
   ),
+  Schema.makeFilter<ReadonlyArray<Deployment>>((deployments) => {
+    const names = pinnableModels(deployments);
+    return (
+      (new Set(names).size === names.length &&
+        !names.some((name) => (ROUTING_MODELS as readonly string[]).includes(name))) ||
+      "Model ids and variants must be unique and must not be auto or cheap"
+    );
+  }),
 );
 export type Catalogue = typeof Catalogue.Type;
 

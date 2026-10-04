@@ -3,6 +3,7 @@ import { createHook } from "node:async_hooks";
 import test from "node:test";
 import type { AppAttribution } from "../../src/domain.ts";
 import type { InferenceDeps, RoutedWork } from "../../src/http/contracts.ts";
+import { ModelNotAllowed } from "../../src/errors.ts";
 import { GatewayFailure } from "../../src/http/gateway-failure.ts";
 import { handleChatCompletions } from "../../src/http/inference.ts";
 import { GATEWAY_EFFECT_TIMEOUT_MS } from "../../src/http/limits.ts";
@@ -1035,4 +1036,34 @@ test("ignores invalid app attribution without failing the request", async () => 
     assert.equal(keys.finalizes[0]?.appUrl ?? null, expected?.url ?? null);
     assert.equal(keys.finalizes[0]?.appTitle ?? null, expected?.title ?? null);
   }
+});
+test("a pinned model the key may not use is a clear 403, and the pinned id reaches the gateway", async () => {
+  const keys = memoryKeys();
+  let requested: string | undefined;
+  const response = await handleChatCompletions(
+    jsonRequest(ORIGIN + "/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer k" },
+      json: { model: "llm-router/z-ai/glm-5.3-flash", messages: [{ role: "user", content: "hi" }] },
+    }),
+    inferenceDeps(keys, {
+      complete: async (work) => {
+        requested = work.model;
+        throw new ModelNotAllowed({
+          message: "z-ai/glm-5.3-flash is a cloud model and this key has cloud disabled",
+        });
+      },
+      stream: async () => {
+        throw new Error("unexpected stream");
+      },
+    }),
+  );
+  assert.equal(requested, "z-ai/glm-5.3-flash");
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), {
+    error: {
+      code: "forbidden",
+      message: "z-ai/glm-5.3-flash is a cloud model and this key has cloud disabled",
+    },
+  });
 });

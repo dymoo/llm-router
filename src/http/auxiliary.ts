@@ -1,5 +1,6 @@
 import { Cause, Effect, Exit, Predicate } from "effect";
 import type { AuxiliaryDeployment } from "../auxiliary.ts";
+import { ROUTING_MODELS } from "../domain.ts";
 import { createDeadline } from "../deadline.ts";
 import { createCapacityPool, LOCAL_WAIT_MS, type CapacityPool } from "../router/capacity.ts";
 import { readBoundedBody, readJsonObject } from "./body.ts";
@@ -17,7 +18,8 @@ import { createStatusStore, parseCorrelationId, type RequestStatusStore } from "
 export type AuxiliaryDeps = {
   keys: KeyService;
   deployments: readonly AuxiliaryDeployment[];
-  chatDeploymentIds: readonly string[];
+  /** Pinnable chat model ids (each deployment's modelId and variants). */
+  chatModels: readonly string[];
   pool: CapacityPool;
   status: RequestStatusStore;
   fetch?: typeof fetch;
@@ -31,7 +33,8 @@ export async function handleModels(request: Request, deps: AuxiliaryDeps): Promi
   try {
     await deps.keys.authenticate(bearerToken(request));
     const ids = deps.deployments.map((item) => item.id);
-    if (deps.chatDeploymentIds.length > 0) ids.unshift("auto");
+    // Chat: the two routing choices, then every model a request may pin.
+    if (deps.chatModels.length > 0) ids.unshift(...ROUTING_MODELS, ...deps.chatModels);
     // TypeSafe SDKs list models from `models`; OpenAI SDKs read `data`.
     const cards = deps.deployments
       .filter((item) => item.modality === "systemone")
