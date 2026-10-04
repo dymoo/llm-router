@@ -101,10 +101,11 @@ jobs:
         if: steps.gate.outputs.migration == 'true'
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          SOURCE_SHA: ${{ steps.target.outputs.sha }}
         run: |
           set -euo pipefail
           # WAL-aware verified copy beside the database; Litestream also keeps 7 days of PITR in B2.
-          flyctl ssh console -a "$APP" -C "setpriv --reuid=node --regid=node --init-groups env SQLITE_PATH=/var/lib/llm-router/control.sqlite node /opt/ops/backup.mjs"
+          flyctl ssh console -a "$APP" -C "setpriv --reuid=node --regid=node --init-groups env SQLITE_PATH=/var/lib/llm-router/control.sqlite node /opt/ops/backup.mjs /var/lib/llm-router/backups/control-pre-deploy-$SOURCE_SHA.sqlite"
 
       - name: Build, audit, and push the image
         env:
