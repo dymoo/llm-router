@@ -1049,9 +1049,13 @@ test("a pinned model the key may not use is a clear 403, and the pinned id reach
     inferenceDeps(keys, {
       complete: async (work) => {
         requested = work.model;
-        throw new ModelNotAllowed({
-          message: "z-ai/glm-5.3-flash is a cloud model and this key has cloud disabled",
-        });
+        // The runtime wraps router failures; the public message comes from the typed cause.
+        throw new GatewayFailure(
+          new ModelNotAllowed({
+            message: "z-ai/glm-5.3-flash is a cloud model and this key has cloud disabled",
+          }),
+          { decisionReason: "no-eligible", selectionReasonCode: "no-eligible" },
+        );
       },
       stream: async () => {
         throw new Error("unexpected stream");

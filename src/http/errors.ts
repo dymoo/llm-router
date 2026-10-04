@@ -122,6 +122,16 @@ function tagOf(error: unknown): string | undefined {
   return undefined;
 }
 
+/** The typed (`_tag`) error inside wrappers such as GatewayFailure, whose own message is generic. */
+function taggedOf(error: unknown): unknown {
+  if (typeof error !== "object" || error === null) return undefined;
+  if ("_tag" in error && typeof error._tag === "string") return error;
+  return (
+    ("cause" in error ? taggedOf(error.cause) : undefined) ??
+    ("error" in error ? taggedOf(error.error) : undefined)
+  );
+}
+
 function messageOf(error: unknown, fallback: string): string {
   if (typeof error === "object" && error !== null && "message" in error) {
     const message = (error as { message: unknown }).message;
@@ -168,7 +178,7 @@ export function toHttpFailure(error: unknown): HttpFailure {
     const mapped = TAG_MAP[tag]!;
     const message =
       tag === "InvalidInput" || tag === "ModelNotAllowed"
-        ? messageOf(error, mapped.message)
+        ? messageOf(taggedOf(error) ?? error, mapped.message)
         : mapped.message;
     return new HttpFailure(
       mapped.status,
