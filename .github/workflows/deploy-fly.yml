@@ -1,0 +1,145 @@
+name: deploy-fly
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full router source commit SHA to deploy (redeploy the current one to ship a catalogue change)
+        required: true
+        type: string
+      allow_migration:
+        description: Authorize a forward-only schema migration (the workflow takes an operator backup first)
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-llm-router
+  cancel-in-progress: false
+
+env:
+  APP: llm-router
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Select the exact source commit
+        id: target
+        env:
+          REQUESTED_SHA: ${{ inputs.sha }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then sha=$REQUESTED_SHA; else sha=$CI_SHA; fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'Expected a full lowercase commit SHA' >&2; exit 1; }
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+        with:
+          version: 0.4.110
+
+      # The catalogues live in dymoo/dylans-infra (k8s/apps/llm-router/); fly.toml ships them.
+      - name: Clone the infra catalogue over pinned SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$DEPLOY_SSH_KEY" ]] || { echo 'DEPLOY_SSH_KEY is required' >&2; exit 1; }
+          ssh_dir="$RUNNER_TEMP/llm-router-deploy-ssh"
+          install -m 700 -d "$ssh_dir"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$ssh_dir/id_ed25519"
+          chmod 600 "$ssh_dir/id_ed25519"
+          # GitHub Docs, 2026-09-24: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
+          GIT_SSH_COMMAND="ssh -i $ssh_dir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes" \
+            git clone --depth 1 --branch main --single-branch git@github.com:dymoo/dylans-infra.git .infra
+          rm -rf "$ssh_dir"
+          printf 'Catalogue from dylans-infra %s\n' "$(git -C .infra rev-parse HEAD)"
+
+      - name: Gate forward-only migrations
+        id: gate
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          SOURCE_SHA: ${{ steps.target.outputs.sha }}
+          ALLOW_MIGRATION: ${{ inputs.allow_migration }}
+        run: |
+          set -euo pipefail
+          machine=$(flyctl machine list -a "$APP" --json)
+          previous=$(jq -r '.[0].config.env.SOURCE_COMMIT // ""' <<<"$machine")
+          printf 'image=%s\nprevious=%s\n' "$(jq -r '.[0].config.image // ""' <<<"$machine")" "$previous" >> "$GITHUB_OUTPUT"
+          migration=true
+          if [[ "$previous" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$previous^{commit}" 2>/dev/null; then
+            [[ -n "$(git diff --name-only "$previous..$SOURCE_SHA" -- migrations/ src/db/)" ]] || migration=false
+          fi
+          printf 'migration=%s\n' "$migration" >> "$GITHUB_OUTPUT"
+          if [[ "$migration" == true && "$ALLOW_MIGRATION" != true ]]; then
+            echo "Migration or unknown previous source commit ($previous): run workflow_dispatch with sha=<full SHA> and allow_migration=true." >&2
+            exit 1
+          fi
+
+      - name: Take an operator backup before a migration
+        if: steps.gate.outputs.migration == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          SOURCE_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # WAL-aware verified copy beside the database; Litestream also keeps 7 days of PITR in B2.
+          flyctl ssh console -a "$APP" -C "setpriv --reuid=node --regid=node --init-groups env SQLITE_PATH=/var/lib/llm-router/control.sqlite node /opt/ops/backup.mjs /var/lib/llm-router/backups/control-pre-deploy-$SOURCE_SHA.sqlite"
+
+      - name: Build, audit, and push the image
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          SOURCE_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          image="registry.fly.io/$APP:$SOURCE_SHA"
+          docker buildx build --platform linux/amd64 --target fly --build-arg "SOURCE_COMMIT=$SOURCE_SHA" --load -t "$image" .
+          scripts/audit-image.sh "$image"
+          flyctl auth docker
+          docker push "$image"
+
+      - name: Deploy and verify
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          SOURCE_SHA: ${{ steps.target.outputs.sha }}
+          MIGRATION: ${{ steps.gate.outputs.migration }}
+          PREVIOUS_IMAGE: ${{ steps.gate.outputs.image }}
+          PREVIOUS_SHA: ${{ steps.gate.outputs.previous }}
+        run: |
+          set -euo pipefail
+          # The ready check in fly.toml gates the deploy; then prove the public surface.
+          if flyctl deploy -a "$APP" --image "registry.fly.io/$APP:$SOURCE_SHA" --env "SOURCE_COMMIT=$SOURCE_SHA" --strategy immediate --wait-timeout 15m &&
+            [[ $(curl -s -o /dev/null -w '%{http_code}' https://llm.dylans.link/health/ready) == 200 ]] &&
+            [[ $(curl -s -o /dev/null -w '%{http_code}' https://llm.dylans.link/api/admin/keys) == 404 ]]; then
+            exit 0
+          fi
+          if [[ "$MIGRATION" == true ]]; then
+            echo 'Deploy failed after a possible forward-only migration. Do NOT roll back the image: restore the pre-migration backup (same API_KEY_PEPPER) first.' >&2
+            exit 1
+          fi
+          if [[ -n "$PREVIOUS_IMAGE" ]]; then
+            echo "Deploy failed; redeploying the previous image $PREVIOUS_IMAGE" >&2
+            flyctl deploy -a "$APP" --image "$PREVIOUS_IMAGE" --env "SOURCE_COMMIT=$PREVIOUS_SHA" --strategy immediate --wait-timeout 15m || echo 'Rollback deploy failed too: operator intervention required.' >&2
+          fi
+          exit 1

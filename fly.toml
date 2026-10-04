@@ -1,0 +1,71 @@
+# llm-router on Fly.io (docs/operations.md#flyio). One machine, one volume: the router keeps
+# process-local queues and SQLite, so never scale past one.
+# Catalogues come from dymoo/dylans-infra: check it out (or symlink it) at ./.infra before
+# `fly deploy`; the deploy fails closed if the files are missing.
+app = "llm-router"
+primary_region = "lhr"
+kill_signal = "SIGTERM"
+# Fly's maximum. The router drains for up to 11 minutes; work still running at 5 minutes is cut.
+kill_timeout = 300
+swap_size_mb = 512
+
+[build]
+  dockerfile = "Dockerfile"
+  build-target = "fly"
+
+[env]
+  APP_ORIGIN = "https://llm-router.internal.dylans.link"
+  CLASSIFIER_MODE = "rules"
+  HOST = "127.0.0.1"
+  PORT = "3000"
+  CONSOLE_DIR = ""
+  METRICS_PORT = "9464"
+  METRICS_HOST = "192.168.5.4"
+  AUXILIARY_CATALOG = "/etc/llm-router/auxiliary.json"
+  NODE_OPTIONS = "--max-old-space-size=150"
+  LITESTREAM_PATH = "control"
+  # WireGuard peer of the CCR2004 (dylans-infra terraform/mikrotik ccr2004-wireguard.tf).
+  WG_ADDRESS = "192.168.5.4"
+  WG_ENDPOINT = "wg.dylans.link:51821"
+  WG_GUFO = "192.168.6.62:8000"
+  WG_PEER_PUBLIC_KEY = "8FkZu+SYJ/3Nv5eg7CzLEJBeVRN5whOG8aHvvDP/cx0="
+  # Gufo; internal Caddy; the k3s nodes that scrape metrics. The CCR firewall enforces the rest.
+  WG_ALLOWED_IPS = "192.168.6.62/32, 192.168.6.52/32, 192.168.6.50/32, 192.168.6.51/32, 192.168.6.54/32"
+
+[[files]]
+  guest_path = "/etc/llm-router/catalog.json"
+  local_path = ".infra/k8s/apps/llm-router/catalog.json"
+
+[[files]]
+  guest_path = "/etc/llm-router/auxiliary.json"
+  local_path = ".infra/k8s/apps/llm-router/auxiliary.json"
+
+[[mounts]]
+  source = "llm_router_data"
+  destination = "/var/lib/llm-router"
+  initial_size = "1gb"
+  snapshot_retention = 5
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 500
+
+# Gates deploys: Caddy up, the API server up, and at least one chat deployment ready.
+[checks.ready]
+  type = "http"
+  port = 8080
+  path = "/health/ready"
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "60s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

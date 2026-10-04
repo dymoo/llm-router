@@ -5,16 +5,19 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "next build && node scripts/sanitize-standalone.mjs",
-    "start": "next start",
+    "build": "next build && npm run build:server",
+    "start": "node dist/server/main.mjs",
     "typecheck": "tsc --noEmit --pretty false",
     "test": "node --import tsx --conditions=react-server --test --test-reporter=spec \"test/**/*.test.ts\"",
     "test:production": "node --test --test-reporter=spec integration/*.test.mjs",
-    "format": "oxfmt --write app components lib server src test integration scripts env.ts proxy.ts instrumentation.ts next.config.ts drizzle.config.ts tsconfig.json package.json catalog.example.json catalog.auxiliary.example.json catalog.batch.example.json compose.yaml .github/workflows",
-    "check-all": "npm run typecheck && npm test && npm run build && npm run test:production"
+    "format": "oxfmt --write app components lib server src test integration scripts env.ts next.config.ts drizzle.config.ts tsconfig.json package.json catalog.example.json catalog.auxiliary.example.json catalog.batch.example.json compose.yaml .github/workflows",
+    "check-all": "npm run typecheck && npm test && npm run build && npm run test:production",
+    "build:server": "esbuild server/main.ts --bundle --platform=node --format=esm --target=node24 --conditions=react-server --external:bufferutil --external:utf-8-validate --legal-comments=none --outfile=dist/server/main.mjs \"--banner:js=import{createRequire}from'node:module';const require=createRequire(import.meta.url);\""
   },
   "dependencies": {
     "@base-ui/react": "1.8.0",
+    "@effect/platform-node": "4.0.0-rc.112",
+    "@effect/platform-node-shared": "4.0.0-rc.112",
     "@t3-oss/env-nextjs": "0.13.11",
     "class-variance-authority": "0.7.1",
     "cn": "0.4.0",
@@ -33,6 +36,7 @@
     "@types/react": "19.1.13",
     "@types/react-dom": "19.1.9",
     "drizzle-kit": "1.0.0-rc.4",
+    "esbuild": "0.25.12",
     "oxfmt": "0.68.0",
     "shadcn": "4.21.0",
     "tailwindcss": "4.3.3",

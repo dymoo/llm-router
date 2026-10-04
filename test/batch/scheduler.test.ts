@@ -29,7 +29,7 @@ import type { Admission, FinalizeOutcome } from "../../src/keys/types.ts";
 import type { KeyPolicy } from "../../src/http/contracts.ts";
 import { ConcurrentLimit } from "../../src/errors.ts";
 import { processState } from "../../server/state.ts";
-import { register } from "../../instrumentation.ts";
+import { startBatch } from "../../server/batch.ts";
 import {
   BatchSpillAborted,
   BatchSubmitRejected,
@@ -884,15 +884,7 @@ test(
     h.keys.enforceConcurrentLimit = true;
     h.keys.concurrentLimit = 2;
     const previousBatch = processState.batch;
-    const envKeys = [
-      "NODE_ENV",
-      "NEXT_RUNTIME",
-      "NEXT_MANUAL_SIG_HANDLE",
-      "APP_ORIGIN",
-      "SQLITE_PATH",
-      "API_KEY_PEPPER",
-      "MODEL_CATALOG",
-    ];
+    const envKeys = ["NODE_ENV", "APP_ORIGIN", "SQLITE_PATH", "API_KEY_PEPPER", "MODEL_CATALOG"];
     const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
     t.after(() => {
       processState.batch = previousBatch;
@@ -903,18 +895,16 @@ test(
     });
     Object.assign(process.env, {
       NODE_ENV: "production",
-      NEXT_RUNTIME: "nodejs",
       APP_ORIGIN: "http://127.0.0.1:14300",
       SQLITE_PATH: ":memory:",
       API_KEY_PEPPER: "fixture",
       MODEL_CATALOG: "fixture",
     });
-    delete process.env.NEXT_MANUAL_SIG_HANDLE;
     processState.batch = {
       scheduler: h.scheduler,
       deps: {} as NonNullable<typeof processState.batch>["deps"],
     };
-    await register();
+    startBatch();
     h.scheduler.kick(); // Submission kicks once; boot must supply subsequent ticks.
     for (let turn = 0; turn < 40 && h.ledger.job(h.jobId)?.status !== "completed"; turn++) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));

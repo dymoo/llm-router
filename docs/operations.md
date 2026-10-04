@@ -4,7 +4,7 @@
 
 Run **one gateway process** with local SQLite. Session pins, model permits and priority queues are process-local. Do not run replicas, PM2 clusters, serverless ephemeral disks or NFS SQLite and expect shared capacity/session correctness.
 
-The gateway's resource registry is process-owned so Next instrumentation and route bundles share admission leases, capacity pools, session routing, health state and disposal. A production HTTP regression holds a generation open while SIGTERM arrives, rejects new work, and checks that the admitted response and SQLite finalization complete before exit. Restart the process after server-code or catalogue changes rather than hot-swapping live ownership.
+The gateway is one Node process: `server/main.ts` (an Effect `HttpServer`, bundled to `dist/server/main.mjs`) maps every route in `server/routes.ts` to the `src/http/*` handlers and owns admission leases, capacity pools, session routing, health state and disposal. The console is a static Next export (`out/`) that calls `/api/*` from the browser; on Fly Caddy serves it from disk, elsewhere the API server serves it when `CONSOLE_DIR` is set. There is no Next server at runtime. A production HTTP regression holds a generation open while SIGTERM arrives, rejects new work, and checks that the admitted response and SQLite finalization complete before exit. Restart the process after server-code or catalogue changes rather than hot-swapping live ownership.
 
 Compose defaults to `gateway` with Rules routing; the optional `webui` profile adds Open WebUI. Gufo, the local model runtime, runs on the owner's GPU host outside Compose and is operated from the owner's infra repository. Only gateway and WebUI publish ports, both loopback by default.
 
@@ -41,20 +41,46 @@ Batch content is backed up separately, or not at all. `backup.mjs` copies only `
 
 Sessions do not survive a restart or restore; the next turn just routes normally. Migration 7 rewrites every stored key policy to `{ priority, cloud, requestsPerMinute, maxConcurrent }` with `cloud` true exactly where `overloadAction` was `failover`. Abandoned leases recover through the normal repository maintenance/admission path.
 
-## Automatic redeploys
+## Fly.io
 
-After `ci` succeeds for a push to `main`, `deploy-k3s` checks out that exact commit, builds the linux/amd64 gateway image, audits every saved image layer for environment files, SQLite files and private data, and pushes `ghcr.io/dymoo/llm-router:<full source SHA>`. It records the **pushed digest**, not the mutable tag, in the infra overlay. The workflow also accepts `workflow_dispatch` with a required full `sha` and `allow_migration` (default `false`). Only successful push-triggered CI runs auto-deploy; PR CI does not. Deployments serialize rather than cancel each other.
+Production runs on Fly.io: app `llm-router`, region `lhr`, one `shared-cpu-1x` machine with 256 MB (plus 512 MB swap) and a 1 GB volume at `/var/lib/llm-router`. Never scale past one machine (see Topology). `fly.toml` and `deploy/fly/` hold the whole runtime:
 
-The deployer reads `# source-commit: <full 40-character SHA>` from `dymoo/dylans-infra/k8s/apps/llm-router/kustomization.yaml`. If that commit is missing or unknown, or `git diff --name-only PREV..SHA -- migrations/ src/db/` has changes, it treats the release as a **possible forward-only migration**. The automatic run stops and tells the operator to dispatch `deploy-k3s` manually with the exact `sha` and `allow_migration=true`. On startup the new gateway takes its own verified pre-migration copy (see Backup and restore) and refuses to migrate if that copy fails; an extra operator backup beforehand is still recommended. Preserve the matching `API_KEY_PEPPER` outside the image. An older binary refuses a newer schema, so never roll it back onto a migrated database. On rollout failure without a migration, the workflow runs `kubectl rollout undo`, reverts its infra write-back commit and pushes that revert, then fails. Aft…
+- `deploy/fly/entrypoint.sh` supervises four things and exits non-zero (Fly restarts the machine) if any of them dies: kernel WireGuard (`wg-quick`), Litestream, the API server (as `node`, on `127.0.0.1:3000`) and Caddy. On SIGTERM it drains the API server first, then stops Caddy and Litestream (final sync), then WireGuard. Fly's `kill_timeout` maximum is 300 s, so a deploy cuts work still running after 5 minutes.
+- `deploy/fly/Caddyfile`: the public site (`:8080`, Fly terminates TLS for `llm.dylans.link`) serves only `/v1/*` and `/health/ready`, everything else is 404. The private site binds the WireGuard address `192.168.5.4:3000` and serves the static console plus `/api/*`, `/v1/*` and `/health/*`; internal Caddy (`llm-router.internal.dylans.link`, Authentik-gated) is its only caller. SSE is flushed immediately, responses have no wall-clock limit (12-minute header timeout), and body caps mirror the router's.
+- WireGuard: the machine is CCR2004 peer `192.168.5.4`. The CCR firewall lets it reach only Gufo `192.168.6.62:8000`, and lets only internal Caddy reach `:3000` and the k3s nodes reach metrics `:9464` (`METRICS_HOST` binds the WireGuard address). A tunnel blackhole would make Gufo's readiness probe time out, which the router reads as "busy, still up"; so each homelab address has an `unreachable` fallback route and the entrypoint withdraws Gufo's tunnel route after three failed 10-second probes. Gufo then reads as down at once and cloud-enabled keys fail over; the route comes back on the first good probe.
+- Secrets (`fly secrets`): `API_KEY_PEPPER`, `GUFO_API_KEY`, `OPENROUTER_API_KEY`, `WG_PRIVATE_KEY`, `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY`. Import with `fly secrets import -a llm-router` from stdin, never argv.
+- Catalogues are the owner's infra repo (`dymoo/dylans-infra` `k8s/apps/llm-router/{catalog,auxiliary}.json`), shipped as Fly `[[files]]` from a checkout at `./.infra`. **A catalogue change deploys** by merging it in dylans-infra, then `gh workflow run deploy-fly -R dymoo/llm-router -f sha=<deployed SHA>` (the current `SOURCE_COMMIT` from `fly machine list -a llm-router --json`).
 
-Deployment restarts the single gateway process. `Recreate` drains the old pod (up to the 780-second termination grace period); active or locally running work may be interrupted and clients should retry. Never treat a restart as a restored snapshot: queued/recoverable batch work follows the normal restart behavior above. Secrets are **not synced** from the router repository or the image; provision and rotate runtime Kubernetes Secrets out of band.
+### Deploys
 
-Infra contract for `dymoo/dylans-infra`:
+After `ci` succeeds on `main`, `deploy-fly` (hosted runner) checks out that exact commit, clones the infra catalogue, builds the `fly` image target, audits every layer (`scripts/audit-image.sh`), pushes `registry.fly.io/llm-router:<full SHA>`, and runs `fly deploy --image` with `SOURCE_COMMIT=<SHA>`. The `ready` check in `fly.toml` gates the deploy, and the workflow then checks that `https://llm.dylans.link/health/ready` is 200 and `/api/admin/keys` is 404 there. `workflow_dispatch` takes a full `sha` and `allow_migration` (default `false`).
 
-- Namespace `llm-router`, overlay `k8s/apps/llm-router/`; `kustomization.yaml` must contain exactly one `# source-commit: <full SHA>` line and one `images` entry named `ghcr.io/dymoo/llm-router` with exactly one `digest: sha256:<64 lowercase hex>` line. The workflow changes only those two lines, commits `deploy(llm-router): <short SHA>` to infra `main` and applies `infra/k8s/apps/llm-router`.
-- A Deployment named `llm-router` with one replica, `Recreate`, `terminationGracePeriodSeconds: 780`, PVC mounted at `/var/lib/llm-router`, and private GHCR image pinned by digest. Runtime secrets remain out of band.
-- GitHub App runner scale set label `llm-router-deploy-runners`; repository secrets `GHCR_PAT` (registry push only; checkout uses the default repository access), `DEPLOY_SSH_KEY` (infra `main` write-back) and `KUBECONFIG_B64` (cluster access). The `GHCR_PAT` publisher logs in as `dymoo`, matching the established infra pipeline. `secrets.GITHUB_TOKEN` is empty on these runners. GitHub SSH host key is pinned, with strict verification, not learned at runtime.
-- Kubernetes deployer credentials need only the resource verbs required to apply the overlay and to read/watch deployment rollout status and undo the Deployment. They must have **no Secret verbs**; out-of-band administrators own Secret creation and updates.
+The migration gate compares the running machine's `SOURCE_COMMIT` with the new SHA. If it is unknown or `git diff --name-only PREV..SHA -- migrations/ src/db/` is non-empty, the automatic run stops; dispatch it with `allow_migration=true`, which first takes an operator backup on the volume (`/opt/ops/backup.mjs`). The gateway also takes its own verified pre-migration copy (see Backup and restore). An older binary refuses a newer schema, so never roll it back onto a migrated database. A failed deploy without a migration is rolled back by redeploying the previous image. Secrets are never synced from this repository or the image. `FLY_API_TOKEN` is an app-scoped deploy token (`fly tokens create deploy -a llm-router`); `DEPLOY_SSH_KEY` clones dylans-infra.
+
+### Litestream
+
+`deploy/fly/litestream.yml` replicates `control.sqlite` continuously to the private B2 bucket `dylans-llm-router-litestream` under `control/`, with daily snapshots kept 7 days. Batch content is not replicated (see Storage and privacy). On boot an empty volume restores itself from the replica (`-if-db-not-exists -if-replica-exists`). To restore to a point in time, or onto a new volume:
+
+```bash
+fly ssh console -a llm-router -C "touch /var/lib/llm-router/MAINTENANCE" && fly machine restart -a llm-router
+fly ssh console -a llm-router   # then, inside the machine:
+mv /var/lib/llm-router/control.sqlite* /var/lib/llm-router/.control.sqlite-litestream /var/lib/llm-router/backups/   # keep the old copy
+litestream restore -config /etc/litestream.yml [-timestamp 2026-10-04T12:00:00Z] /var/lib/llm-router/control.sqlite
+chown node:node /var/lib/llm-router/control.sqlite; rm /var/lib/llm-router/MAINTENANCE; exit
+fly machine restart -a llm-router
+```
+
+Off Fly, the same restore runs anywhere with `LITESTREAM_ACCESS_KEY_ID`/`LITESTREAM_SECRET_ACCESS_KEY` (Keychain `llm-router-litestream-{id,secret}`) and `LITESTREAM_PATH=control`. The restored file needs the same `API_KEY_PEPPER`. A restore from a `backup.mjs` file uses the same `MAINTENANCE` hold and `node /opt/ops/restore.mjs --replace --offline <file>` as `node`.
+
+### Admin API from a terminal
+
+The admin API is reachable only on the private site, so agents mint keys from inside the machine. `fly ssh console` needs the owner's Fly login, which plays the role kubectl RBAC used to. The console is deliberately not on Fly's private 6PN network: other apps in the org share it.
+
+```bash
+umask 077; R=$(mktemp)
+fly ssh console -a llm-router -q -C "curl -sS -X POST http://127.0.0.1:3000/api/admin/keys -H 'Origin: https://llm-router.internal.dylans.link' -H 'x-jev-admin: 1' -H 'content-type: application/json' -d '{\"name\":\"<project>-<env>\",\"expiresAt\":null,\"policy\":{\"priority\":\"medium\",\"cloud\":true,\"requestsPerMinute\":0,\"maxConcurrent\":0}}'" > "$R"
+jq -r '.key | [.id, .name, .prefix] | @tsv' "$R"; jq -r .secret "$R" | <store-from-stdin>; rm -f "$R"
+```
 
 ## Health
 
@@ -70,7 +96,7 @@ Cloud health uses non-generating metadata/account endpoints. System One deployme
 
 ## Metrics
 
-Set `METRICS_PORT` to an integer from 1–65535, different from the application `PORT` (default 3000), to enable the dedicated Prometheus listener. Unset disables it. Only `GET /metrics` is served there; the application port never serves metrics. Expose the metrics port solely to Prometheus via Kubernetes NetworkPolicy; do not route it through Caddy/Authentik or publish it publicly. The listener stops during graceful shutdown. `SOURCE_COMMIT` in the image supplies the build label, or `unknown` when absent.
+Set `METRICS_PORT` to an integer from 1–65535, different from the application `PORT` (default 3000), to enable the dedicated Prometheus listener. Unset disables it. Only `GET /metrics` is served there; the application port never serves metrics. `METRICS_HOST` (default `0.0.0.0`) chooses its bind address; on Fly it is the WireGuard address. Expose the metrics port solely to Prometheus (the CCR firewall on Fly, NetworkPolicy on Kubernetes); do not route it through Caddy/Authentik or publish it publicly. The listener stops during graceful shutdown. `SOURCE_COMMIT` in the image supplies the build label, or `unknown` when absent.
 
 The `llm_router_` families export build/process and scrape timing; cached readiness; terminal admissions, request duration and concurrency; queue/capacity and routing decisions; stream outcomes; known token and separate cost categories; cache observations; and read-only SQLite counts for key and batch state. Histograms use fixed buckets and seconds; counters end in `_total`. Missing usage from a dispatched request increments `usage_unknown_total` rather than fabricating a zero token count. The current Gufo adapter does not decode draft acceptance counts, so no draft-token metric is emitted.
 
@@ -105,14 +131,14 @@ Keys route by `priority` and `cloud` only; see [routing-policy.md](routing-polic
 
 ## Drain and upgrades
 
-The production image sets `NEXT_MANUAL_SIG_HANDLE=true`. Its Next instrumentation hook validates environment configuration and registers SIGTERM/SIGINT handling. Shutdown stops new inference admissions, marks readiness false, lets admitted work finish for up to eleven minutes, disposes the Effect runtime, and closes SQLite. Compose allows twelve minutes before forced termination.
+The API server validates environment configuration at start and handles SIGTERM/SIGINT itself: the listener keeps answering (503 for new work, readiness false) while shutdown stops new inference admissions, marks readiness false, lets admitted work finish for up to eleven minutes, disposes the Effect runtime, and closes SQLite. Compose allows twelve minutes before forced termination.
 
 ```bash
 node scripts/drain.mjs --compose
 node scripts/upgrade-gateway.mjs
 ```
 
-Gateway-only upgrades do not restart Gufo or Open WebUI. Full Compose stop is a deliberate separate operation. Native `next start` deployments that want this drain handler must also set `NEXT_MANUAL_SIG_HANDLE=true`.
+Gateway-only upgrades do not restart Gufo or Open WebUI. Full Compose stop is a deliberate separate operation.
 
 | Bound                      | Default        |
 | -------------------------- | -------------- |

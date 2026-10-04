@@ -115,7 +115,11 @@ async function sampleLive(): Promise<void> {
   else clearSqlMetrics();
 }
 
-export async function startMetricsListener(port: number, sample: () => Promise<void> = sampleLive) {
+export async function startMetricsListener(
+  port: number,
+  host = "0.0.0.0",
+  sample: () => Promise<void> = sampleLive,
+) {
   if (processState.metricsStarting !== undefined) return processState.metricsStarting;
   if (processState.metricsServer !== undefined) return processState.metricsServer;
   const server = createServer((request, response) => {
@@ -144,7 +148,7 @@ export async function startMetricsListener(port: number, sample: () => Promise<v
   });
   const starting = new Promise<typeof server>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "0.0.0.0", () => {
+    server.listen(port, host, () => {
       server.removeListener("error", reject);
       processState.metricsServer = server;
       resolve(server);

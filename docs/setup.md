@@ -4,7 +4,7 @@
 
 | Service      | Image                                   | Published             | Role                                           |
 | ------------ | --------------------------------------- | --------------------- | ---------------------------------------------- |
-| `gateway`    | built from `Dockerfile`                 | `127.0.0.1:3000` only | Next.js standalone                             |
+| `gateway`    | built from `Dockerfile`                 | `127.0.0.1:3000` only | API server + static console (`runner` target)  |
 | `open-webui` | `ghcr.io/open-webui/open-webui:v0.11.3` | `127.0.0.1:3001`      | optional `webui` profile; chat through gateway |
 
 The model runtime is Gufo on the owner's GPU host. It is reached over HTTP with a bearer key and is not a Compose service. Gufo host operations live in the owner's infra repository.

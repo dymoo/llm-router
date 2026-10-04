@@ -164,18 +164,11 @@ async function makeSpillDue(jobId) {
 
 function spawnGateway() {
   const exited = Promise.withResolvers();
-  const child = spawn(
-    process.execPath,
-    [
-      "node_modules/next/dist/bin/next",
-      "start",
-      "--hostname",
-      "127.0.0.1",
-      "--port",
-      String(state.port),
-    ],
-    { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"], env: state.gatewayEnv },
-  );
+  const child = spawn(process.execPath, ["dist/server/main.mjs"], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+    env: state.gatewayEnv,
+  });
   child.stdout.on("data", (chunk) => {
     state.logs = (state.logs + chunk).slice(-20_000);
   });
@@ -560,8 +553,8 @@ globalThis.fetch = (input, init) => {
     state.gatewayEnv = {
       ...process.env,
       NODE_ENV: "production",
-      NEXT_TELEMETRY_DISABLED: "1",
-      NEXT_MANUAL_SIG_HANDLE: "true",
+      HOST: "127.0.0.1",
+      PORT: String(state.port),
       NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=file://${guardPath}`]
         .filter(Boolean)
         .join(" "),

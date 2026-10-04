@@ -30,7 +30,7 @@ const { getInferenceDeps, disposeGateway } = await import("./server/runtime.ts")
 const { keys, getAdminDeps } = await import("./server/control.ts");
 const { renderMetrics, observeHealth } = await import("./server/metrics.ts");
 const { gatewayHealth } = await import("./server/health.ts");
-const { GET: readiness } = await import("./app/health/ready/route.ts");
+const { readiness } = await import("./server/routes.ts");
 const { handleHealth } = await import("./src/http/health.ts");
 const { handleChatCompletions } = await import("./src/http/inference.ts");
 try {

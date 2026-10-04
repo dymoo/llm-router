@@ -301,34 +301,24 @@ globalThis.fetch = (input, init) => {
         ),
       );
       const exited = Promise.withResolvers();
-      child = spawn(
-        process.execPath,
-        [
-          "node_modules/next/dist/bin/next",
-          "start",
-          "--hostname",
-          "127.0.0.1",
-          "--port",
-          String(port),
-        ],
-        {
-          cwd: process.cwd(),
-          stdio: ["ignore", "pipe", "pipe"],
-          env: {
-            ...safeEnv,
-            NODE_ENV: "production",
-            NEXT_TELEMETRY_DISABLED: "1",
-            NODE_OPTIONS: `--import=file://${guardPath}`,
-            APP_ORIGIN: origin,
-            SQLITE_PATH: join(directory, "control.sqlite"),
-            MODEL_CATALOG: cataloguePath,
-            AUXILIARY_CATALOG: "",
-            API_KEY_PEPPER: randomUUID(),
-            GUFO_API_KEY: FIXTURE_CREDENTIAL,
-            OPENROUTER_API_KEY: "fixture-cloud-only",
-          },
+      child = spawn(process.execPath, ["dist/server/main.mjs"], {
+        cwd: process.cwd(),
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...safeEnv,
+          NODE_ENV: "production",
+          HOST: "127.0.0.1",
+          PORT: String(port),
+          NODE_OPTIONS: `--import=file://${guardPath}`,
+          APP_ORIGIN: origin,
+          SQLITE_PATH: join(directory, "control.sqlite"),
+          MODEL_CATALOG: cataloguePath,
+          AUXILIARY_CATALOG: "",
+          API_KEY_PEPPER: randomUUID(),
+          GUFO_API_KEY: FIXTURE_CREDENTIAL,
+          OPENROUTER_API_KEY: "fixture-cloud-only",
         },
-      );
+      });
       child.stdout.on("data", (chunk) => {
         logs = (logs + chunk).slice(-4000);
       });

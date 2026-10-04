@@ -2369,7 +2369,7 @@
     },
     {
       "id": 62,
-      "title": "Pod",
+      "title": "Machine",
       "type": "row",
       "collapsed": false,
       "gridPos": {
@@ -2382,8 +2382,8 @@
     },
     {
       "id": 63,
-      "title": "Router container memory",
-      "description": "Working-set bytes for the app container; excludes pod sandbox and host memory.",
+      "title": "Router memory (RSS, heap)",
+      "description": "Node process resident set and V8 heap (llm_router_process_*); the Fly machine has 256 MB plus swap.",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -2398,8 +2398,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"llm-router\",container=\"app\",job=\"kubelet\",metrics_path=\"/metrics/cadvisor\"})",
-          "legendFormat": "{{pod}}",
+          "expr": "llm_router_process_resident_memory_bytes",
+          "legendFormat": "rss",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "llm_router_process_heap_used_bytes",
+          "legendFormat": "heap",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2424,8 +2433,8 @@
     },
     {
       "id": 64,
-      "title": "Router container CPU",
-      "description": "CPU cores for the app container; cAdvisor rate needs two scrape samples.",
+      "title": "Event loop delay p99",
+      "description": "p99 event-loop delay of the router process; sustained growth means CPU starvation on the shared vCPU.",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
@@ -2440,8 +2449,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"llm-router\",container=\"app\",job=\"kubelet\",metrics_path=\"/metrics/cadvisor\"}[$__rate_interval]))",
-          "legendFormat": "{{pod}}",
+          "expr": "llm_router_event_loop_delay_p99_seconds",
+          "legendFormat": "p99",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2450,7 +2459,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "cores"
+          "unit": "s"
         },
         "overrides": []
       },
@@ -2466,8 +2475,8 @@
     },
     {
       "id": 65,
-      "title": "Pod restarts",
-      "description": "Kube-state restart counter by pod/container; resets on pod recreation.",
+      "title": "Process restarts",
+      "description": "Process starts in the range (llm_router_process_start_time_seconds changes): crashes, deploys and machine restarts.",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -2482,8 +2491,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (pod,container) (kube_pod_container_status_restarts_total{namespace=\"llm-router\"})",
-          "legendFormat": "{{pod}} · {{container}}",
+          "expr": "changes(llm_router_process_start_time_seconds[$__range])",
+          "legendFormat": "restarts",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2508,8 +2517,8 @@
     },
     {
       "id": 66,
-      "title": "External app probe",
-      "description": "Blackbox probe success 1/0 for probe/llm-router/app; absent scrape differs from failure.",
+      "title": "Public API probe (llm.dylans.link)",
+      "description": "Blackbox HTTPS probe of the public API readiness on Fly (blackbox-public).",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
@@ -2524,8 +2533,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "probe_success{job=\"probe/llm-router/app\"}",
-          "legendFormat": "{{instance}}",
+          "expr": "probe_success{job=\"blackbox-public\",instance=\"https://llm.dylans.link/health/ready\"}",
+          "legendFormat": "up",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2736,57 +2745,6 @@
         "tooltip": {
           "mode": "multi"
         }
-      }
-    },
-    {
-      "id": 72,
-      "title": "Logs",
-      "type": "row",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 222,
-        "w": 24,
-        "h": 1
-      },
-      "description": "Loki namespace logs are operational text and can contain sensitive data."
-    },
-    {
-      "id": 73,
-      "title": "Router pod logs",
-      "description": "Loki namespace logs can contain sensitive content; Grafana access must stay restricted.",
-      "type": "logs",
-      "gridPos": {
-        "x": 0,
-        "y": 223,
-        "w": 24,
-        "h": 12
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "loki"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{namespace=\"llm-router\"}",
-          "queryType": "range",
-          "datasource": {
-            "type": "loki",
-            "uid": "loki"
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "wrapLogMessage": true
       }
     },
     {

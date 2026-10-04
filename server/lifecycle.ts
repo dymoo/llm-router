@@ -38,6 +38,8 @@ export function registerShutdown(): void {
       () => process.exit(1),
     );
   };
-  process.once("SIGTERM", stop);
-  process.once("SIGINT", stop);
+  // `on`, not `once`: a repeated signal (a supervisor forwarding one its process group also got)
+  // must not fall through to the default handler and kill the drain. drainGateway() is idempotent.
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
 }
