@@ -61,7 +61,8 @@
 	}
 }
 
-http://{$WG_ADDRESS}:3000 {
+# Any Host: internal Caddy forwards the client's (llm-router.internal.dylans.link).
+http://:3000 {
 	bind {$WG_ADDRESS}
 	@api path /v1/* /api/* /health/*
 	handle @api {
