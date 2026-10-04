@@ -20,3 +20,4 @@ dist/
 *.gguf
 *.hgn
 /third_party/
+.infra

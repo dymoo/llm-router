@@ -144,10 +144,10 @@ it("normalizes unknown admission and request labels without disclosing secrets",
 it("isolates metrics on a dedicated socket and never runs inference or admission on scrape", async () => {
   let scrapes = 0;
   const [server, duplicate] = await Promise.all([
-    startMetricsListener(0, async () => {
+    startMetricsListener(0, "127.0.0.1", async () => {
       scrapes++;
     }),
-    startMetricsListener(0, async () => {
+    startMetricsListener(0, "127.0.0.1", async () => {
       scrapes++;
     }),
   ]);

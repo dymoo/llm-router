@@ -1,6 +1,6 @@
 # LLM Router
 
-A self-hosted, key-controlled inference gateway for coding agents and internal chat. Effect 4 owns routing and execution, Drizzle manages SQLite metadata, and Next.js provides the API and administration console.
+A self-hosted, key-controlled inference gateway for coding agents and internal chat. Effect 4 owns routing and execution, Drizzle manages SQLite metadata, an Effect HTTP server provides the API, and a static Next.js export is the administration console. Production runs on Fly.io: the OpenAI API is public at `https://llm.dylans.link/v1`, the console stays private ([operations](docs/operations.md#flyio)).
 
 ## What it does
 
@@ -18,7 +18,8 @@ Node 22.16+; Node 24 is used in the deployment image. From a fresh checkout:
 ```bash
 npm ci
 node scripts/setup.mjs --native --gufo-endpoint https://gufo.example/v1
-node --env-file=.env.native node_modules/next/dist/bin/next dev --hostname 127.0.0.1
+npm run build
+CONSOLE_DIR=out HOST=127.0.0.1 node --env-file=.env.native dist/server/main.mjs
 ```
 
 Open `http://127.0.0.1:3000`. Setup creates private configuration, a random API-key pepper and a catalogue with the Gufo and OpenRouter deployments; it refuses to overwrite existing files. Without `--gufo-endpoint` the catalogue keeps `REPLACE_GUFO_ENDPOINT`, and the router refuses inference until it is replaced. Set `GUFO_API_KEY` and `OPENROUTER_API_KEY` in the environment file. The console remains usable while model dependencies are unavailable.

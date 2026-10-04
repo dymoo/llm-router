@@ -21,3 +21,7 @@ Use the five canonical triage labels. See `docs/agents/triage-labels.md`.
 ### Domain docs
 
 Single-context: root `CONTEXT.md` glossary and `docs/adr/` decisions. See `docs/agents/domain.md`.
+
+## Deployment
+
+Production is the Fly.io app `llm-router` (`fly.toml`, `deploy/fly/`, `.github/workflows/deploy-fly.yml`; see `docs/operations.md#flyio`). Its catalogue, WireGuard peer, DNS and monitoring live in `dymoo/dylans-infra` (`k8s/apps/llm-router/`, `terraform/mikrotik/ccr2004-wireguard-llm-router.tf`).

@@ -21,3 +21,5 @@ docs
 **/*.md
 *.hgn
 .DS_Store
+.infra
+dist

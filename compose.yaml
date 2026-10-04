@@ -17,6 +17,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runner
     image: llm-router-gateway:local
     restart: unless-stopped
     init: true

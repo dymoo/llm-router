@@ -1,0 +1,75 @@
+# In-machine front door. Fly terminates TLS; Caddy speaks plain HTTP only.
+# - :8080 (Fly http_service, public): the OpenAI API and readiness, nothing else.
+# - {$WG_ADDRESS}:3000 (WireGuard only; internal Caddy + Authentik upstream to it):
+#   the static console, /api/* and /v1/*.
+{
+	admin off
+	auto_https off
+	persist_config off
+	servers {
+		# Fly's proxy (public) and internal Caddy .52 (WireGuard) are the only callers.
+		trusted_proxies static private_ranges
+		client_ip_headers Fly-Client-IP X-Forwarded-For
+		timeouts {
+			read_header 10s
+			# The router bounds body reads at 15 s (30-60 s for System One).
+			read_body 90s
+			# Streams and 10-minute generations: never cut a response by wall time.
+			write 0
+			idle 5m
+		}
+	}
+	log {
+		output stdout
+		format console
+		level WARN
+	}
+}
+
+(router) {
+	# Body caps mirror the router's own limits (src/http/limits.ts, BATCH_MAX_JOB_BODY_BYTES,
+	# System One 8 MiB); the router still enforces them exactly.
+	@batches path /v1/batches /v1/batches/*
+	request_body @batches {
+		max_size 32MiB
+	}
+	@systemone path /v1/systemone
+	request_body @systemone {
+		max_size 8MiB
+	}
+	@other not path /v1/batches /v1/batches/* /v1/systemone
+	request_body @other {
+		max_size 1MiB
+	}
+	reverse_proxy 127.0.0.1:3000 {
+		# SSE: forward every chunk immediately.
+		flush_interval -1
+		transport http {
+			# Non-streamed generations answer only when done (10 min + queueing; 11 min deadline).
+			response_header_timeout 12m
+		}
+	}
+}
+
+:8080 {
+	@public path /v1/* /health/ready
+	handle @public {
+		import router
+	}
+	handle {
+		respond 404
+	}
+}
+
+http://{$WG_ADDRESS}:3000 {
+	bind {$WG_ADDRESS}
+	@api path /v1/* /api/* /health/*
+	handle @api {
+		import router
+	}
+	handle {
+		root * /app/out
+		try_files {path} {path}.html {path}/index.html =404
+		file_server
+	}
+}
