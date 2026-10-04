@@ -194,6 +194,8 @@ test(
         assert.ok(Date.now() < stoppingDeadline, "Readiness must become false during drain");
         await delay(25, undefined, { signal: t.signal });
       }
+      // Again, mid-drain: a supervisor may forward a signal its process group already got.
+      child.kill("SIGTERM");
       const denied = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
         headers,

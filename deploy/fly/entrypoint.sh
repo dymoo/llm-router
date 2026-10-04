@@ -12,7 +12,11 @@ if [[ -e $data/MAINTENANCE ]]; then
   exec sleep infinity
 fi
 chown node:node "$data"
-as_node() { HOME=/home/node setpriv --reuid=node --regid=node --init-groups "$@"; }
+# Children run as `node`, each in its own session: Fly's init signals our whole process group,
+# and only this supervisor may decide the shutdown order. An array, not a function: a
+# backgrounded function is a subshell, so $! would not be the process we signal.
+export HOME=/home/node
+as_node=(setsid setpriv --reuid=node --regid=node --init-groups)
 
 # WireGuard: kernel module via wg-quick. The endpoint (DDNS) is set by the loop below, every
 # minute, so a DNS failure at boot cannot keep the public API down and an IP change is followed.
@@ -61,8 +65,8 @@ pids=()
 litestream=""
 # ponytail: Litestream is skipped only before its B2 key exists (staging); production has it.
 if [[ -n ${LITESTREAM_ACCESS_KEY_ID:-} ]]; then
-  as_node litestream restore -config /etc/litestream.yml -if-db-not-exists -if-replica-exists "$SQLITE_PATH"
-  GOMEMLIMIT=32MiB as_node litestream replicate -config /etc/litestream.yml &
+  "${as_node[@]}" litestream restore -config /etc/litestream.yml -if-db-not-exists -if-replica-exists "$SQLITE_PATH"
+  GOMEMLIMIT=32MiB "${as_node[@]}" litestream replicate -config /etc/litestream.yml &
   litestream=$!
   pids+=("$litestream")
 else
@@ -70,17 +74,20 @@ else
 fi
 
 cd /app
-as_node node dist/server/main.mjs &
+"${as_node[@]}" node dist/server/main.mjs &
 api=$!
 pids+=("$api")
-GOMEMLIMIT=32MiB as_node caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+GOMEMLIMIT=32MiB "${as_node[@]}" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 caddy=$!
 pids+=("$caddy")
 
 stop() {
   trap - TERM INT
+  echo "supervisor: draining the API server" >&2
   kill -TERM "$api" 2>/dev/null || true
-  wait "$api" || true
+  local rc=0
+  wait "$api" || rc=$?
+  echo "supervisor: API server exited ($rc); stopping Caddy and Litestream" >&2
   kill -TERM "$caddy" $litestream "$endpoint_loop" 2>/dev/null || true
   wait "$caddy" $litestream 2>/dev/null || true
   wg-quick down wg0 || true
