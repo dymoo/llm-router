@@ -2,6 +2,7 @@ import "server-only";
 import { readFileSync } from "node:fs";
 import { getEnv } from "../env.ts";
 import { decodeAuxiliaryCatalogue, type AuxiliaryDeployment } from "../src/auxiliary.ts";
+import { pinnableModels } from "../src/domain.ts";
 import { type AuxiliaryDeps } from "../src/http/auxiliary.ts";
 import { processState } from "./state.ts";
 import { assertAcceptingWork } from "./lifecycle.ts";
@@ -27,7 +28,7 @@ export function getAuxiliaryDeps(): AuxiliaryDeps {
   return {
     keys,
     deployments: configuredAuxiliaryDeployments(),
-    chatDeploymentIds: configuredChatDeployments().map((item) => item.id),
+    chatModels: pinnableModels(configuredChatDeployments()),
     pool: processState.auxiliaryPool,
     status: statusStore,
   };

@@ -179,6 +179,7 @@ export function batchInferencePort(): BatchInferencePort {
 
 function toRouterWork(work: RoutedWork): RouterWork {
   return {
+    model: work.model,
     requestId: work.requestId,
     keyId: work.keyId,
     policy: work.policy,

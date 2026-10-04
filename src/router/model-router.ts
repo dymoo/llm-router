@@ -13,11 +13,12 @@ import {
 import type { FinalizeOutcome } from "../keys/types.ts";
 import {
   CapacityBusy,
+  InvalidInput,
   LocalOverloaded,
+  ModelNotAllowed,
   NoEligibleModel,
   ProviderFailure,
   type CatalogueInvalid,
-  type InvalidInput,
   type KeyLifecycleError,
 } from "../errors.ts";
 import { adaptersFor, openRouterBody } from "./adapters/index.ts";
@@ -47,6 +48,8 @@ import { observeSseUsage } from "./sse.ts";
 const RETRY_MIN_MS = 250;
 
 export interface RouterWork {
+  /** `auto` (default), `cheap`, or a model id to pin (a deployment's `modelId` or variant). */
+  readonly model?: string;
   readonly requestId: string;
   readonly keyId: string;
   readonly policy: KeyPolicy;
@@ -115,7 +118,8 @@ export type RouterFailure =
   | LocalOverloaded
   | ProviderFailure
   | KeyLifecycleError
-  | InvalidInput;
+  | InvalidInput
+  | ModelNotAllowed;
 
 export interface RouterOptions {
   readonly catalogue: readonly Deployment[];
@@ -420,9 +424,16 @@ function createRouter(options: RouterOptions) {
    * then the first eligible cloud deployment if the key allows cloud, else
    * `local_overloaded`. A session last served by cloud tries that first.
    */
-  const routeDefault = (work: RouterWork, stream: boolean, onEnd: () => void) =>
+  const routeDefault = (
+    work: RouterWork,
+    stream: boolean,
+    onEnd: () => void,
+    pinned?: Deployment,
+  ) =>
     Effect.gen(function* () {
-      const catalogue = yield* checkCatalogueForInference(options.catalogue);
+      // A pinned model is the only candidate: no choice, and no cloud failover for local.
+      const catalogue =
+        pinned === undefined ? yield* checkCatalogueForInference(options.catalogue) : [pinned];
       const local = catalogue.filter((item) => item.location === "local" && fits(work, item));
       const anyCloud = catalogue.filter((item) => item.location === "cloud" && fits(work, item));
       const cloud = work.policy.cloud ? anyCloud : [];
@@ -539,9 +550,10 @@ function createRouter(options: RouterOptions) {
    * holder retries a refusal after its Retry-After; nobody waits past the flex
    * budget, then `resource_unavailable`.
    */
-  const routeFlex = (work: RouterWork, stream: boolean, onEnd: () => void) =>
+  const routeFlex = (work: RouterWork, stream: boolean, onEnd: () => void, pinned?: Deployment) =>
     Effect.gen(function* () {
-      const catalogue = yield* checkCatalogueForInference(options.catalogue);
+      const catalogue =
+        pinned === undefined ? yield* checkCatalogueForInference(options.catalogue) : [pinned];
       const local = catalogue.filter((item) => item.location === "local" && fits(work, item));
       if (local.length === 0) {
         return yield* fail(
@@ -558,7 +570,7 @@ function createRouter(options: RouterOptions) {
       // ponytail: one deployment per request (sticky, else the first up); no cross-queue balancing.
       const target = stickyFirst(yield* up(local), sticky)[0];
       // Gufo down: the default route sends it to cloud (see routeDefault).
-      if (target === undefined) return yield* routeDefault(work, stream, onEnd);
+      if (target === undefined) return yield* routeDefault(work, stream, onEnd, pinned);
       const deadline = startedAt + waits.flex;
       const limit =
         (yield* (
@@ -640,14 +652,73 @@ function createRouter(options: RouterOptions) {
       );
     });
 
+  /**
+   * The request's `model`: undefined for `auto` (policy routing), else the one deployment to
+   * use. `cheap` picks the lowest catalogue price among deployments the key may use that can
+   * serve the request and are up; a model id pins its deployment, carrying the variant's id
+   * upstream on the same capacity. Pinning never bypasses key policy: a cloud model for a
+   * cloud-off or low-priority key is refused, not rerouted.
+   */
+  const resolveModel = (work: RouterWork, flexOnly: boolean) =>
+    Effect.gen(function* () {
+      const model = work.model ?? "auto";
+      if (model === "auto") return undefined;
+      const catalogue = yield* checkCatalogueForInference(options.catalogue);
+      const cloudAllowed = work.policy.cloud && !flexOnly;
+      if (model === "cheap") {
+        const price = (item: Deployment) =>
+          item.prices.inputUsdPerMillion + item.prices.outputUsdPerMillion;
+        const candidates = yield* up(
+          catalogue.filter(
+            (item) => fits(work, item) && (item.location === "local" || cloudAllowed),
+          ),
+        );
+        const cheapest = [...candidates].sort((a, b) => price(a) - price(b))[0];
+        if (cheapest !== undefined) return cheapest;
+        return yield* fail(
+          work,
+          "no-eligible",
+          new NoEligibleModel({ message: "No deployment this key may use can serve the request" }),
+        );
+      }
+      const deployment = catalogue.find(
+        (item) => item.modelId === model || (item.variants ?? []).includes(model),
+      );
+      if (deployment === undefined) {
+        return yield* fail(
+          work,
+          "no-eligible",
+          new InvalidInput({
+            message: `unknown model ${JSON.stringify(model)}: GET /v1/models lists auto, cheap and the model ids`,
+          }),
+        );
+      }
+      if (deployment.location === "cloud" && !cloudAllowed) {
+        return yield* fail(
+          work,
+          "no-eligible",
+          new ModelNotAllowed({
+            message: flexOnly
+              ? `${model} is a cloud model; low-priority and flex requests run only on local models`
+              : `${model} is a cloud model and this key has cloud disabled`,
+          }),
+        );
+      }
+      return { ...deployment, modelId: model };
+    });
+
   // Low keys always run as flex: local idle compute only, never cloud.
   const route = <A extends RoutedCompletion | RoutedStream>(work: RouterWork, stream: boolean) =>
     Effect.acquireUseRelease(
       Effect.sync(enterForeground),
-      (leave) =>
-        (work.serviceTier === "flex" || work.policy.priority === "low"
-          ? routeFlex({ ...work, serviceTier: "flex" }, stream, leave)
-          : routeDefault(work, stream, leave)) as Effect.Effect<A, RouterFailure>,
+      (leave) => {
+        const flexOnly = work.serviceTier === "flex" || work.policy.priority === "low";
+        return Effect.flatMap(resolveModel(work, flexOnly), (pinned) =>
+          flexOnly
+            ? routeFlex({ ...work, serviceTier: "flex" }, stream, leave, pinned)
+            : routeDefault(work, stream, leave, pinned),
+        ) as Effect.Effect<A, RouterFailure>;
+      },
       (leave, exit) =>
         Effect.sync(() => {
           if (!(stream && exit._tag === "Success")) leave();

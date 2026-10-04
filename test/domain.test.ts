@@ -142,3 +142,16 @@ test("a stored legacy policy derives cloud from its overload action", () => {
   assert.deepEqual(decodeStoredKeyPolicy({ ...base, cloud: true }), { ...base, cloud: true });
   assert.throws(() => decodeStoredKeyPolicy({ ...base, cloud: "yes" }));
 });
+
+test("model ids and variants are unique across the catalogue and never auto or cheap", async () => {
+  const variant = { ...localGufo, variants: ["qwen3.8-flash-next-abliterated"] };
+  assert.deepEqual((await run(decodeCatalogue([variant])))[0]?.variants, [
+    "qwen3.8-flash-next-abliterated",
+  ]);
+  const clash = { ...localGufo, id: "other" };
+  await assert.rejects(() => run(decodeCatalogue([localGufo, clash])));
+  await assert.rejects(() => run(decodeCatalogue([{ ...localGufo, variants: ["cheap"] }])));
+  await assert.rejects(() =>
+    run(decodeCatalogue([{ ...localGufo, variants: [localGufo.modelId] }])),
+  );
+});

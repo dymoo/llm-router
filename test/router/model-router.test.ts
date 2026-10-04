@@ -62,7 +62,8 @@ function network(options: {
         return options.flexLimit === undefined
           ? new Response(null, { status: 404 })
           : Response.json({ contract_version: 1, sessions: { flex_limit: options.flexLimit } });
-      if (url.endsWith("/v1/models")) return Response.json({ data: [{ id: `${id}-model` }] });
+      if (url.endsWith("/v1/models"))
+        return Response.json({ data: [{ id: `${id}-model` }, { id: `${id}-model-variant` }] });
       return Response.json({ status: "ok" });
     }
     const call = { id, body: JSON.parse(String(init?.body)) as Record<string, unknown> };
@@ -861,3 +862,118 @@ it(
     }
   },
 );
+
+describe("requested model: auto, cheap and pinned ids", () => {
+  const failureTag = (exit: Exit.Exit<unknown, unknown>) => {
+    const reason = Exit.isFailure(exit) ? exit.cause.reasons[0] : undefined;
+    return reason?._tag === "Fail" ? (reason.error as { _tag?: string })._tag : undefined;
+  };
+  const cloudy = { ...interactivePolicy, cloud: true };
+
+  it("pins a local or cloud model by its upstream id, bypassing local-first choice", async () => {
+    const local = gufo("gufo-a");
+    const net = network({});
+    const routed = await run(
+      ModelRouter.use((router) =>
+        Effect.all([
+          router.complete(work({ requestId: "a", model: "gufo-a-model", policy: cloudy })),
+          router.complete(work({ requestId: "b", model: cloudGlm.modelId, policy: cloudy })),
+        ]),
+      ),
+      layer({ catalogue: [local, cloudGlm], fetch: net.fetchImpl }),
+    );
+    assert.deepEqual(
+      routed.map((item) => item.headers.deploymentId),
+      [local.id, cloudGlm.id],
+    );
+    assert.deepEqual(
+      net.generations.map((call) => call.body.model),
+      ["gufo-a-model", cloudGlm.modelId],
+    );
+  });
+
+  it("refuses a pinned cloud model for cloud-off and low keys instead of rerouting", async () => {
+    const net = network({});
+    const exits = await run(
+      ModelRouter.use((router) =>
+        Effect.all([
+          router
+            .complete(work({ model: cloudGlm.modelId, policy: { ...cloudy, cloud: false } }))
+            .pipe(Effect.exit),
+          router
+            .complete(
+              work({ model: cloudGlm.modelId, policy: { ...backgroundPolicy, cloud: true } }),
+            )
+            .pipe(Effect.exit),
+          router.complete(work({ model: "no-such-model", policy: cloudy })).pipe(Effect.exit),
+        ]),
+      ),
+      layer({ catalogue: [gufo("gufo-a"), cloudGlm], fetch: net.fetchImpl }),
+    );
+    assert.deepEqual(exits.map(failureTag), ["ModelNotAllowed", "ModelNotAllowed", "InvalidInput"]);
+    assert.equal(net.generations.length, 0);
+  });
+
+  it("a pinned local model never fails over to cloud, even when Gufo is down", async () => {
+    const net = network({ down: new Set(["gufo-a"]) });
+    const exit = await run(
+      ModelRouter.use((router) =>
+        router.complete(work({ model: "gufo-a-model", policy: cloudy })).pipe(Effect.exit),
+      ),
+      layer({ catalogue: [gufo("gufo-a"), cloudGlm], fetch: net.fetchImpl }),
+    );
+    assert.equal(failureTag(exit), "LocalOverloaded");
+    assert.equal(net.generations.length, 0);
+  });
+
+  it("a variant sends its own id upstream on the deployment's one capacity pool", async () => {
+    const local = gufo("gufo-a", { variants: ["gufo-a-model-variant"] });
+    const net = network({ generate: holdStreams });
+    await run(
+      ModelRouter.use((router) =>
+        Effect.gen(function* () {
+          const held = yield* router.stream(
+            work({ requestId: "base", stream: true, model: "gufo-a-model", policy: cloudy }),
+          );
+          // maxParallel 1 is taken by the base model: the variant shares it and does not fail over.
+          const busy = yield* router
+            .complete(work({ requestId: "v1", model: "gufo-a-model-variant", policy: cloudy }))
+            .pipe(Effect.exit);
+          assert.equal(failureTag(busy), "LocalOverloaded");
+          yield* Effect.promise(() => held.body.cancel());
+          const variant = yield* router.complete(
+            work({ requestId: "v2", model: "gufo-a-model-variant", policy: cloudy }),
+          );
+          assert.equal(variant.headers.deploymentId, local.id);
+        }),
+      ),
+      layer({ catalogue: [local, cloudGlm], fetch: net.fetchImpl, waitMs: { high: 50 } }),
+    );
+    assert.deepEqual(
+      net.generations.map((call) => call.body.model),
+      ["gufo-a-model", "gufo-a-model-variant"],
+    );
+  });
+
+  it("cheap picks the lowest catalogue price the key may use", async () => {
+    const pricey = gufo("gufo-a", {
+      prices: { ...localQwen.prices, inputUsdPerMillion: 3, outputUsdPerMillion: 3 },
+    });
+    const net = network({});
+    const routed = await run(
+      ModelRouter.use((router) =>
+        Effect.all([
+          router.complete(work({ requestId: "a", model: "cheap", policy: cloudy })),
+          router.complete(
+            work({ requestId: "b", model: "cheap", policy: { ...cloudy, cloud: false } }),
+          ),
+        ]),
+      ),
+      layer({ catalogue: [pricey, cloudGlm, frontier], fetch: net.fetchImpl }),
+    );
+    assert.deepEqual(
+      routed.map((item) => item.headers.deploymentId),
+      [cloudGlm.id, pricey.id],
+    );
+  });
+});

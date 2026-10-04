@@ -57,9 +57,13 @@ test("rejects session ids that cannot be encoded or are oversized", () => {
   }
 });
 
-test("requires model auto", () => {
-  assert.throws(
-    () => decodeChatCompletion({ model: "gpt", messages: [{ role: "user", content: "hi" }] }),
-    InvalidInput,
-  );
+test("model is auto, cheap or a model id; the llm-router/ prefix is the same name", () => {
+  const decode = (model: unknown) =>
+    decodeChatCompletion({ model, messages: [{ role: "user", content: "hi" }] }).model;
+  assert.equal(decode("auto"), "auto");
+  assert.equal(decode("llm-router/auto"), "auto");
+  assert.equal(decode("llm-router/cheap"), "cheap");
+  assert.equal(decode("z-ai/glm-5.3-flash"), "z-ai/glm-5.3-flash");
+  for (const bad of [undefined, "", 7, "x".repeat(257)])
+    assert.throws(() => decode(bad), InvalidInput);
 });

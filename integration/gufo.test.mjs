@@ -361,7 +361,7 @@ globalThis.fetch = (input, init) => {
       assert.equal(models.status, 200);
       assert.deepEqual(
         models.body.data.map(({ id }) => id),
-        ["auto"],
+        ["auto", "cheap", "qwen3.8-flash-next-gufo", "fixture-cloud-model"],
       );
       assert.equal((await jsonCall(origin, "/v1/models")).status, 401);
       assert.equal(peer.posts.length, 0);
@@ -471,7 +471,7 @@ globalThis.fetch = (input, init) => {
       assert.equal(eligible.status, 200);
       assert.deepEqual(
         eligible.body.data.map(({ id }) => id),
-        ["auto"],
+        ["auto", "cheap", "qwen3.8-flash-next-gufo", "fixture-cloud-model"],
       );
       peer.failure = "queue_full";
       const rejected = await jsonCall(origin, "/v1/chat/completions", chat({}, report));

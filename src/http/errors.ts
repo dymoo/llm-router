@@ -60,6 +60,7 @@ const TAG_MAP: Record<string, { status: number; code: HttpErrorCode; message: st
   RateLimited: { status: 429, code: "rate_limited", message: "rate limit exceeded" },
   ConcurrentLimit: { status: 429, code: "rate_limited", message: "concurrency limit exceeded" },
   NoEligibleModel: { status: 422, code: "no_eligible_model", message: "no eligible deployment" },
+  ModelNotAllowed: { status: 403, code: "forbidden", message: "model not allowed for this key" },
   DatabaseError: { status: 500, code: "unavailable", message: "persistence unavailable" },
   PepperMismatch: { status: 500, code: "unavailable", message: "control plane unavailable" },
   SchemaVersionMismatch: { status: 500, code: "unavailable", message: "control plane unavailable" },
@@ -165,7 +166,10 @@ export function toHttpFailure(error: unknown): HttpFailure {
   }
   if (tag !== undefined && tag in TAG_MAP) {
     const mapped = TAG_MAP[tag]!;
-    const message = tag === "InvalidInput" ? messageOf(error, mapped.message) : mapped.message;
+    const message =
+      tag === "InvalidInput" || tag === "ModelNotAllowed"
+        ? messageOf(error, mapped.message)
+        : mapped.message;
     return new HttpFailure(
       mapped.status,
       mapped.code,

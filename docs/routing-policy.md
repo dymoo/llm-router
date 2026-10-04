@@ -34,6 +34,10 @@ Suggestions (every field editable): **Interactive** `{high, cloud, 120 rpm, 4 co
 
 A deployment could ever serve a request when it has the required capabilities (tools, JSON, vision) and the prompt fits its context (estimated at 2 bytes per token) and any requested `max_completion_tokens` is within its output limit. `max_completion_tokens` is a cap, not a reservation: Gufo stops a reply at the end of the context with `length`. A deployment is available now when its credential is configured and its health probe passes. A request no deployment the key may use could ever serve fails **422 `no_eligible_model`**; nothing is widened to invent a candidate.
 
+## Requested model
+
+`model: "auto"` is the policy routing below. `cheap` and a pinned model id ([clients.md](clients.md#model), [ADR 0005](adr/0005-requested-model-ids.md)) replace only the choice of deployment: the key's priority, wait budgets, reserved slots and limits apply unchanged, and the request routes through the same tier with that one deployment as the only candidate. Pinning cannot widen policy: a cloud model for a cloud-off key or a low/flex request is refused (403), never rerouted, and a pinned local model has no cloud failover, not even when Gufo is down.
+
 ## Default tier: high and medium
 
 `POST /v1/chat/completions` with `model: "auto"`:

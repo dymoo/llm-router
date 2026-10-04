@@ -103,6 +103,7 @@ export async function handleChatCompletions(
     admission = await deps.keys.recheck(admission);
     const serviceTier = serviceTierFor(admission.policy.priority, decoded.serviceTier);
     const work: RoutedWork = {
+      model: decoded.model,
       requestId: admission.requestId,
       keyId: admission.keyId,
       policy: admission.policy,

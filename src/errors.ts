@@ -40,6 +40,12 @@ export class NoEligibleModel extends Schema.TaggedError<NoEligibleModel>()(
   Message,
 ) {}
 
+/** A pinned `model` the key's policy may not use (cloud for a cloud-off or low key). */
+export class ModelNotAllowed extends Schema.TaggedError<ModelNotAllowed>()(
+  "ModelNotAllowed",
+  Message,
+) {}
+
 export class CatalogueInvalid extends Schema.TaggedError<CatalogueInvalid>()(
   "CatalogueInvalid",
   Message,
@@ -83,6 +89,7 @@ export type KeyLifecycleError =
 export type DomainError =
   | InvalidInput
   | NoEligibleModel
+  | ModelNotAllowed
   | CatalogueInvalid
   | KeyLifecycleError
   | CapacityBusy
