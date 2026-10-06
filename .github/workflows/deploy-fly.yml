@@ -104,7 +104,7 @@ jobs:
           SOURCE_SHA: ${{ steps.target.outputs.sha }}
         run: |
           set -euo pipefail
-          # WAL-aware verified copy beside the database; Litestream also keeps 7 days of PITR in B2.
+          # WAL-aware verified copy beside the database (Fly also keeps daily volume snapshots).
           flyctl ssh console -a "$APP" -C "setpriv --reuid=node --regid=node --init-groups env SQLITE_PATH=/var/lib/llm-router/control.sqlite node /opt/ops/backup.mjs /var/lib/llm-router/backups/control-pre-deploy-$SOURCE_SHA.sqlite"
 
       - name: Build, audit, and push the image
