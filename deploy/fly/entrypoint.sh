@@ -1,8 +1,8 @@
 #!/bin/bash
-# Fly machine supervisor: WireGuard, Litestream, the API server and Caddy.
+# Fly machine supervisor: WireGuard, the API server and Caddy.
 # If any of them exits, the machine exits non-zero and Fly restarts it.
 # SIGTERM/SIGINT drain the API server first (Caddy keeps carrying its streams),
-# then stop Caddy and Litestream (final sync), then WireGuard.
+# then stop Caddy, then WireGuard.
 set -euo pipefail
 data=$(dirname "$SQLITE_PATH")
 
@@ -62,17 +62,6 @@ gufo_ip=${WG_GUFO%:*}
 endpoint_loop=$!
 
 pids=()
-litestream=""
-# ponytail: Litestream is skipped only before its B2 key exists (staging); production has it.
-if [[ -n ${LITESTREAM_ACCESS_KEY_ID:-} ]]; then
-  "${as_node[@]}" litestream restore -config /etc/litestream.yml -if-db-not-exists -if-replica-exists "$SQLITE_PATH"
-  GOMEMLIMIT=32MiB "${as_node[@]}" litestream replicate -config /etc/litestream.yml &
-  litestream=$!
-  pids+=("$litestream")
-else
-  echo "WARNING: LITESTREAM_ACCESS_KEY_ID unset; control.sqlite is NOT replicated" >&2
-fi
-
 cd /app
 "${as_node[@]}" node dist/server/main.mjs &
 api=$!
@@ -87,9 +76,9 @@ stop() {
   kill -TERM "$api" 2>/dev/null || true
   local rc=0
   wait "$api" || rc=$?
-  echo "supervisor: API server exited ($rc); stopping Caddy and Litestream" >&2
-  kill -TERM "$caddy" $litestream "$endpoint_loop" 2>/dev/null || true
-  wait "$caddy" $litestream 2>/dev/null || true
+  echo "supervisor: API server exited ($rc); stopping Caddy" >&2
+  kill -TERM "$caddy" "$endpoint_loop" 2>/dev/null || true
+  wait "$caddy" 2>/dev/null || true
   wg-quick down wg0 || true
   exit "${1:-0}"
 }

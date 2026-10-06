@@ -1,6 +1,6 @@
 # Gateway only: the model runtime (Gufo) runs on the GPU host.
 # `runner` (default for Compose) is the API server plus the static console it serves itself.
-# `fly` adds WireGuard, Caddy and Litestream for the Fly.io machine (deploy/fly/).
+# `fly` adds WireGuard and Caddy for the Fly.io machine (deploy/fly/).
 
 FROM node:24.21.0-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS node
 
@@ -44,10 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /tmp
 RUN curl -fsSLo caddy.tgz https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_amd64.tar.gz \
   && echo "a7a433a1b133efc3c8d10eb0b99d52a24b5ef5c322dc77f5282182b1c0402139ab83f3a99f0c52409df77d20123fb0b523edad8a66d8f5e49136197bf61ef0e7  caddy.tgz" | sha512sum -c - \
-  && tar -xzf caddy.tgz caddy \
-  && curl -fsSLo litestream.tgz https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz \
-  && echo "cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d  litestream.tgz" | sha256sum -c - \
-  && tar -xzf litestream.tgz litestream
+  && tar -xzf caddy.tgz caddy
 
 FROM runner AS fly
 USER root
@@ -55,9 +52,8 @@ USER root
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl iproute2 wireguard-tools \
   && rm -rf /var/lib/apt/lists/*
-COPY --from=fly-tools /tmp/caddy /tmp/litestream /usr/local/bin/
+COPY --from=fly-tools /tmp/caddy /usr/local/bin/
 COPY deploy/fly/Caddyfile /etc/caddy/Caddyfile
-COPY deploy/fly/litestream.yml /etc/litestream.yml
 COPY deploy/fly/entrypoint.sh /usr/local/bin/entrypoint
 # The supervisor runs as root for wg-quick; the API server drops to `node` (entrypoint).
 CMD ["/usr/local/bin/entrypoint"]

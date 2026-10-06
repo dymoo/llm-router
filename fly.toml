@@ -23,7 +23,6 @@ swap_size_mb = 512
   METRICS_HOST = "192.168.5.4"
   AUXILIARY_CATALOG = "/etc/llm-router/auxiliary.json"
   NODE_OPTIONS = "--max-old-space-size=150"
-  LITESTREAM_PATH = "control"
   # WireGuard peer of the CCR2004 (dylans-infra terraform/mikrotik ccr2004-wireguard.tf).
   WG_ADDRESS = "192.168.5.4"
   WG_ENDPOINT = "wg.dylans.link:51821"

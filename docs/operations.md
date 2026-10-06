@@ -45,10 +45,10 @@ Sessions do not survive a restart or restore; the next turn just routes normally
 
 Production runs on Fly.io: app `llm-router`, region `lhr`, one `shared-cpu-1x` machine with 256 MB (plus 512 MB swap) and a 1 GB volume at `/var/lib/llm-router`. Never scale past one machine (see Topology). `fly.toml` and `deploy/fly/` hold the whole runtime:
 
-- `deploy/fly/entrypoint.sh` supervises four things and exits non-zero (Fly restarts the machine) if any of them dies: kernel WireGuard (`wg-quick`), Litestream, the API server (as `node`, on `127.0.0.1:3000`) and Caddy. On SIGTERM it drains the API server first, then stops Caddy and Litestream (final sync), then WireGuard. Fly's `kill_timeout` maximum is 300 s, so a deploy cuts work still running after 5 minutes.
+- `deploy/fly/entrypoint.sh` brings up kernel WireGuard (`wg-quick`), then supervises the API server (as `node`, on `127.0.0.1:3000`) and Caddy, and exits non-zero (Fly restarts the machine) if either dies. On SIGTERM it drains the API server first, then stops Caddy, then WireGuard. Fly's `kill_timeout` maximum is 300 s, so a deploy cuts work still running after 5 minutes.
 - `deploy/fly/Caddyfile`: the public site (`:8080`, Fly terminates TLS for `llm.dylans.link`) serves only `/v1/*` and `/health/ready`, everything else is 404. The private site binds the WireGuard address `192.168.5.4:3000` and serves the static console plus `/api/*`, `/v1/*` and `/health/*`; internal Caddy (`llm-router.internal.dylans.link`, Authentik-gated) is its only caller. SSE is flushed immediately, responses have no wall-clock limit (12-minute header timeout), and body caps mirror the router's.
 - WireGuard: the machine is CCR2004 peer `192.168.5.4`. The CCR firewall lets it reach only Gufo `192.168.6.62:8000`, and lets only internal Caddy reach `:3000` and the k3s nodes reach metrics `:9464` (`METRICS_HOST` binds the WireGuard address). A tunnel blackhole would make Gufo's readiness probe time out, which the router reads as "busy, still up"; so each homelab address has an `unreachable` fallback route and the entrypoint withdraws Gufo's tunnel route after three failed 10-second probes. Gufo then reads as down at once and cloud-enabled keys fail over; the route comes back on the first good probe.
-- Secrets (`fly secrets`): `API_KEY_PEPPER`, `GUFO_API_KEY`, `OPENROUTER_API_KEY`, `WG_PRIVATE_KEY`, `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY`. Import with `fly secrets import -a llm-router` from stdin, never argv.
+- Secrets (`fly secrets`): `API_KEY_PEPPER`, `GUFO_API_KEY`, `OPENROUTER_API_KEY`, `WG_PRIVATE_KEY`. Import with `fly secrets import -a llm-router` from stdin, never argv.
 - Catalogues are the owner's infra repo (`dymoo/dylans-infra` `k8s/apps/llm-router/{catalog,auxiliary}.json`), shipped as Fly `[[files]]` from a checkout at `./.infra`. **A catalogue change deploys** by merging it in dylans-infra, then `gh workflow run deploy-fly -R dymoo/llm-router -f sha=<deployed SHA>` (the current `SOURCE_COMMIT` from `fly machine list -a llm-router --json`).
 
 ### Deploys
@@ -57,20 +57,29 @@ After `ci` succeeds on `main`, `deploy-fly` (hosted runner) checks out that exac
 
 The migration gate compares the running machine's `SOURCE_COMMIT` with the new SHA. If it is unknown or `git diff --name-only PREV..SHA -- migrations/ src/db/` is non-empty, the automatic run stops; dispatch it with `allow_migration=true`, which first takes an operator backup on the volume (`/opt/ops/backup.mjs`). The gateway also takes its own verified pre-migration copy (see Backup and restore). An older binary refuses a newer schema, so never roll it back onto a migrated database. A failed deploy without a migration is rolled back by redeploying the previous image. Secrets are never synced from this repository or the image. `FLY_API_TOKEN` is an app-scoped deploy token (`fly tokens create deploy -a llm-router`); `DEPLOY_SSH_KEY` clones dylans-infra.
 
-### Litestream
+### Backups and restore
 
-`deploy/fly/litestream.yml` replicates `control.sqlite` continuously to the private B2 bucket `dylans-llm-router-litestream` under `control/`, with daily snapshots kept 7 days. Batch content is not replicated (see Storage and privacy). On boot an empty volume restores itself from the replica (`-if-db-not-exists -if-replica-exists`). To restore to a point in time, or onto a new volume:
+The volume is the only copy of `control.sqlite`. Fly snapshots it daily and keeps each snapshot 5 days (`snapshot_retention` in `fly.toml`); batch content rides along in the same snapshot. Keep `API_KEY_PEPPER` with the backups: a restored database is useless without it.
+
+After any key change (mint, rotate, revoke, policy edit), take a snapshot:
+
+```bash
+fly volumes snapshots create $(fly volumes list -a llm-router --json | jq -r '.[0].id')
+```
+
+Restore, one of:
+
+- **From a snapshot**, onto a new volume: find the snapshot with `fly volumes snapshots list <vol>`, then `fly volumes create llm_router_data --snapshot-id <vs_…> -r lhr -a llm-router`, then `fly machine stop <machine>` and `fly machine clone <machine> --attach-volume <new vol>:/var/lib/llm-router -a llm-router`. Check the clone (`/health/ready`, a known key on `/v1/models`), then `fly machine destroy <old machine>`, and keep the old volume until you are sure. The clone boots on the files as they were at the snapshot.
+- **From a `backup.mjs` copy** (the deploy workflow's pre-migration copies under `/var/lib/llm-router/backups/`, or a copy you took and kept off the volume):
 
 ```bash
 fly ssh console -a llm-router -C "touch /var/lib/llm-router/MAINTENANCE" && fly machine restart -a llm-router
-fly ssh console -a llm-router   # then, inside the machine:
-mv /var/lib/llm-router/control.sqlite* /var/lib/llm-router/.control.sqlite-litestream /var/lib/llm-router/backups/   # keep the old copy
-litestream restore -config /etc/litestream.yml [-timestamp 2026-10-04T12:00:00Z] /var/lib/llm-router/control.sqlite
-chown node:node /var/lib/llm-router/control.sqlite; rm /var/lib/llm-router/MAINTENANCE; exit
-fly machine restart -a llm-router
+# upload the file if it is not on the volume: fly ssh sftp shell -a llm-router, then put <file> /tmp/restore.sqlite
+fly ssh console -a llm-router -C "setpriv --reuid=node --regid=node --init-groups env SQLITE_PATH=/var/lib/llm-router/control.sqlite node /opt/ops/restore.mjs --replace --offline /tmp/restore.sqlite"
+fly ssh console -a llm-router -C "rm /var/lib/llm-router/MAINTENANCE" && fly machine restart -a llm-router
 ```
 
-Off Fly, the same restore runs anywhere with `LITESTREAM_ACCESS_KEY_ID`/`LITESTREAM_SECRET_ACCESS_KEY` (Keychain `llm-router-litestream-{id,secret}`) and `LITESTREAM_PATH=control`. The restored file needs the same `API_KEY_PEPPER`. A restore from a `backup.mjs` file uses the same `MAINTENANCE` hold and `node /opt/ops/restore.mjs --replace --offline <file>` as `node`.
+To take a copy off the volume: `fly ssh console -a llm-router -C "setpriv --reuid=node --regid=node --init-groups env SQLITE_PATH=/var/lib/llm-router/control.sqlite node /opt/ops/backup.mjs /var/lib/llm-router/backups/control-<date>.sqlite"`, then `fly ssh console -a llm-router -C "cat /var/lib/llm-router/backups/control-<date>.sqlite" > control-<date>.sqlite` into a mode-600 location.
 
 ### Admin API from a terminal
 
