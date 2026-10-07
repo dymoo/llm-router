@@ -28,7 +28,8 @@
 
 (router) {
 	# Body caps mirror the router's own limits (src/http/limits.ts, BATCH_MAX_JOB_BODY_BYTES,
-	# System One 8 MiB); the router still enforces them exactly.
+	# System One 8 MiB, the embeddings deployment's maxBodyBytes); the router still enforces
+	# them exactly. Embeddings bodies stream through Caddy and the router unbuffered.
 	@batches path /v1/batches /v1/batches/*
 	request_body @batches {
 		max_size 32MiB
@@ -37,7 +38,11 @@
 	request_body @systemone {
 		max_size 8MiB
 	}
-	@other not path /v1/batches /v1/batches/* /v1/systemone
+	@embeddings path /v1/embeddings
+	request_body @embeddings {
+		max_size 64MiB
+	}
+	@other not path /v1/batches /v1/batches/* /v1/systemone /v1/embeddings
 	request_body @other {
 		max_size 1MiB
 	}

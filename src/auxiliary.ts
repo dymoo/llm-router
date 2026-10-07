@@ -5,14 +5,16 @@ const Nonnegative = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0));
 
 /**
- * TypeSafe System One classification deployments: local Kev on Gufo, or cloud
- * Jev. A request names its deployment and never falls back to another one:
- * Kev and Jev give different probabilities for the same question.
+ * Non-chat deployments. `systemone`: TypeSafe System One classification, local
+ * Kev on Gufo or cloud Jev; a request names its deployment and never falls back
+ * to another one (Kev and Jev give different probabilities for the same
+ * question). `embeddings`: one local OpenAI-compatible `/embeddings` server;
+ * there is no cloud fallback (vectors from another model are incompatible).
  */
 export const AuxiliaryDeployment = Schema.Struct({
   id: Schema.NonEmptyString,
-  modality: Schema.Literals(["systemone"]),
-  transport: Schema.Literals(["gufo", "typesafe"]),
+  modality: Schema.Literals(["systemone", "embeddings"]),
+  transport: Schema.Literals(["gufo", "typesafe", "openai"]),
   location: Schema.optional(Schema.Literals(["local", "cloud"])),
   /** Environment variable holding the upstream bearer key, if it needs one. */
   credentialEnvVar: Schema.optional(Schema.NonEmptyString),
@@ -48,6 +50,17 @@ export function decodeAuxiliaryCatalogue(value: unknown): readonly AuxiliaryDepl
       throw new Error("Duplicate auxiliary model id");
     if (deployment.transport === "typesafe" && deployment.location !== "cloud")
       throw new Error("TypeSafe deployments are cloud deployments");
+    if ((deployment.modality === "embeddings") !== (deployment.transport === "openai"))
+      throw new Error("Embeddings deployments, and only they, use the openai transport");
+    // The router streams the client's body to the server unchanged, so the id the
+    // client sends is the id the server checks, and there is nothing to choose between.
+    if (
+      deployment.modality === "embeddings" &&
+      (deployment.location !== "local" ||
+        deployment.id !== deployment.modelId ||
+        deployments.filter((item) => item.modality === "embeddings").length > 1)
+    )
+      throw new Error("Embeddings need exactly one local deployment whose id is its modelId");
     if (deployment.capacity.reservedInteractiveSlots >= deployment.capacity.maxParallel)
       throw new Error("Auxiliary capacity must admit every priority");
     const capacity = JSON.stringify(deployment.capacity);
