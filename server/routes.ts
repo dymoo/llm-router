@@ -15,6 +15,7 @@ import {
   handleGetBatch,
   handleListBatches,
 } from "../src/http/batch.ts";
+import { handleEmbeddings } from "../src/http/embeddings.ts";
 import { failureResponse, jsonResponse } from "../src/http/errors.ts";
 import { handleHealth } from "../src/http/health.ts";
 import { handleChatCompletions, handleRequestStatus } from "../src/http/inference.ts";
@@ -53,6 +54,7 @@ export const routes: Record<string, Partial<Record<string, Handler>>> = {
   "/api/health": { GET: (r) => handleHealth(r, { health: { snapshot: gatewayHealth } }) },
   "/v1/models": { GET: guarded((r) => handleModels(r, getAuxiliaryDeps())) },
   "/v1/systemone": { POST: guarded((r) => handleSystemOne(r, getAuxiliaryDeps())) },
+  "/v1/embeddings": { POST: guarded((r) => handleEmbeddings(r, getAuxiliaryDeps())) },
   "/v1/chat/completions": { POST: guarded((r) => handleChatCompletions(r, getInferenceDeps())) },
   "/v1/requests/:id": { GET: (r, id) => handleRequestStatus(r, getInferenceDeps(), id) },
   "/v1/batches": {

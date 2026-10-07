@@ -78,6 +78,10 @@ The standard `reasoning_effort` (`none | minimal | low | medium | high | xhigh`;
 
 `/v1/systemone` passes each request to the named Kev or Jev deployment. Any key may use the configured deployments; priority orders its queue, which waits up to the high or medium budget.
 
+## Embeddings
+
+`/v1/embeddings` goes to the one local embeddings deployment under the same rules as System One. It never uses cloud, whatever the key's `cloud` flag: an unreachable server is 503 ([ADR 0006](adr/0006-embeddings-stream-to-one-local-deployment.md)).
+
 ## COGS and completeness
 
 Responses expose OpenRouter-compatible `usage.cost` on non-stream completions and the final streaming usage.

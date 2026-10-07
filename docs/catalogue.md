@@ -130,3 +130,27 @@ and `AUXILIARY_CATALOG=/etc/llm-router/auxiliary.json`).
   "priceVersion": "local-free"
 }
 ```
+
+## Embeddings
+
+`modality: "embeddings"` serves `POST /v1/embeddings` with `transport: "openai"`: an OpenAI-compatible server whose `endpoint` is its `/v1` base. There is exactly one, it is `local`, and its `id` equals its `modelId`, because the router streams the client's body to it unchanged ([ADR 0006](adr/0006-embeddings-stream-to-one-local-deployment.md)). `maxBodyBytes` is the body limit (match the server's), `capacity.maxParallel` the requests in flight, and readiness is its authenticated `GET /models`.
+
+```json
+{
+  "id": "embeddinggemma-2",
+  "modality": "embeddings",
+  "transport": "openai",
+  "location": "local",
+  "credentialEnvVar": "GUFO_API_KEY",
+  "modelId": "embeddinggemma-2",
+  "endpoint": "http://192.168.6.62:8100/v1",
+  "resourceId": "npu-embeddinggemma-2",
+  "capacity": { "maxParallel": 2, "reservedInteractiveSlots": 0 },
+  "maxInputTokens": 8192,
+  "maxBatchSize": 64,
+  "maxBodyBytes": 67108864,
+  "inputUsdPerMillion": 0,
+  "requestUsd": null,
+  "priceVersion": "local-free"
+}
+```

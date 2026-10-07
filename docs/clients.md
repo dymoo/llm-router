@@ -12,7 +12,7 @@ The chat API is `POST /v1/chat/completions` with a gateway key (`jrv_…`). Rout
 | `cheap`                                                                                       | The lowest catalogue price the key may use that can serve the request and is up, then as if pinned.                                                                             |
 | A model id, e.g. `qwen3.8-flash-next`, `qwen3.8-flash-next-abliterated`, `z-ai/glm-5.3-flash` | Only that model. Priority, limits and accounting still apply. A cloud model with a cloud-off or low key is **403 `forbidden`**; a pinned local model never fails over to cloud. |
 
-The `llm-router/` prefix is accepted on any value. Unknown ids are **400 `invalid`**. Kev is not a chat model: call it with `POST /v1/systemone`.
+The `llm-router/` prefix is accepted on any value. Unknown ids are **400 `invalid`**. Kev is not a chat model: call it with `POST /v1/systemone`. Embedding models are not chat models either: call them with `POST /v1/embeddings`.
 
 ## Optional routing object
 
@@ -117,3 +117,22 @@ Router Gufo chat requests send `X-Gufo-No-Queue: 1`. When every Gufo session is 
 Local chat `usage` contains integer prompt/completion/total token counts, optional nested cached/reasoning counts and `cost`, with zero upstream API cost details. Configured internal local rates determine cost; missing rates/counts produce null, not invented zero. Cloud usage is passed through.
 
 `POST /v1/systemone` takes TypeSafe System One requests unchanged, so a TypeSafe SDK works with its base URL set to the router and a router key as its API key. `model` names a System One deployment, `kev-latest` or `jev-latest` ([catalogue](catalogue.md#system-one-kev-and-jev)). Errors carry TypeSafe's `detail` beside the router's `error`; a busy Gufo returns 429 `resource_unavailable` with `Retry-After`. `GET /v1/models` lists `auto` and the configured System One deployments, with a TypeSafe `models` list.
+
+## Embeddings
+
+`POST /v1/embeddings` is OpenAI's embeddings API on `embeddinggemma-2` (EmbeddingGemma-2 on the Strix Halo NPU, [ADR 0006](adr/0006-embeddings-stream-to-one-local-deployment.md)). Any key may use it; priority orders its queue like System One.
+
+```sh
+curl https://llm.dylans.link/v1/embeddings -H "Authorization: Bearer $LLM_ROUTER_API_KEY" \
+  -H 'Content-Type: application/json' -d '{
+  "model": "embeddinggemma-2", "dimensions": 256,
+  "input": ["waterproof running shoes",
+            [{"type": "text", "text": "Trail shoe."},
+             {"type": "image_url", "image_url": {"url": "https://example.com/shoe.jpg"}},
+             {"type": "input_audio", "input_audio": {"data": "<base64 wav>", "format": "wav"}}]]}'
+```
+
+- `input`: a string, or an array of up to 64 items; an item is a string or an array of content parts (`text`, `image_url`, `input_audio`, `video_url`). The parts of one item make one embedding. Media are `https://` URLs (public hosts only) or base64 `data:` URLs; audio is base64 `input_audio`.
+- `dimensions`: 768 (default), 512, 256 or 128 (Matryoshka, re-normalized). `encoding_format`: `float` or `base64`. `prompt_name` (extension) prepends one of the model's task prompts (`SearchQuery`, `Document`, ...) to text-only items.
+- Limits: 64 MiB body with a `Content-Length` (411 without), 8,192 tokens per item, images 20 MiB, audio 25 MiB, video 50 MiB. The server's own validation messages come back as 400.
+- `model` is required and must be `embeddinggemma-2` (404 otherwise). There is **no cloud fallback**: if the server is down the answer is 503 `unavailable`. Usage reports `prompt_tokens`; the router accounts the request at cost 0.
