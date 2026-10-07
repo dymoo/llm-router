@@ -128,9 +128,17 @@ jobs:
           PREVIOUS_SHA: ${{ steps.gate.outputs.previous }}
         run: |
           set -euo pipefail
-          # The ready check in fly.toml gates the deploy; then prove the public surface.
+          # The ready check in fly.toml gates the deploy; then prove the public surface. flyctl can
+          # return before the machine has restarted onto the new image, so give readiness a minute.
+          ready() {
+            for _ in $(seq 30); do
+              [[ $(curl -s -o /dev/null -w '%{http_code}' https://llm.dylans.link/health/ready) == 200 ]] && return 0
+              sleep 2
+            done
+            return 1
+          }
           if flyctl deploy -a "$APP" --image "registry.fly.io/$APP:$SOURCE_SHA" --env "SOURCE_COMMIT=$SOURCE_SHA" --strategy immediate --wait-timeout 15m &&
-            [[ $(curl -s -o /dev/null -w '%{http_code}' https://llm.dylans.link/health/ready) == 200 ]] &&
+            ready &&
             [[ $(curl -s -o /dev/null -w '%{http_code}' https://llm.dylans.link/api/admin/keys) == 404 ]]; then
             exit 0
           fi
